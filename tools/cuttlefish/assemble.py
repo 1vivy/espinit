@@ -38,6 +38,8 @@ LZ4_FRAME_MAGICS = (b"\x04\x22\x4d\x18",)
 ARTIFACTS = ("init_boot.img", "esp.img", "payload.json")
 PATHS = (
     "stock_init_boot",
+    "avbtool",
+    "avb_key",
     "espinit",
     "espinitd",
     "busybox",
@@ -187,8 +189,10 @@ def add_pid1(ramdisk: bytes, pid1: Path, work: Path) -> bytes:
     return rebuilt
 
 
-def repack_init_boot(stock: Path, pid1: Path, work: Path) -> Path:
-    """Install /espinit in the stock initramfs, preserving header and size."""
+def repack_init_boot(
+    stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path
+) -> Path:
+    """Install /espinit and re-sign the fixed-size Cuttlefish init_boot."""
     original = stock.read_bytes()
     if original[:8] != BOOT_MAGIC or len(original) < BOOT_HEADER_SIZE:
         raise ValueError("stock init_boot is not an Android boot image")
@@ -229,13 +233,31 @@ def repack_init_boot(stock: Path, pid1: Path, work: Path) -> Path:
     before[12:16] = after[12:16] = b"\0" * 4  # ramdisk size is the only intended change
     if before != after:
         raise ValueError("mkbootimg changed stock header or version fields")
-    if len(rebuilt) > len(original):
-        raise ValueError("the new init_boot exceeds the fixed stock partition size")
+    if len(rebuilt) >= len(original):
+        raise ValueError("the new init_boot leaves no room for its AVB footer")
 
-    # The stock AVB footer cannot authenticate changed content, so the payload is
-    # published unsigned at the exact stock partition size; the lab owns
-    # verification state for this lane.
-    image.write_bytes(rebuilt + b"\0" * (len(original) - len(rebuilt)))
+    # Cuttlefish U-Boot verifies init_boot directly. Require the supplied key
+    # to authenticate the stock image before using it to sign the replacement.
+    run([avbtool, "verify_image", "--image", stock, "--key", avb_key])
+    run(
+        [
+            avbtool,
+            "add_hash_footer",
+            "--image",
+            image,
+            "--partition_name",
+            "init_boot",
+            "--partition_size",
+            str(len(original)),
+            "--algorithm",
+            "SHA256_RSA4096",
+            "--key",
+            avb_key,
+        ]
+    )
+    run([avbtool, "verify_image", "--image", image, "--key", avb_key])
+    if image.stat().st_size != len(original):
+        raise ValueError("signed init_boot does not match the stock partition size")
 
     return image
 
@@ -311,9 +333,17 @@ def assemble(arguments: argparse.Namespace) -> None:
     if any(source.parent == output.resolve() for source in sources.values()):
         raise ValueError("no input may live inside the output directory")
 
-    with tempfile.TemporaryDirectory(prefix=".assemble-", dir=output) as directory:
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output.name}.assemble-", dir=output.parent
+    ) as directory:
         work = Path(directory)
-        init_boot = repack_init_boot(sources["stock_init_boot"], sources["espinit"], work)
+        init_boot = repack_init_boot(
+            sources["stock_init_boot"],
+            sources["espinit"],
+            sources["avbtool"],
+            sources["avb_key"],
+            work,
+        )
         esp = build_esp(sources, manifest, rom, work, arguments.esp_size_mib)
 
         images: dict[str, dict[str, object]] = {}

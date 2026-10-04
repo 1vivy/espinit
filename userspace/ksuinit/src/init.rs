@@ -372,7 +372,6 @@ fn mount_minimal() -> Result<Vec<&'static str>, Failure> {
     for (filesystem, mountpoint, error) in [
         ("proc", "/proc", "ProcMountFailed"),
         ("sysfs", "/sys", "SysMountFailed"),
-        ("devtmpfs", "/dev", "DevMountFailed"),
     ] {
         if !esp::is_mounted(mountpoint)
             .map_err(|detail| Failure::new(Stage::Storage, error, detail))?
@@ -381,6 +380,42 @@ fn mount_minimal() -> Result<Vec<&'static str>, Failure> {
                 .map_err(|detail| Failure::new(Stage::Storage, error, detail))?;
             owned.push(mountpoint);
         }
+    }
+
+    if !esp::is_mounted("/dev")
+        .map_err(|detail| Failure::new(Stage::Storage, "DevMountFailed", detail))?
+    {
+        if let Err(devtmpfs_error) = esp::mount_kernel_fs("devtmpfs", "/dev") {
+            esp::mount_kernel_fs("tmpfs", "/dev").map_err(|tmpfs_error| {
+                Failure::new(
+                    Stage::Storage,
+                    "DevMountFailed",
+                    format!("cannot mount devtmpfs ({devtmpfs_error}) or tmpfs ({tmpfs_error})"),
+                )
+            })?;
+            log::warn!("devtmpfs is unavailable; using an empty tmpfs and explicit device nodes");
+        }
+        owned.push("/dev");
+    }
+
+    for (path, major, minor) in [("/dev/kmsg", 1, 11), ("/dev/null", 1, 3)] {
+        if rustix::fs::access(path, rustix::fs::Access::EXISTS).is_ok() {
+            continue;
+        }
+        mknodat(
+            CWD,
+            path,
+            FileType::CharacterDevice,
+            0o600.into(),
+            makedev(major, minor),
+        )
+        .map_err(|error| {
+            Failure::new(
+                Stage::Storage,
+                "DevNodeCreateFailed",
+                format!("cannot create {path}: {error}"),
+            )
+        })?;
     }
 
     Ok(owned)

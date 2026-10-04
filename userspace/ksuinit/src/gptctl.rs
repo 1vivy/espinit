@@ -11,11 +11,11 @@
 //! are CLOEXEC plus autoclear so they survive until Android opens them and are
 //! torn down afterwards.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 
-use rustix::fs::{major, minor};
+use rustix::fs::{CWD, FileType, major, makedev, minor, mknodat};
 use syscalls::{Sysno, syscall};
 
 use crate::block::ResolvedBackend;
@@ -135,8 +135,53 @@ pub fn apply_payload(payload: &GptApply) -> Result<GptQuery, Failure> {
     Ok(query)
 }
 
+fn misc_minor(contents: &str, name: &str) -> Option<u32> {
+    contents.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let minor = fields.next()?.parse().ok()?;
+        let candidate = fields.next()?;
+        (candidate == name && fields.next().is_none()).then_some(minor)
+    })
+}
+
+fn ensure_control_node() -> Result<(), Failure> {
+    if fs::symlink_metadata(GPT_CONTROL).is_ok() {
+        return Ok(());
+    }
+
+    let misc = fs::read_to_string("/proc/misc").map_err(|error| {
+        Failure::new(
+            Stage::Projection,
+            "GptControlUnavailable",
+            format!("cannot read /proc/misc: {error}"),
+        )
+    })?;
+    let minor = misc_minor(&misc, "gptctl").ok_or_else(|| {
+        Failure::new(
+            Stage::Projection,
+            "GptControlUnavailable",
+            "gptctl is not registered in /proc/misc",
+        )
+    })?;
+    mknodat(
+        CWD,
+        GPT_CONTROL,
+        FileType::CharacterDevice,
+        0o600.into(),
+        makedev(10, minor),
+    )
+    .map_err(|error| {
+        Failure::new(
+            Stage::Projection,
+            "GptControlUnavailable",
+            format!("cannot create {GPT_CONTROL}: {error}"),
+        )
+    })
+}
+
 /// Open the projection control node.
 fn control() -> Result<File, Failure> {
+    ensure_control_node()?;
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -297,6 +342,14 @@ mod tests {
         for device in &apply.hide[2..] {
             assert_eq!(*device, GptDevice::default());
         }
+    }
+
+    #[test]
+    fn misc_minor_requires_an_exact_two_field_name() {
+        let contents = "  1 psaux\n242 gptctl\n243 gptctl-extra\n";
+        assert_eq!(misc_minor(contents, "gptctl"), Some(242));
+        assert_eq!(misc_minor(contents, "missing"), None);
+        assert_eq!(misc_minor("242 gptctl trailing\n", "gptctl"), None);
     }
 
     #[test]
