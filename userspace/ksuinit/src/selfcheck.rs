@@ -74,43 +74,50 @@ pub fn check_core(generation: &str) -> Result<(), Failure> {
 
 /// Verify one later module through its `generation`/`ready` sysfs parameters.
 pub fn check_module(name: &str, generation: &str) -> Result<(), Failure> {
-    check_module_with(name, generation, Stage::ModuleCheck, "ModuleNotReady", None)
+    let base = module_base(name)?;
+    check_generation_at(&base, name, generation)?;
+    check_readiness_at(&base, name, Stage::ModuleCheck, "ModuleNotReady", None)?;
+    log::info!("Module {name} generation {generation} is ready");
+    Ok(())
 }
 
-/// Verify the projection module; an unready projection is its own failure
-/// stage because a partially published view must never reach Android. The
-/// requested access-mode counts are carried into readiness diagnostics.
-pub fn check_projection(
-    name: &str,
-    generation: &str,
-    modes: PartitionModes,
-) -> Result<(), Failure> {
-    check_module_with(
+/// Verify a module's identity before a consequential activation step. `gpt`
+/// uses this immediately after load and before APPLY can publish any view.
+pub fn check_module_generation(name: &str, generation: &str) -> Result<(), Failure> {
+    let base = module_base(name)?;
+    check_generation_at(&base, name, generation)?;
+    log::info!("Module {name} generation {generation} matches the payload");
+    Ok(())
+}
+
+/// Verify projection readiness after APPLY. Generation was already checked
+/// before APPLY, so this check observes only activation state.
+pub fn check_projection_ready(name: &str, modes: PartitionModes) -> Result<(), Failure> {
+    let base = module_base(name)?;
+    check_readiness_at(
+        &base,
         name,
-        generation,
         Stage::Projection,
         "ProjectionNotReady",
         Some(modes),
-    )
+    )?;
+    log::info!("Projection module {name} is ready");
+    Ok(())
 }
 
-fn check_module_with(
-    name: &str,
-    generation: &str,
-    readiness_stage: Stage,
-    readiness_error: &'static str,
-    modes: Option<PartitionModes>,
-) -> Result<(), Failure> {
-    let base = loader::module_sysfs_path(name).ok_or_else(|| {
+fn module_base(name: &str) -> Result<std::path::PathBuf, Failure> {
+    loader::module_sysfs_path(name).ok_or_else(|| {
         Failure::at(
             Stage::ModuleCheck,
             Some(name),
             "ModuleSelfCheckMissing",
             format!("/sys/module/{name} is absent after loading"),
         )
-    })?;
+    })
+}
 
-    let reported = read_parameter(&base, "generation", name)?;
+fn check_generation_at(base: &Path, name: &str, generation: &str) -> Result<(), Failure> {
+    let reported = read_parameter(base, "generation", name)?;
 
     if reported != generation {
         return Err(Failure::at(
@@ -121,7 +128,17 @@ fn check_module_with(
         ));
     }
 
-    let ready = read_parameter(&base, "ready", name)?;
+    Ok(())
+}
+
+fn check_readiness_at(
+    base: &Path,
+    name: &str,
+    readiness_stage: Stage,
+    readiness_error: &'static str,
+    modes: Option<PartitionModes>,
+) -> Result<(), Failure> {
+    let ready = read_parameter(base, "ready", name)?;
 
     if !is_ready(&ready) {
         let requested = match modes {
@@ -137,7 +154,6 @@ fn check_module_with(
         ));
     }
 
-    log::info!("Module {name} generation {generation} is ready");
     Ok(())
 }
 

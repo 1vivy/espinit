@@ -61,6 +61,12 @@ impl Mount {
         &self.path
     }
 
+    /// Physical device number. The projection hide set excludes this mounted
+    /// ESP so a post-APPLY failure can still remount it for its receipt.
+    pub fn device(&self) -> (u32, u32) {
+        (self.major, self.minor)
+    }
+
     /// Whether the ESP has already been detached from the mount namespace.
     pub fn is_detached(&self) -> bool {
         self.detached

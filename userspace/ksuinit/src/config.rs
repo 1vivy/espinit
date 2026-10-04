@@ -19,11 +19,15 @@ use crate::receipt::{Failure, Stage};
 /// Only schema version 1 is accepted by both files.
 pub const SCHEMA_VERSION: u64 = 1;
 
-/// Manifest generation limit, per the layout specification.
-pub const MAX_GENERATION_BYTES: usize = 64;
+/// Manifest generation limit, matching every compiled payload component.
+pub const MAX_GENERATION_BYTES: usize = 63;
 
-/// Logical module and projected partition name limit.
+/// Logical module name limit.
 pub const MAX_NAME_BYTES: usize = 64;
+
+/// Projected partition label limit: the `gpt` ABI carries this many label
+/// bytes plus the terminating NUL, so a longer name could never be projected.
+pub const MAX_PARTITION_NAME_BYTES: usize = crate::gpt_uapi::GPT_LABEL_BYTES;
 
 /// Kernel module parameter string limit enforced by the kernel loader.
 pub const MAX_PARAMS_BYTES: usize = 1024;
@@ -283,6 +287,16 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
         .with_component("rom.toml"));
     }
 
+    if rom.partitions.len() > crate::gpt_uapi::GPT_MAX_PROJECTIONS {
+        return Err(ConfigError::new(
+            "RomPartitionsTooMany",
+            format!(
+                "at most {} projections are supported",
+                crate::gpt_uapi::GPT_MAX_PROJECTIONS
+            ),
+        ));
+    }
+
     let mut names: Vec<&str> = Vec::with_capacity(rom.partitions.len());
 
     for (index, partition) in rom.partitions.iter().enumerate() {
@@ -300,14 +314,32 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
 
         validate_backend_path(&partition.backend)
             .map_err(|error| error.with_component(partition.name.clone()))?;
+
+        if block::is_esp_file(&partition.backend) && !partition.read_only {
+            return Err(ConfigError::at(
+                "RomEspFileWritable",
+                partition.name.clone(),
+                "ESP-file projections must be read-only",
+            ));
+        }
     }
 
     Ok(())
 }
 
-/// Enforce the managed-ROM requirement that `gpt` follows the core module.
+/// Enforce the managed-ROM module rules: a managed ROM requires `gpt` after the
+/// core module, and an unmanaged ROM must not load `gpt` at all, because an
+/// unmanaged manifest has no projection contract to apply.
 pub fn validate_managed(manifest: &Manifest, rom: &RomConfig) -> Result<(), ConfigError> {
     if !rom.managed {
+        if manifest.modules.iter().any(|module| module.name == "gpt") {
+            return Err(ConfigError::at(
+                "ManifestUnmanagedGpt",
+                "gpt",
+                "an unmanaged ROM must not load gpt",
+            ));
+        }
+
         return Ok(());
     }
 
@@ -329,18 +361,26 @@ pub fn validate_managed(manifest: &Manifest, rom: &RomConfig) -> Result<(), Conf
     }
 }
 
-/// Resolve each projection backend before any projection exists: a documented
-/// `/dev/block/by-name/<PARTNAME>` backend is resolved from sysfs to an owned
-/// stable block node, an existing `/dev/loopN` is accepted as it is, and the
-/// resolved device must be a partition or loop device that no other projection
-/// uses. The resolved nodes are retained on the configuration and returned for
-/// the later `gpt` APPLY; the logical `partitions` stay untouched.
+/// Resolve each projection backend, immediately before the `gpt` entry and
+/// after every earlier ordered module and its scripts have run, so a logical
+/// volume, mapper device, loop or ESP file published by them is visible. A
+/// `/dev/block/by-name/<PARTNAME>` or `/dev/mapper/<name>` backend is resolved
+/// from sysfs to an owned stable block node, an existing `/dev/loopN` is
+/// accepted as it is, and an `esp-file:<relative-path>` backend is attached
+/// read-only to a fresh loop device below the read-only ESP mount. Each
+/// accepted form establishes its own allowed device kind, so a whole logical
+/// unit, a writable ESP file and every other path are rejected. The resolved
+/// set is retained on the configuration and returned for the `gpt` APPLY, which
+/// keeps every loop guard open, while the logical `partitions` stay untouched.
 ///
 /// Only an absent device or sysfs entry is classified pending by
 /// [`ConfigError::is_pending`]; the caller may retry that within a bounded
 /// window. Ambiguous, malformed, unsupported and duplicated backends fail
 /// immediately, and the complete resolved set is published at once.
-pub fn validate_backends(rom: &RomConfig) -> Result<&[ResolvedBackend], ConfigError> {
+pub fn validate_backends<'a>(
+    rom: &'a RomConfig,
+    esp_mount: &str,
+) -> Result<&'a [ResolvedBackend], ConfigError> {
     if let Some(published) = rom.resolved.get() {
         return Ok(published.as_slice());
     }
@@ -349,19 +389,8 @@ pub fn validate_backends(rom: &RomConfig) -> Result<&[ResolvedBackend], ConfigEr
     let mut resolved = Vec::with_capacity(rom.partitions.len());
 
     for partition in &rom.partitions {
-        let backend =
-            block::resolve(&partition.backend).map_err(|error| backend_error(partition, &error))?;
-
-        if !is_partition_or_loop(backend.rdev) {
-            return Err(ConfigError::at(
-                "RomBackendWholeDevice",
-                partition.name.clone(),
-                format!(
-                    "{} is a whole block device, not a partition or loop device",
-                    partition.backend
-                ),
-            ));
-        }
+        let backend = block::resolve(&partition.backend, esp_mount)
+            .map_err(|error| backend_error(partition, &error))?;
 
         validate_backend_identity(&mut backends, &backend, partition)?;
 
@@ -412,22 +441,8 @@ fn validate_backend_identity(
     Ok(())
 }
 
-/// Whether the device behind `rdev` is a partition or a loop device, using
-/// sysfs rather than a device-name allowlist.
-fn is_partition_or_loop(rdev: u64) -> bool {
-    let major = rustix::fs::major(rdev);
-    let minor = rustix::fs::minor(rdev);
-    let directory = format!("/sys/dev/block/{major}:{minor}");
-
-    if std::path::Path::new(&directory).join("partition").exists() {
-        return true;
-    }
-
-    std::path::Path::new(&directory).join("loop").exists()
-}
-
 /// Generation identity: nonempty ASCII letters/digits plus `.`, `_`, `-`,
-/// at most 64 bytes. It identifies one coordinated payload, not a kernel
+/// at most 63 bytes. It identifies one coordinated payload, not a kernel
 /// version, and is compared by exact byte equality everywhere.
 pub fn validate_generation(generation: &str) -> Result<(), ConfigError> {
     if generation.is_empty() {
@@ -504,11 +519,11 @@ pub fn validate_partition_name(name: &str) -> Result<(), ConfigError> {
         ));
     }
 
-    if name.len() > MAX_NAME_BYTES {
+    if name.len() > MAX_PARTITION_NAME_BYTES {
         return Err(ConfigError::new(
             "PartitionNameTooLong",
             format!(
-                "projected name is {} bytes, limit {MAX_NAME_BYTES}",
+                "projected name is {} bytes, limit {MAX_PARTITION_NAME_BYTES}",
                 name.len()
             ),
         ));
@@ -574,13 +589,14 @@ pub fn validate_relative_path(path: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Absolute backend path in one of the two documented forms:
-/// `/dev/block/by-name/<PARTNAME>` or an existing `/dev/loopN`. Anything else is
-/// rejected here, including whole logical units, offsets, arbitrary paths, and
-/// symlink or traversal spellings; [`validate_backends`] resolves the device
-/// itself before any projection exists.
+/// Absolute backend path in one of the four documented forms:
+/// `/dev/block/by-name/<PARTNAME>`, `/dev/mapper/<name>`, an existing
+/// `/dev/loopN`, or `esp-file:<relative-path>`. Anything else is rejected here,
+/// including whole logical units, offsets, arbitrary paths, and symlink or
+/// traversal spellings; [`validate_backends`] resolves the device itself
+/// immediately before the `gpt` entry.
 pub fn validate_backend_path(path: &str) -> Result<(), ConfigError> {
-    if !path.starts_with('/') {
+    if !path.starts_with('/') && !block::is_esp_file(path) {
         return Err(ConfigError::new(
             "BackendNotAbsolute",
             format!("{path} is not an absolute block-device path"),
@@ -604,7 +620,7 @@ pub fn validate_backend_path(path: &str) -> Result<(), ConfigError> {
     if !block::is_supported(path) {
         return Err(ConfigError::new(
             "BackendUnsupportedLocation",
-            format!("{path} is not a /dev/block/by-name/<PARTNAME> or /dev/loopN backend"),
+            format!("{path} is not a supported partition, mapper, loop, or ESP-file backend"),
         ));
     }
 
@@ -791,7 +807,20 @@ read_only = true
         .unwrap();
         assert!(!unmanaged.managed);
         assert!(unmanaged.partitions.is_empty());
-        validate_managed(&manifest, &unmanaged).unwrap();
+
+        // An unmanaged manifest must not load `gpt`: there is no projection
+        // contract to apply, so the entry is rejected instead of skipped.
+        let error = validate_managed(&parse_manifest(MANIFEST).unwrap(), &unmanaged).unwrap_err();
+        assert_eq!(error.error, "ManifestUnmanagedGpt");
+        assert_eq!(error.component.as_deref(), Some("gpt"));
+
+        // The same unmanaged ROM with an unmanaged manifest is valid.
+        let plain = parse_manifest(&MANIFEST.replace(
+            "\n[[modules]]\nname = \"gpt\"\npath = \"modules/gpt.ko\"\nparams = \"debug=0\"\n",
+            "",
+        ))
+        .unwrap();
+        validate_managed(&plain, &unmanaged).unwrap();
     }
 
     #[test]
@@ -829,14 +858,17 @@ read_only = true
         let system = ResolvedBackend {
             path: "/dev/espinit/backends/sda1".into(),
             rdev: 8,
+            guard: None,
         };
         let alias = ResolvedBackend {
             path: "/dev/espinit/backends/sdb1".into(),
             rdev: 8,
+            guard: None,
         };
         let distinct = ResolvedBackend {
             path: "/dev/espinit/backends/sdc1".into(),
             rdev: 9,
+            guard: None,
         };
         let mut seen = HashMap::new();
         validate_backend_identity(&mut seen, &system, first).unwrap();
@@ -852,7 +884,12 @@ read_only = true
 
     #[test]
     fn rom_backends_accept_documented_forms_and_reject_other_devices() {
-        for backend in ["/dev/block/by-name/system", "/dev/loop12"] {
+        for backend in [
+            "/dev/block/by-name/system",
+            "/dev/loop12",
+            "/dev/mapper/lv-system",
+            "esp-file:espinit/backing.img",
+        ] {
             let text = ROM.replace("/dev/block/by-name/system", backend);
             parse_rom(&text, "release-1").unwrap();
         }
@@ -865,15 +902,56 @@ read_only = true
                 "/dev/block/by-name/system/extra",
                 "BackendUnsupportedLocation",
             ),
-            ("/dev/mapper/vendor", "BackendUnsupportedLocation"),
+            ("/dev/mapper/", "BackendUnsupportedLocation"),
+            ("/dev/mapper/a/b", "BackendUnsupportedLocation"),
             ("/dev/loop", "BackendUnsupportedLocation"),
+            ("esp-file:", "BackendUnsupportedLocation"),
+            ("esp-file:/absolute", "BackendUnsupportedLocation"),
+            ("esp-file:../escape", "BackendUnsupportedLocation"),
+            ("esp-file:a//b", "BackendUnsupportedLocation"),
             ("relative/backend", "BackendNotAbsolute"),
+            ("file:espinit/backing.img", "BackendNotAbsolute"),
         ] {
             let text = ROM.replace("/dev/block/by-name/system", backend);
             let rejection = parse_rom(&text, "release-1").unwrap_err();
             assert_eq!(rejection.error, error, "{backend}");
             assert_eq!(rejection.component.as_deref(), Some("system"), "{backend}");
         }
+    }
+
+    #[test]
+    fn esp_file_backends_must_be_read_only() {
+        let writable = ROM
+            .replace("/dev/block/by-name/system", "esp-file:espinit/backing.img")
+            .replace("read_only = true", "read_only = false");
+
+        let error = parse_rom(&writable, "release-1").unwrap_err();
+        assert_eq!(error.error, "RomEspFileWritable");
+        assert_eq!(error.component.as_deref(), Some("system"));
+    }
+
+    #[test]
+    fn projections_are_bounded_by_the_gpt_abi() {
+        let prefix = ROM.split("[[partitions]]").next().unwrap();
+        let mut rom = prefix.to_owned();
+
+        for index in 0..crate::gpt_uapi::GPT_MAX_PROJECTIONS {
+            rom.push_str(&format!(
+                "[[partitions]]\nname=\"p{index}\"\nbackend=\"/dev/loop{index}\"\nread_only=true\n"
+            ));
+        }
+
+        parse_rom(&rom, "release-1").unwrap();
+
+        rom.push_str("[[partitions]]\nname=\"extra\"\nbackend=\"/dev/loop200\"\nread_only=true\n");
+
+        let error = parse_rom(&rom, "release-1").unwrap_err();
+        assert_eq!(error.error, "RomPartitionsTooMany");
+        assert!(
+            error
+                .detail
+                .contains(&crate::gpt_uapi::GPT_MAX_PROJECTIONS.to_string())
+        );
     }
 
     #[test]
@@ -919,7 +997,7 @@ read_only = true
             );
         }
         validate_module_name(&"m".repeat(MAX_NAME_BYTES)).unwrap();
-        validate_partition_name(&"p".repeat(MAX_NAME_BYTES)).unwrap();
+        validate_partition_name(&"p".repeat(MAX_PARTITION_NAME_BYTES)).unwrap();
         assert_eq!(
             validate_module_name(&"m".repeat(MAX_NAME_BYTES + 1))
                 .unwrap_err()
@@ -927,7 +1005,7 @@ read_only = true
             "ModuleNameTooLong"
         );
         assert_eq!(
-            validate_partition_name(&"p".repeat(MAX_NAME_BYTES + 1))
+            validate_partition_name(&"p".repeat(MAX_PARTITION_NAME_BYTES + 1))
                 .unwrap_err()
                 .error,
             "PartitionNameTooLong"
@@ -965,6 +1043,8 @@ read_only = true
         );
         validate_backend_path("/dev/loop0").unwrap();
         validate_backend_path("/dev/loop127").unwrap();
+        validate_backend_path("/dev/mapper/lv-system").unwrap();
+        validate_backend_path("esp-file:espinit/backing.img").unwrap();
         for path in [
             "/dev/block/sda",
             "/dev/block/by-name/",
@@ -972,10 +1052,19 @@ read_only = true
             "/dev/block/by-name/..",
             "/dev/block/by-name/../escape",
             "/dev/block/by-name/system/extra",
+            "/dev/mapper/",
+            "/dev/mapper/a/b",
+            "/dev/mapper/..",
             "/dev/loop",
             "/dev/loop0x",
             "/dev/loopx",
             "/dev/block/by-name",
+            "esp-file:",
+            "esp-file:/absolute",
+            "esp-file:../escape",
+            "esp-file:a//b",
+            "esp-file:a/",
+            "esp-file:.",
         ] {
             assert_eq!(
                 validate_backend_path(path).unwrap_err().error,
@@ -1086,7 +1175,9 @@ read_only = true
             "named backend is not a partition",
             "loop backend is not a block device",
             "sysfs device number is malformed",
-            "backend must be /dev/block/by-name/<PARTNAME> or /dev/loopN",
+            "backend must be /dev/block/by-name/<PARTNAME>, /dev/mapper/<name>, /dev/loopN, or esp-file:<relative-path>",
+            "ESP file backend is sparse",
+            "multiple device-mapper devices share the backend name",
         ] {
             for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::PermissionDenied] {
                 assert!(
