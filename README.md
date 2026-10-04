@@ -39,7 +39,7 @@ llvm-objcopy --add-section __versions=/tmp/__versions.empty \
 
 `check_symbol` never adds, rewrites, or relaxes the section itself; a module lacking the empty section, or one carrying a populated `__versions`, is rejected rather than repaired.
 
-The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--espinit-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. That lane is packaging and boot plumbing only: it is unsigned and proves no boot by itself.
+The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--espinit-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. The assembler re-signs the modified `init_boot` with the explicitly supplied key after proving that key verifies the pinned stock image. That lane is packaging and boot plumbing only; it proves no boot by itself.
 
 ## Exact ESP and runtime layout
 

@@ -796,6 +796,44 @@ static int dm_require(struct dm *dm, unsigned long command, const char *what)
 		     header->version[0], header->version[1], header->version[2]);
 }
 
+static int ensure_dm_control(void)
+{
+	FILE *misc;
+	char name[NAME_LIMIT];
+	unsigned device_minor;
+	bool found = false;
+
+	misc = fopen("/proc/misc", "re");
+	if (misc == NULL)
+		return failf("cannot read /proc/misc: %s", strerror(errno));
+
+	while (fscanf(misc, "%u %63s", &device_minor, name) == 2) {
+		if (strcmp(name, "device-mapper") == 0) {
+			found = true;
+			break;
+		}
+	}
+	if (ferror(misc)) {
+		int error = errno;
+
+		fclose(misc);
+		return failf("cannot parse /proc/misc: %s", strerror(error));
+	}
+	fclose(misc);
+
+	if (!found)
+		return 0;
+	if (mkdir("/dev/mapper", 0755) < 0 && errno != EEXIST)
+		return failf("cannot create /dev/mapper: %s", strerror(errno));
+	if (mknod("/dev/mapper/control", S_IFCHR | 0600,
+		  makedev(10, device_minor)) < 0 &&
+	    errno != EEXIST)
+		return failf("cannot create /dev/mapper/control: %s",
+			     strerror(errno));
+
+	return 0;
+}
+
 static int dm_open(struct dm *dm)
 {
 	unsigned elapsed = 0;
@@ -814,8 +852,10 @@ static int dm_open(struct dm *dm)
 		if (errno != ENOENT)
 			return failf("cannot open /dev/mapper/control: %s",
 				     strerror(errno));
+		if (ensure_dm_control() < 0)
+			return -1;
 		if (elapsed >= ENUM_TIMEOUT_MS)
-			return failf("/dev/mapper/control did not appear within %u ms; devtmpfs or dm-mod is missing",
+			return failf("/dev/mapper/control did not appear within %u ms; device-mapper is missing",
 				     ENUM_TIMEOUT_MS);
 
 		sleep_ms(ENUM_INTERVAL_MS);

@@ -24,7 +24,8 @@ Required inputs, all explicit paths (`--flag` above each file):
 
 | Flag | Meaning |
 | --- | --- |
-| `--stock-init-boot` | stock (unsigned) Cuttlefish `init_boot.img`; its size is preserved |
+| `--stock-init-boot` | stock AVB-signed Cuttlefish `init_boot.img`; its size is preserved |
+| `--avbtool`, `--avb-key` | pinned AVB tool and RSA-4096 key that verify the stock image and sign its replacement |
 | `--espinit` | static PID-1 binary, installed as `/espinit` in the initramfs |
 | `--espinitd` | daemon binary, installed as `espinit/bin/espinitd` (install source, not the executed path) |
 | `--busybox` | static interpreter for ESP scripts, `espinit/bin/busybox` |
@@ -38,6 +39,8 @@ Required inputs, all explicit paths (`--flag` above each file):
 ```sh
 tools/cuttlefish/assemble.py \
     --stock-init-boot  <pinned stock init_boot.img> \
+    --avbtool          <pinned avbtool> \
+    --avb-key          <matching Cuttlefish AVB key> \
     --espinit          <espinit PID-1> \
     --espinitd         <espinitd> \
     --busybox          <static busybox> \
@@ -51,10 +54,11 @@ tools/cuttlefish/assemble.py \
 ```
 
 Host tools used, each through a checked subprocess argument list (never a
-shell): `unpack_bootimg`, `mkbootimg`, `cpio`, `gzip`/`lz4`, `mformat`, `mmd`,
-`mcopy`. Temporary files stay inside the output directory and are removed on
-exit; a failed run leaves no partial artifact because the three files are moved
-into place only after every step succeeded.
+shell): the supplied `avbtool`, plus `unpack_bootimg`, `mkbootimg`, `cpio`,
+`gzip`/`lz4`, `mformat`, `mmd`, and `mcopy`. Temporary files are created beside
+the output directory for same-filesystem publication and removed on exit; a
+failed run leaves no partial artifact because the three files are moved into
+place only after every step succeeded.
 
 ### Output contract
 
@@ -62,11 +66,12 @@ into place only after every step succeeded.
 root member `/espinit` (mode 0755). The ramdisk keeps its original compression
 (legacy LZ4, gzip or uncompressed are preserved; a frame-format LZ4 ramdisk is
 refused, because the lane kernel's `lib/decompress_unlz4.c` accepts only the
-legacy magic) and every other member byte-for-byte; `kernel_size`,
-`header_version`, `header_size`, `cmdline`, `os_version`/`os_patch_level` and
-the page layout are unchanged, and the file is padded back to the exact stock
-length. The stock AVB footer cannot authenticate changed content and is not
-reproduced: this lane is unsigned and AVB state is the lab's concern.
+legacy magic) and every stock archive byte-for-byte, followed by the `/espinit`
+archive. `kernel_size`, `header_version`, `header_size`, `cmdline`,
+`os_version`/`os_patch_level` and the page layout are unchanged. The supplied
+AVB key must verify the stock image; the replacement receives a
+`SHA256_RSA4096` `init_boot` hash footer, is verified with the same key, and is
+padded by `avbtool` to the exact stock partition size.
 
 `esp.img` - a FAT image (VFAT long names, volume label `ESPINIT`) containing
 exactly:
@@ -160,5 +165,5 @@ handoff.
 - The default `--esp-size-mib=64` is only a default: the lab lane regenerates the
   `cuttlefish_example_custom` GPT entry from the emitted file size, so pass the
   size the payload needs.
-- The stock image must be an unsigned, kernel-free `init_boot` with header v3 or
-  v4; anything else is refused rather than guessed.
+- The stock image must be an AVB-signed, kernel-free `init_boot` with header v3
+  or v4; the supplied RSA-4096 key must verify it.
