@@ -2,6 +2,8 @@ pub mod block;
 pub mod config;
 pub mod esp;
 pub mod gpt;
+pub mod gpt_uapi;
+pub mod gptctl;
 pub mod handoff;
 pub mod init;
 pub mod loader;

@@ -19,22 +19,28 @@ rom = "rom.toml"
 
 # Modules load strictly in document order. The first entry must be the core
 # module, named `espinit`. A managed ROM additionally requires `gpt` after it
-# and before real-init handoff. Each module must pass its readiness self-check
-# before the next entry is processed.
-# Retaining the core's inherited lifecycle is intentional boot-substrate reuse,
-# not KernelSU Manager or root compatibility. For schema v1, gpt.ko accepts
-# whole block-device backends only. Attach preallocated ESP regular files using
-# standard loop devices before gpt APPLY; supply the resulting block paths,
-# not file paths or an extent/FIEMAP ABI, and retain the loop attachments.
+# and before real-init handoff; an unmanaged manifest that lists `gpt` is
+# rejected, because there is no projection contract to apply. Each module must
+# pass its readiness self-check before the next entry is processed.
+#
+# Entries ordered before `gpt` run their own early/recovery scripts first; a
+# module or script that activates a logical volume (e.g. `dmsetup`) therefore
+# runs before `gpt` resolves its backends, which happens immediately before the
+# `gpt` entry. Backends are whole block devices: a by-name partition, an exact
+# `/dev/mapper/<name>`, an existing `/dev/loopN`, or a read-only
+# `esp-file:<relative-path>` on the mounted read-only ESP that the loader
+# attaches itself. Retaining the core's inherited lifecycle is intentional
+# boot-substrate reuse, not KernelSU Manager or root compatibility.
 
 [[modules]]
 name = "espinit"
 path = "modules/espinit.ko"
 params = ""
 
-# Required only when rom.toml selects `managed = true`; omit this entry for an
-# unmanaged configuration. `params` is passed to the kernel as module
-# parameters and is never evaluated by a shell. Empty string = no parameters.
+# Required only when rom.toml selects `managed = true`. `params` is passed to
+# the kernel as module parameters and is never evaluated by a shell. Empty
+# string = no parameters. The loader applies the complete projection and
+# requires an exact QUERY match before the gpt early/recovery script runs.
 [[modules]]
 name = "gpt"
 path = "modules/gpt.ko"

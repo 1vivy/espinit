@@ -3,9 +3,10 @@
 //! The order is fixed by the boot contract: minimal mounts and logging, normal
 //! vendor module loading, ESP discovery and read-only mount, strict manifest
 //! and ROM validation, generation matching, ordered payload module loading with
-//! self-checks, and finally the real-init handoff. Any failure stops the
-//! handoff, persists a receipt, and enters the fatal-boot stop path. There is
-//! no soft fallback and no stock-ROM fallback.
+//! self-checks, the single projection boundary immediately before the `gpt`
+//! entry, and finally the real-init handoff. Any failure stops the handoff,
+//! persists a receipt, and enters the fatal-boot stop path. There is no soft
+//! fallback and no stock-ROM fallback.
 
 use std::fs;
 use std::io::Write;
@@ -15,8 +16,10 @@ use std::time::{Duration, Instant};
 use rustix::fs::{CWD, FileType, makedev, mknodat};
 use rustix::system::{RebootCommand, reboot};
 
+use crate::block;
 use crate::config::{self, Manifest, RomConfig};
 use crate::esp;
+use crate::gptctl;
 use crate::loader;
 use crate::receipt::{Failure, ReceiptState, Stage};
 use crate::scripts;
@@ -39,6 +42,8 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     loader::load_vendor_modules()?;
 
     let mount = wait_for_esp()?;
+    let esp_mount = mount.path().to_owned();
+    let esp_device = mount.device();
     let payload_root = esp::payload_root(mount.path());
     state.esp_mount = Some(mount);
 
@@ -51,7 +56,11 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
 
     if rom.managed {
-        wait_for_backends(&rom)?;
+        // Backend resolution is deliberately deferred until immediately before
+        // the `gpt` entry, after every earlier ordered module and script has
+        // run: a logical volume, mapper device, loop or ESP file published by
+        // them is visible there, and no backend is touched for a ROM that never
+        // reaches its projection.
         require_receipt_storage(&payload_root)?;
     } else if !payload_root.join("receipts").is_dir() {
         log::warn!("ESP receipt directory is missing; failures cannot be persisted");
@@ -72,7 +81,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         rom.managed
     );
 
-    load_and_check_payload(&payload_root, &manifest, &rom)?;
+    load_and_check_payload(&payload_root, &manifest, &rom, &esp_mount, esp_device)?;
 
     log::info!(
         "Early managed boot checks passed; handing off to {}",
@@ -84,10 +93,19 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
 
 /// Load the payload modules in manifest order, self-check each one, and run its
 /// early or recovery script before the next entry is processed.
+///
+/// The `gpt` entry is the single projection boundary. Its backends are resolved
+/// only when that entry is reached, after every earlier module and script has
+/// run, so a logical volume, mapper device, loop or ESP file published by them
+/// is visible. The complete projection is applied and verified before the
+/// module's stage script runs; nothing earlier publishes a projected view and
+/// there is no partial fallback.
 fn load_and_check_payload(
     payload_root: &Path,
     manifest: &Manifest,
     rom: &RomConfig,
+    esp_mount: &str,
+    esp_device: (u32, u32),
 ) -> Result<(), Failure> {
     let generation = manifest.generation.as_str();
     let modes = rom.partition_modes();
@@ -111,6 +129,13 @@ fn load_and_check_payload(
     for entry in manifest.modules.iter().skip(1) {
         let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
 
+        if entry.name == "gpt" {
+            // Every earlier entry and script has run, so anything they created
+            // is visible here. The resolved set keeps every ESP-file loop guard
+            // open until APPLY has returned.
+            resolve_backends(rom, esp_mount)?;
+        }
+
         if loader::module_loaded(&entry.name) {
             log::info!(
                 "Module {} is already loaded; validating it instead of reloading",
@@ -121,7 +146,11 @@ fn load_and_check_payload(
         }
 
         if entry.name == "gpt" {
-            selfcheck::check_projection(&entry.name, generation, modes)?;
+            // Identity is checked before the consequential APPLY. Readiness can
+            // only become true after one atomic APPLY and exact QUERY.
+            selfcheck::check_module_generation(&entry.name, generation)?;
+            apply_projection(rom, esp_device)?;
+            selfcheck::check_projection_ready(&entry.name, modes)?;
             projection_checked = true;
         } else {
             selfcheck::check_module(&entry.name, generation)?;
@@ -290,19 +319,50 @@ fn wait_for_esp() -> Result<esp::Mount, Failure> {
     )
 }
 
-/// Resolve the managed backends within the bounded enumeration window. Other
-/// UFS LUN and block-device enumeration can race the managed boot, so a single
-/// probe can lose a race that is not a real failure. Ambiguous, malformed,
-/// unsupported, duplicated, and invalid configuration stays immediate fatal.
-fn wait_for_backends(rom: &RomConfig) -> Result<(), Failure> {
+/// Resolve the managed backends within the bounded enumeration window,
+/// immediately before the `gpt` entry. Other UFS LUN, mapper and block-device
+/// enumeration can race the managed boot, so a single probe can lose a race
+/// that is not a real failure. Ambiguous, malformed, unsupported, duplicated,
+/// writable-ESP-file, and invalid configuration stays immediate fatal, and the
+/// resolved set stays retained on the configuration so every loop guard lives
+/// through APPLY.
+fn resolve_backends(rom: &RomConfig, esp_mount: &str) -> Result<(), Failure> {
     retry_enumerated(
         "managed backend",
         ENUMERATION_WINDOW,
         ENUMERATION_RETRY,
-        || config::validate_backends(rom).map(|_| ()),
-        |error| error.is_pending(),
+        || config::validate_backends(rom, esp_mount).map(|_| ()),
+        config::ConfigError::is_pending,
     )
     .map_err(Failure::from)
+}
+
+/// Apply the complete projection and verify it: enumerate the physical
+/// partitions to hide except the mounted ESP (kept writable for failure
+/// receipts), build the exact APPLY payload from the resolved backends, issue
+/// APPLY, and require the QUERY reply to report this exact projection set.
+fn apply_projection(rom: &RomConfig, esp_device: (u32, u32)) -> Result<(), Failure> {
+    let hide = retry_enumerated(
+        "physical partitions",
+        ENUMERATION_WINDOW,
+        ENUMERATION_RETRY,
+        || {
+            block::hidden_partitions(crate::gpt_uapi::GptDevice {
+                major: esp_device.0,
+                minor: esp_device.1,
+            })
+        },
+        block::is_pending,
+    )
+    .map_err(|error| {
+        Failure::new(
+            Stage::Projection,
+            "ProjectionEnumerationFailed",
+            format!("cannot enumerate physical partitions: {error}"),
+        )
+    })?;
+
+    gptctl::project(&rom.partitions, rom.resolved_backends(), &hide)
 }
 
 /// Prepare the minimum early mounts, retaining only the mounts created here.
@@ -461,9 +521,9 @@ mod tests {
         )
         .unwrap();
 
-        wait_for_backends(&rom).unwrap();
+        resolve_backends(&rom, esp::ESP_MOUNT_POINT).unwrap();
         // A second resolution reuses the published set instead of re-resolving.
-        config::validate_backends(&rom).unwrap();
+        config::validate_backends(&rom, esp::ESP_MOUNT_POINT).unwrap();
         assert!(rom.resolved_backends().is_empty());
     }
 }

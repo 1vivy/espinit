@@ -16,21 +16,35 @@ generation = "esp-2026.10"
 
 # managed = true requires successful gpt.ko projection of the complete list
 # below before Android handoff, with no stock-ROM fallback. managed = false
-# requires the partitions array to be empty or absent.
+# requires the partitions array to be empty or absent and must not list a gpt
+# module in the manifest.
 managed = true
 
 # Order is publication order, not priority or fallback. Names are unique at the
-# Android partition surface, must not collide with a retained physical name,
-# and must not collide with another projection. Schema v1 `backend` is an
-# absolute block-device path, such as /dev/block/by-name/<physical-name> or a
-# prepared /dev/loopN, resolved and retained before physical aliases are hidden.
-# Each projection spans the entire block backend; whole-LU devices, regular
-# files, offsets and size slicing are not accepted by gpt.ko. A preallocated ESP
-# regular file must be attached with a standard loop device before gpt APPLY;
-# supply only that block-device path and retain the attachment for the lifetime
-# of the projection. There is no extent/FIEMAP ABI.
-# `read_only` explicitly selects projected access; physical residual exposure
-# is read-only regardless of this value.
+# Android partition surface, must not collide with a retained physical name or
+# another projection, and are limited to 36 bytes: the gpt ABI label size.
+#
+# Backends are resolved only when the ordered payload reaches the `gpt` entry,
+# after every earlier module and its scripts have run, so a logical volume,
+# mapper device, loop or ESP file those entries activate is visible. Each
+# `backend` is one of four documented forms:
+#
+#   /dev/block/by-name/<physical-name>  exact, unique sysfs PARTNAME
+#   /dev/mapper/<name>                  exact, unique /sys/class/block/dm-*/dm/name
+#   /dev/loopN                          an existing loop device
+#   esp-file:<relative-path>            preallocated regular file on the
+#                                       already-mounted read-only ESP, attached
+#                                       read-only by the loader with zero offset
+#                                       and no size limit (writable is fatal)
+#
+# What an earlier module may do first, e.g. activate a thick or thin LV with
+# `dmsetup`, is a module/script concern; the projection that follows only ever
+# names the resulting block device. Each projection spans the entire backend;
+# whole-LU devices, offsets, size slicing, and any extent/FIEMAP ABI are not
+# accepted. The ESP-file relative path is resolved from the ESP mount root,
+# e.g. esp-file:espinit/backing.img, and the attachment stays alive through the
+# projection. `read_only` explicitly selects projected access; physical
+# residual exposure is read-only regardless of this value.
 
 [[partitions]]
 name = "super"
@@ -40,4 +54,17 @@ read_only = false
 [[partitions]]
 name = "vbmeta_system"
 backend = "/dev/block/by-name/vbmeta_system_1"
+read_only = true
+
+# A logical volume activated by an earlier ordered module or script.
+[[partitions]]
+name = "system"
+backend = "/dev/mapper/lv-system"
+read_only = true
+
+# A preallocated image on the read-only ESP; only the read-only ESP-file form
+# and `read_only = true` are accepted.
+[[partitions]]
+name = "vendor"
+backend = "esp-file:espinit/backing/vendor.img"
 read_only = true
