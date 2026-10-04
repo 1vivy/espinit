@@ -82,6 +82,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     );
 
     load_and_check_payload(&payload_root, &manifest, &rom, &esp_mount, esp_device)?;
+    crate::platform::stage(&payload_root, &manifest, &rom)?;
 
     log::info!(
         "Early managed boot checks passed; handing off to {}",
@@ -122,6 +123,7 @@ fn load_and_check_payload(
     }
 
     selfcheck::check_core(generation)?;
+    crate::platform::select_core_boot_mode()?;
     scripts::run_module_scripts(payload_root, &core.name, generation)?;
 
     let mut projection_checked = false;
@@ -216,9 +218,24 @@ fn read_manifest(payload_root: &Path) -> Result<Manifest, Failure> {
 }
 
 fn read_rom(payload_root: &Path, manifest: &Manifest) -> Result<RomConfig, Failure> {
-    let text = read_config_file(payload_root, &manifest.rom, "RomUnreadable")?;
-
-    config::parse_rom(&text, &manifest.generation).map_err(Failure::from)
+    let bootconfig = match fs::read_to_string("/proc/bootconfig") {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(Failure::new(
+                Stage::Configuration,
+                "BootconfigUnreadable",
+                error.to_string(),
+            ));
+        }
+    };
+    let cmdline = fs::read_to_string("/proc/cmdline").map_err(|error| {
+        Failure::new(Stage::Configuration, "CmdlineUnreadable", error.to_string())
+    })?;
+    let id = config::selected_rom_id(&bootconfig, &cmdline).map_err(Failure::from)?;
+    let path = config::rom_path(manifest, id).map_err(Failure::from)?;
+    let text = read_config_file(payload_root, &path, "RomUnreadable")?;
+    config::parse_selected_rom(&text, &manifest.generation, id).map_err(Failure::from)
 }
 
 /// Read a configuration file rooted at the ESP `/espinit` subtree, rejecting a
@@ -335,6 +352,25 @@ fn resolve_backends(rom: &RomConfig, esp_mount: &str) -> Result<(), Failure> {
         config::ConfigError::is_pending,
     )
     .map_err(Failure::from)
+}
+pub(crate) fn resolve_native_metadata() -> std::io::Result<block::ResolvedBackend> {
+    retry_native_metadata(ENUMERATION_WINDOW, ENUMERATION_RETRY, || {
+        block::resolve("/dev/block/by-name/metadata", esp::ESP_MOUNT_POINT)
+    })
+}
+
+fn retry_native_metadata<T>(
+    window: Duration,
+    interval: Duration,
+    probe: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    retry_enumerated(
+        "native metadata",
+        window,
+        interval,
+        probe,
+        block::is_pending,
+    )
 }
 
 /// Apply the complete projection and verify it: enumerate the physical
@@ -488,6 +524,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_metadata_waits_only_for_enumeration() {
+        let mut attempts = 0;
+        let device = retry_native_metadata(Duration::from_secs(1), Duration::ZERO, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!((device, attempts), (42, 2));
+        for kind in [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let mut attempts = 0;
+            let result = retry_native_metadata(Duration::from_secs(1), Duration::ZERO, || {
+                attempts += 1;
+                Err::<(), _>(std::io::Error::from(kind))
+            });
+            assert_eq!(result.unwrap_err().kind(), kind);
+            assert_eq!(attempts, 1);
+        }
+        let result = retry_native_metadata(Duration::ZERO, Duration::ZERO, || {
+            Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound))
+        });
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn permanent_failures_stop_without_retrying() {
         let mut attempts = 0;
         let error = retry_enumerated(
@@ -551,7 +618,7 @@ mod tests {
     #[test]
     fn enumeration_retry_succeeds_and_reuses_the_published_set() {
         let rom = config::parse_rom(
-            "schema_version = 1\ngeneration = \"release-1\"\nmanaged = false\n",
+            "schema_version = 1\ngeneration = \"release-1\"\nid = \"android-a\"\nmanaged = false\n",
             "release-1",
         )
         .unwrap();

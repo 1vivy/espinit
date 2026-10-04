@@ -47,6 +47,7 @@ mod utils;
 mod ksu_uapi;
 
 fn main() -> anyhow::Result<()> {
+    let _ = espinit_platform::generation::generation();
     #[cfg(target_os = "android")]
     {
         cli::run()

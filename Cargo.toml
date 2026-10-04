@@ -2,12 +2,14 @@
 members = [
     "userspace/ksud",
     "userspace/ksuinit",
+    "userspace/platform",
 ]
 default-members = [
     "userspace/ksud",
     "userspace/ksuinit",
 ]
 resolver = "3"
+exclude = ["payloads/boot-hal"]
 
 [workspace.package]
 edition = "2024"

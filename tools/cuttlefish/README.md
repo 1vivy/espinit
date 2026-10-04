@@ -14,7 +14,7 @@ Cuttlefish run. **No stage of this lane is a claim that the payload boots.**
 
 | Owned here | Owned by the lab lane |
 | --- | --- |
-| `tools/cuttlefish/assemble.py`: build `init_boot.img`, `esp.img`, `payload.json` from explicit inputs | paused assembly, GPT retype of `cuttlefish_example_custom` to ESP, `rom.toml` generation, boot/resume, apply/probe/cow-proof/reboot/merge/cancel/rollback evidence |
+| `tools/cuttlefish/assemble.py`: build `init_boot.img`, `esp.img`, `payload.json` from explicit inputs | paused assembly, GPT retype of `cuttlefish_example_custom` to ESP, per-ROM config generation, boot/resume, apply/probe/cow-proof/reboot/merge/cancel/rollback evidence |
 | `tools/cuttlefish/thin-activate.c` + `build-thin-activate.sh`: the x86_64 Android static helper the ESP runs | module builds, kernel selection, device/kernel-version acceptance, all Cuttlefish and Docker execution |
 | Deterministic manifest/placeholder rendering and digest receipts | every gate: builds, tests, linters, formatters, Cuttlefish |
 
@@ -28,10 +28,14 @@ Required inputs, all explicit paths (`--flag` above each file):
 | `--avbtool`, `--avb-key` | pinned AVB tool and RSA-4096 key that verify the stock image and sign its replacement |
 | `--espinit` | static PID-1 binary, installed as `/espinit` in the initramfs |
 | `--espinitd` | daemon binary, installed as `espinit/bin/espinitd` (install source, not the executed path) |
+| `--boot-hal` | generation-noted boot HAL executable, packaged under `modules/boot-hal/` |
+| `--tiny-espsu` | same-generation narrow bind/label helper, packaged under `modules/tiny-espsu/` |
+| `--metadata-filesystem` | explicit `ext4` or `f2fs` for the projected metadata mount; no filesystem fallback |
 | `--busybox` | static interpreter for ESP scripts, `espinit/bin/busybox` |
 | `--thin-activate` | output of `build-thin-activate.sh`, `espinit/bin/thin-activate` |
 | `--core-module`, `--thin-module`, `--gpt-module` | `espinit.ko`, `thin.ko`, `gpt.ko` built for the session kernel |
 | `--generation` | one identifier, `[A-Za-z0-9._-]{1,63}`, written into every generation-bearing artifact |
+| `--rom-id` | required catalogue ID matching `androidboot.espinit.rom`; generates `espinit/roms/<id>.toml` with matching `id`, not a global/default ROM config |
 | `--output-dir` | target directory; must be empty (or hold only previous artifacts with `--overwrite`) |
 | `--esp-size-mib` | optional ESP image size in MiB (default 64). The lab lane copies this exact file over the pinned disposable `cuttlefish_example_custom.img` and regenerates that GPT entry from the file size, so any size the payload needs is acceptable |
 | `--overwrite` | replace `init_boot.img`, `esp.img`, `payload.json` in an output directory that holds them |
@@ -43,12 +47,16 @@ tools/cuttlefish/assemble.py \
     --avb-key          <matching Cuttlefish AVB key> \
     --espinit          <espinit PID-1> \
     --espinitd         <espinitd> \
+    --boot-hal         <gblbds-boot-hal> \
+    --tiny-espsu       <tiny-espsu> \
+    --metadata-filesystem ext4 \
     --busybox          <static busybox> \
     --thin-activate    <thin-activate> \
     --core-module      <espinit.ko> \
     --thin-module      <thin.ko> \
     --gpt-module       <gpt.ko> \
     --generation       <generation> \
+    --rom-id           <catalogue ROM ID> \
     --esp-size-mib     <pinned custom partition size> \
     --output-dir       <empty directory>
 ```
@@ -78,8 +86,8 @@ exactly:
 
 ```
 /espinit/manifest.toml              schema_version = 1, the supplied generation,
-                                    rom = "rom.toml", modules espinit, thin, gpt
-/espinit/rom.toml                   managed placeholder, replaced by the lab
+                                    rom = "roms", modules espinit, thin, gpt
+/espinit/roms/<id>.toml             selected managed placeholder, replaced by the lab
 /espinit/bin/busybox                static interpreter
 /espinit/bin/thin-activate          x86_64 Android static helper
 /espinit/bin/espinitd               daemon install source
@@ -87,15 +95,35 @@ exactly:
 /espinit/modules/thin.ko
 /espinit/modules/gpt.ko
 /espinit/modules/thin/early.sh      #!/bin/sh, set -eu, exec thin-activate
+/espinit/modules/boot-hal/module.toml
+/espinit/modules/boot-hal/android.hardware.boot-service.gblbds
+/espinit/modules/boot-hal/boot-gblbds.rc
+/espinit/modules/tiny-espsu/module.toml
+/espinit/modules/tiny-espsu/tiny-espsu
+/espinit/modules/tiny-espsu/install.sh
+/espinit/modules/tiny-espsu/policy.cil
 /espinit/receipts/                  directory; a missing receipt store is a
                                     hard managed-boot failure
 ```
 
-The placeholder `rom.toml` is structurally valid (`schema_version = 1`, the
-supplied generation, `managed = true`, one projection) but its backend is
+The placeholder `roms/<id>.toml` is structurally valid (`schema_version = 1`, the
+supplied generation and matching `id`, `managed = true`, one projection) but its backend is
 deliberately impossible, so an un-replaced payload fails closed instead of
 booting with a guessed partition view. The lab writes the real file with the
-same generation before the paused assembly.
+same ID and generation before paused assembly, and supplies
+`androidboot.espinit.rom=<id>` when booting. Missing, duplicate or conflicting
+boot selections fail; no global-file alias is accepted.
+
+The assembler stamps the checked-in package manifests with the supplied
+generation and validates the ELF generation notes of espinitd, boot HAL and
+tiny-espsu without executing them. PID1 repeats that validation and installs
+files with the exact modes in `module.toml`, independent of FAT modes. A real
+normal ROM config must project writable metadata, bdsvars and misc. Recovery
+uses a separate explicitly selected package list and excludes the normal HAL.
+The checked-in helper/RC target the source device's exact QTI executable and
+`vendor.boot-qti` service; a Cuttlefish build without that layout is not a
+runtime-compatible HAL target merely because the assembler accepts its ELF.
+Do not guess another bind destination. See the root README's platform contract.
 
 Executable intent: the initramfs copy of the PID-1 binary is the only member
 that carries a POSIX mode (root `/espinit`, 0755, written by `cpio` with

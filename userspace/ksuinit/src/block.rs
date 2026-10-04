@@ -1,6 +1,6 @@
 //! Resolution of projection backends.
 //!
-//! `rom.toml` names a backend in one of four documented forms. Resolution runs
+//! The selected ROM config names a backend in one of four documented forms. Resolution runs
 //! immediately before the `gpt` entry, after every earlier ordered module and
 //! its scripts have run, so a logical volume, mapper device, loop or ESP file
 //! published by them is visible:

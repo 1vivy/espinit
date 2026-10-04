@@ -19,6 +19,7 @@
 #include <linux/workqueue.h>
 #include <linux/uio.h>
 #include <linux/stat.h>
+#include <linux/moduleparam.h>
 
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
@@ -28,9 +29,21 @@
 #include "selinux/selinux.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
+#include "runtime/platform_boot.h"
 
 // clang-format off
 static const char KERNEL_SU_RC[] =
+    "\n"
+    "service espinit-platform-early " KSUD_PATH " early\n"
+    "    user root\n"
+    "    group root\n"
+    "    seclabel u:r:" KERNEL_SU_DOMAIN ":s0\n"
+    "    disabled\n"
+    "    oneshot\n"
+    "    reboot_on_failure reboot\n"
+    "\n"
+    "on init\n"
+    "    exec_start espinit-platform-early\n"
     "\n"
     // Android init reaches post-fs before post-fs-data; keep the synchronous
     // post-fs module run ahead of the post-fs-data event it must not report.
@@ -53,6 +66,37 @@ static const char KERNEL_SU_RC[] =
     "\n"
     "\n";
 // clang-format on
+
+static int platform_boot_mode;
+static size_t ksu_rc_len;
+
+static int set_platform_boot_mode(const char *value, const struct kernel_param *kp)
+{
+    int mode;
+    int previous;
+    int error;
+
+    if (task_pid_nr(current) != 1)
+        return -EPERM;
+    error = kstrtoint(value, 10, &mode);
+    if (error)
+        return error;
+    if (mode != ESPINIT_PLATFORM_ANDROID && mode != ESPINIT_PLATFORM_RECOVERY)
+        return -EINVAL;
+    previous = READ_ONCE(platform_boot_mode);
+    if (previous != ESPINIT_PLATFORM_UNSET && previous != mode)
+        return -EPERM;
+    WRITE_ONCE(platform_boot_mode, mode);
+    ksu_rc_len = espinit_platform_rc_size(mode, sizeof(KERNEL_SU_RC) - 1);
+    return 0;
+}
+
+static const struct kernel_param_ops platform_boot_mode_ops = {
+    .set = set_platform_boot_mode,
+    .get = param_get_int,
+};
+module_param_cb(platform_boot_mode, &platform_boot_mode_ops, &platform_boot_mode, 0600);
+MODULE_PARM_DESC(platform_boot_mode, "PID1-only boot selection: 1 Android, 2 recovery/fastbootd");
 
 static void stop_init_rc_hook();
 static void stop_execve_hook();
@@ -188,7 +232,6 @@ static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
 static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
 static struct file_operations fops_proxy;
 static ssize_t ksu_rc_pos = 0;
-const size_t ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
 
 #define MODULE_RC_PATH "/metadata/espinit/initrc/modules.rc"
 static char *module_rc_buf;
@@ -216,6 +259,8 @@ static void load_module_rc_once(void)
     if (loaded)
         return;
     loaded = true;
+    if (!espinit_platform_rc_size(READ_ONCE(platform_boot_mode), 1))
+        return;
     if (ksu_no_custom_rc) {
         pr_info("custom rc is disabled\n");
         return;

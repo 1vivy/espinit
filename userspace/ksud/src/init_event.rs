@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use log::{error, info, warn};
-use std::{path::Path, time::Instant};
+use std::{io::Read, path::Path, time::Instant};
 
 /// Module stages handled by espinitd when the Android dynamic runtime is available.
 /// PID-1 runs the ESP early/recovery scripts separately, before Android handoff.
@@ -37,6 +37,49 @@ impl Stage {
 
 pub fn on_stage(stage: Stage) -> Result<()> {
     match stage {
+        Stage::Early => {
+            // This is a mandatory synchronous prerequisite for early_hal.
+            // Unlike optional later scripts, errors must reach init's
+            // reboot_on_failure service, never become a warning and continue.
+            ksucalls::ensure_uapi_version_matched()?;
+            anyhow::ensure!(
+                std::fs::read_to_string("/sys/module/espinit/parameters/platform_boot_mode")?
+                    .trim()
+                    == "1",
+                "early platform stage requires PID1's Android boot selection"
+            );
+            let root = espinit_platform::open_root(Path::new(espinit_platform::ROOT))?;
+            let mut installed = String::new();
+            espinit_platform::open_file(&root, "rom.toml")?.read_to_string(&mut installed)?;
+            // Reuse the same ROM contract as PID1, not a parallel runtime
+            // generation/mode manifest. Both generation and managed are strict.
+            let selected = crate::utils::getprop("ro.boot.espinit.rom")
+                .context("missing ro.boot.espinit.rom")?;
+            let rom = espinit::config::parse_selected_rom(
+                &installed,
+                espinit_platform::generation::generation(),
+                &selected,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            assets::ensure_binaries(true).context("prepare early stage interpreter")?;
+            if rom.managed {
+                let helper = format!("{}/{}", espinit_platform::ROOT, espinit_platform::HELPER);
+                let mut binary = espinit_platform::open_file(&root, espinit_platform::HELPER)?;
+                espinit_platform::check_artifact(
+                    &mut binary,
+                    espinit_platform::generation::generation(),
+                )?;
+                let status = std::process::Command::new(helper)
+                    .status()
+                    .context("start tiny-espsu")?;
+                anyhow::ensure!(status.success(), "tiny-espsu failed: {status}");
+            }
+            run_stage(
+                stage.name(),
+                ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT),
+            );
+            Ok(())
+        }
         Stage::PostFsData => on_post_fs_data(),
         Stage::Service => {
             on_services();
@@ -46,7 +89,7 @@ pub fn on_stage(stage: Stage) -> Result<()> {
             on_boot_completed();
             Ok(())
         }
-        Stage::Early | Stage::PostFs | Stage::Recovery | Stage::PostMount => {
+        Stage::PostFs | Stage::Recovery | Stage::PostMount => {
             if let Err(e) = ksucalls::ensure_uapi_version_matched() {
                 error!("{e:#}, skip {}", stage.name());
                 return Ok(());

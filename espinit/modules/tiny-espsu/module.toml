@@ -1,0 +1,21 @@
+schema_version = 1
+generation = "release-1"
+id = "tiny-espsu"
+
+[[files]]
+source = "tiny-espsu"
+destination = "tiny-espsu"
+mode = "0755"
+kind = "binary"
+
+[[files]]
+source = "install.sh"
+destination = "install.sh"
+mode = "0755"
+kind = "script"
+
+[[files]]
+source = "policy.cil"
+destination = "policy.cil"
+mode = "0644"
+kind = "policy"

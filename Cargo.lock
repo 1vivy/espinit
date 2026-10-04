@@ -470,6 +470,7 @@ name = "espinit"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "espinit-platform",
  "goblin",
  "kernlog",
  "log",
@@ -478,6 +479,17 @@ dependencies = [
  "serde",
  "serde_json",
  "syscalls",
+ "toml",
+]
+
+[[package]]
+name = "espinit-platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "goblin",
+ "libc",
+ "serde",
  "toml",
 ]
 
@@ -493,6 +505,7 @@ dependencies = [
  "derive-new",
  "encoding_rs",
  "espinit",
+ "espinit-platform",
  "extattr",
  "getopts",
  "humansize",

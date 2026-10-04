@@ -27,6 +27,7 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+REPOSITORY = Path(__file__).resolve().parents[2]
 GENERATION = re.compile(r"[A-Za-z0-9._-]{1,63}")
 BOOT_MAGIC = b"ANDROID!"
 BOOT_HEADER_SIZE = 4096
@@ -42,6 +43,8 @@ PATHS = (
     "avb_key",
     "espinit",
     "espinitd",
+    "boot_hal",
+    "tiny_espsu",
     "busybox",
     "thin_activate",
     "core_module",
@@ -53,8 +56,11 @@ MODULES = (("core_module", "espinit"), ("thin_module", "thin"), ("gpt_module", "
 ESP_DIRECTORIES = (
     "espinit",
     "espinit/bin",
+    "espinit/roms",
     "espinit/modules",
     "espinit/modules/thin",
+    "espinit/modules/boot-hal",
+    "espinit/modules/tiny-espsu",
     "espinit/receipts",
 )
 EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
@@ -74,19 +80,27 @@ def run(arguments: list[str | Path], *, cwd: Path | None = None, data: bytes | N
     return completed.stdout
 
 
-def configurations(generation: str) -> tuple[str, str]:
+def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tuple[str, str]:
     """Render the manifest and the structurally valid placeholder ROM config."""
     if not GENERATION.fullmatch(generation):
         raise ValueError("generation must be 1..63 ASCII letters/digits plus . _ -")
+    if metadata_filesystem not in ("ext4", "f2fs"):
+        raise ValueError("metadata filesystem must be explicitly ext4 or f2fs")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,59}", rom_id) or rom_id in (".", ".."):
+        raise ValueError("ROM ID must be 1..59 ASCII letters/digits plus . _ -, excluding . and ..")
 
     head = f'schema_version = 1\ngeneration = "{generation}"\n'
-    manifest = head + 'rom = "rom.toml"\n'
+    manifest = head + 'rom = "roms"\n'
+    manifest += (
+        f'\n[platform]\nmetadata_filesystem = "{metadata_filesystem}"\n'
+        'packages = ["boot-hal", "tiny-espsu"]\nrecovery_packages = []\n'
+    )
     for name in ("espinit", "thin", "gpt"):
         manifest += f'\n[[modules]]\nname = "{name}"\npath = "modules/{name}.ko"\nparams = ""\n'
 
     # Valid managed shape with a deliberately impossible backend: the lab lane
     # replaces this file with the complete generated GPT projection before boot.
-    rom = head + (
+    rom = head + f'id = "{rom_id}"\n' + (
         'managed = true\n\n[[partitions]]\nname = "userdata"\n'
         'backend = "/dev/mapper/espinit-payload-placeholder"\nread_only = false\n'
     )
@@ -275,24 +289,81 @@ def esp_image_size(content: int, requested_mib: int | None) -> int:
     return max(DEFAULT_ESP_MIB * 1024 * 1024, -(-needed // (1024 * 1024)) * 1024 * 1024)
 
 
+def artifact_generation(path: Path, generation: str) -> None:
+    """Check the ELF note without running an Android binary on the host."""
+    data = path.read_bytes()
+    if data[:6] != b"\x7fELF\x02\x01" or len(data) < 64:
+        raise ValueError(f"{path}: expected little-endian ELF64")
+    kind, machine = struct.unpack_from("<HH", data, 16)
+    if kind not in (2, 3) or machine not in (62, 183):
+        raise ValueError(f"{path}: unsupported executable architecture/type")
+    offset = struct.unpack_from("<Q", data, 40)[0]
+    size, count, names_index = struct.unpack_from("<HHH", data, 58)
+    if size != 64 or count == 0 or names_index >= count or offset + size * count > len(data):
+        raise ValueError(f"{path}: malformed ELF section table")
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, offset + size * index) for index in range(count)]
+    strings = sections[names_index]
+    names = data[strings[4]:strings[4] + strings[5]]
+    notes = []
+    for section in sections:
+        if section[0] >= len(names):
+            raise ValueError(f"{path}: invalid section name")
+        name = names[section[0]:].split(b"\0", 1)[0]
+        if name == b".note.espinit":
+            notes.append(data[section[4]:section[4] + section[5]])
+    expected = struct.pack("<III", 8, 64, 1) + b"ESPINIT\0" + generation.encode().ljust(64, b"\0")
+    if notes != [expected]:
+        raise ValueError(f"{path}: missing, duplicate, malformed or mismatched generation note")
+
+
+def platform_files(sources: dict[str, Path], generation: str, tree: Path) -> list[tuple[Path, str, int]]:
+    """Use the checked-in module contract, not a second package format."""
+    files = []
+    for module in ("boot-hal", "tiny-espsu"):
+        directory = tree / "modules" / module
+        directory.mkdir()
+        template = REPOSITORY / "espinit/modules" / module / "module.toml"
+        text = template.read_text()
+        if text.count('generation = "release-1"') != 1:
+            raise ValueError(f"invalid generation template: {template}")
+        manifest = directory / "module.toml"
+        manifest.write_text(text.replace('generation = "release-1"', f'generation = "{generation}"'))
+        files.append((manifest, f"espinit/modules/{module}/module.toml", 0o644))
+    for key in ("espinitd", "boot_hal", "tiny_espsu"):
+        artifact_generation(sources[key], generation)
+    files.extend([
+        (sources["boot_hal"], "espinit/modules/boot-hal/android.hardware.boot-service.gblbds", 0o755),
+        (REPOSITORY / "payloads/boot-hal/boot-gblbds.rc", "espinit/modules/boot-hal/boot-gblbds.rc", 0o644),
+        (sources["tiny_espsu"], "espinit/modules/tiny-espsu/tiny-espsu", 0o755),
+        (REPOSITORY / "espinit/modules/tiny-espsu/install.sh", "espinit/modules/tiny-espsu/install.sh", 0o755),
+        (REPOSITORY / "espinit/modules/tiny-espsu/policy.cil", "espinit/modules/tiny-espsu/policy.cil", 0o644),
+    ])
+    return files
+
+
 def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, requested_mib: int | None) -> Path:
     tree = work / "espinit"
-    for directory in ("bin", "modules/thin", "receipts"):
+    import tomllib
+    rom_relative = f"roms/{tomllib.loads(rom)['id']}.toml"
+    for directory in ("bin", "roms", "modules/thin", "receipts"):
         (tree / directory).mkdir(parents=True)
     (tree / "manifest.toml").write_text(manifest)
-    (tree / "rom.toml").write_text(rom)
+    (tree / rom_relative).write_text(rom)
     (tree / "modules/thin/early.sh").write_text(EARLY_SCRIPT)
     (tree / "modules/thin/early.sh").chmod(0o755)
 
     files: list[tuple[Path, str, int]] = [
         (tree / "manifest.toml", "espinit/manifest.toml", 0o644),
-        (tree / "rom.toml", "espinit/rom.toml", 0o644),
+        (tree / rom_relative, f"espinit/{rom_relative}", 0o644),
         (tree / "modules/thin/early.sh", "espinit/modules/thin/early.sh", 0o755),
     ]
     for key, target in BINARIES:
         files.append((sources[key], f"espinit/{target}", 0o755))
     for key, name in MODULES:
         files.append((sources[key], f"espinit/modules/{name}.ko", 0o644))
+    # Manifest generation is already validated by configurations().
+    generation = tomllib.loads(manifest)["generation"]
+    files.extend(platform_files(sources, generation, tree))
 
     missing = [directory for directory in ESP_DIRECTORIES if not (work / directory).is_dir()]
     if missing:
@@ -314,7 +385,7 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
 
 
 def assemble(arguments: argparse.Namespace) -> None:
-    manifest, rom = configurations(arguments.generation)
+    manifest, rom = configurations(arguments.generation, arguments.metadata_filesystem, arguments.rom_id)
 
     sources = {name: Path(getattr(arguments, name)).resolve(strict=True) for name in PATHS}
     for name, source in sources.items():
@@ -372,7 +443,9 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in PATHS:
         parser.add_argument(f"--{name.replace('_', '-')}", required=True, metavar="FILE")
+    parser.add_argument("--metadata-filesystem", required=True, choices=("ext4", "f2fs"))
     parser.add_argument("--generation", required=True, metavar="ID")
+    parser.add_argument("--rom-id", required=True, metavar="ID")
     parser.add_argument("--output-dir", required=True, metavar="DIR")
     parser.add_argument("--esp-size-mib", type=int, default=None, metavar="MIB")
     parser.add_argument("--overwrite", action="store_true")

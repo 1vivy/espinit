@@ -1,6 +1,6 @@
-# espinit ROM configuration (planned)
+# espinit ROM configuration
 #
-# Deployed path: /debug_ramdisk/esp/espinit/rom.toml
+# Deployed path: /debug_ramdisk/esp/espinit/roms/android-a.toml
 # `generation` must equal the manifest generation. This file selects projected
 # names and existing whole block-device backends; it does not define a new
 # physical partition table, offsets, sizes, or implicit slot suffixes.
@@ -8,11 +8,12 @@
 # Early failures use ESP /espinit/receipts/failure.json, not projected metadata.
 # The ESP is normally RO; only failure replacement opens a bounded RW remount
 # window: temporary file + fsync + atomic rename + directory fsync, then sync
-# the ESP and remount RO. /metadata/espinit is for daemon runtime receipts/logs
-# after successful handoff, not a prerequisite for gpt readiness.
+# the ESP and remount RO. After successful projection, PID1 privately mounts
+# projected metadata and installs espinitd/packages before Android handoff.
 
 schema_version = 1
-generation = "esp-2026.10"
+generation = "release-1"
+id = "android-a"
 
 # managed = true requires successful gpt.ko projection of the complete list
 # below before Android handoff, with no stock-ROM fallback. managed = false
@@ -68,3 +69,21 @@ read_only = true
 name = "vendor"
 backend = "esp-file:espinit/backing/vendor.img"
 read_only = true
+
+# Platform staging requires writable projected metadata. Select the actual
+# filesystem explicitly in manifest.platform.metadata_filesystem.
+[[partitions]]
+name = "metadata"
+backend = "/dev/block/by-name/metadata"
+read_only = false
+
+# Normal boot HAL persistence: both are projected, never whole-LU access.
+[[partitions]]
+name = "bdsvars"
+backend = "/dev/block/by-name/bdsvars"
+read_only = false
+
+[[partitions]]
+name = "misc"
+backend = "/dev/block/by-name/misc"
+read_only = false

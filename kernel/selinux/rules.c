@@ -42,6 +42,37 @@ static void reset_avc_cache()
     selinux_xfrm_notify_policyload();
 }
 
+/* Applied at init second_stage, not at post-fs-data (early_hal is earlier).
+ * These two object types deliberately have no file_type/dev_type attributes. */
+static bool apply_boot_hal_rules(struct policydb *db)
+{
+    static const char *const file_perms[] = {
+        "getattr", "open", "read", "execute", "map",
+    };
+    static const char *const block_perms[] = {
+        "getattr", "open", "read", "write", "ioctl", "lock",
+    };
+    size_t i;
+
+    if (!ksu_type(db, "gblbds_hal_exec", NULL) || !ksu_type(db, "gblbds_bdsvars_block_device", NULL))
+        return false;
+    for (i = 0; i < ARRAY_SIZE(file_perms); ++i) {
+        if (!ksu_allow(db, "init", "gblbds_hal_exec", "file", file_perms[i]) ||
+            !ksu_allow(db, "hal_bootctl_default", "gblbds_hal_exec", "file", file_perms[i]))
+            return false;
+    }
+    /* The source adapter takes flock(LOCK_EX); its original CIL omitted lock. */
+    for (i = 0; i < ARRAY_SIZE(block_perms); ++i) {
+        if (!ksu_allow(db, "hal_bootctl_default", "gblbds_bdsvars_block_device", "blk_file", block_perms[i]))
+            return false;
+    }
+    return ksu_allow(db, "gblbds_hal_exec", "labeledfs", "filesystem", "associate") &&
+           ksu_allow(db, "gblbds_bdsvars_block_device", "tmpfs", "filesystem", "associate") &&
+           ksu_allow(db, "init", "hal_bootctl_default", "process2", "nosuid_transition") &&
+           ksu_allow(db, "hal_bootctl_default", "gblbds_hal_exec", "file", "entrypoint") &&
+           ksu_type_transition(db, "init", "gblbds_hal_exec", "process", "hal_bootctl_default", NULL);
+}
+
 void apply_espinit_rules()
 {
     struct selinux_policy *pol, *old_pol;
@@ -155,6 +186,12 @@ void apply_espinit_rules()
     // Allow system server kill su process
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
+
+    if (!apply_boot_hal_rules(db)) {
+        pr_err("required boot HAL policy installation failed\n");
+        ksu_destroy_sepolicy(pol);
+        goto out_unlock;
+    }
 
     rcu_assign_pointer(selinux_state.policy, pol);
     synchronize_rcu();

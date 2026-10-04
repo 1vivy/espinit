@@ -97,8 +97,11 @@ impl From<ConfigError> for Failure {
 pub struct Manifest {
     pub schema_version: u64,
     pub generation: String,
+    /// Directory of per-ROM `<id>.toml` files, relative to the payload root.
     pub rom: String,
     pub modules: Vec<ModuleEntry>,
+    #[serde(default)]
+    pub platform: Option<espinit_platform::Platform>,
 }
 
 /// One ordered manifest module entry.
@@ -110,12 +113,13 @@ pub struct ModuleEntry {
     pub params: String,
 }
 
-/// `rom.toml`, parsed with unknown/duplicate/missing fields rejected.
+/// Selected per-ROM configuration, parsed with unknown/duplicate/missing fields rejected.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RomConfig {
     pub schema_version: u64,
     pub generation: String,
+    pub id: String,
     pub managed: bool,
     #[serde(default)]
     pub partitions: Vec<PartitionEntry>,
@@ -183,11 +187,77 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, ConfigError> {
     Ok(manifest)
 }
 
-/// Parse and validate `rom.toml` text against the selected manifest generation.
+/// Parse and validate a selected ROM snapshot against the manifest generation.
 pub fn parse_rom(text: &str, manifest_generation: &str) -> Result<RomConfig, ConfigError> {
     let rom: RomConfig =
         toml::from_str(text).map_err(|error| ConfigError::new("RomParse", error.to_string()))?;
     validate_rom(&rom, manifest_generation)?;
+    Ok(rom)
+}
+
+/// Select only the explicit Surfacer ID. Missing, duplicate or conflicting
+/// boot arguments are errors, never a request for a default ROM.
+pub fn selected_rom_id<'a>(bootconfig: &'a str, cmdline: &'a str) -> Result<&'a str, ConfigError> {
+    const KEY: &str = "androidboot.espinit.rom";
+    fn entry<'a>(text: &'a str, selected: &mut Option<&'a str>) -> Result<(), ConfigError> {
+        let (key, value) = text.split_once('=').unwrap_or((text, ""));
+        if key.trim() != KEY {
+            return Ok(());
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        validate_rom_id(value)?;
+        if selected.replace(value).is_some() {
+            return Err(ConfigError::new("RomSelectionDuplicate", KEY));
+        }
+        Ok(())
+    }
+    let mut boot = None;
+    let mut command = None;
+    for line in bootconfig.lines() {
+        entry(line.trim(), &mut boot)?;
+    }
+    for token in cmdline.split_whitespace() {
+        entry(token, &mut command)?;
+    }
+    if matches!((boot, command), (Some(a), Some(b)) if a != b) {
+        return Err(ConfigError::new("RomSelectionConflict", KEY));
+    }
+    boot.or(command)
+        .ok_or_else(|| ConfigError::new("RomSelectionMissing", KEY))
+}
+
+fn validate_rom_id(id: &str) -> Result<(), ConfigError> {
+    if id.len() > 59 {
+        return Err(ConfigError::new("RomIdInvalid", "ROM ID exceeds 59 bytes"));
+    }
+    espinit_platform::identifier(id)
+        .map_err(|error| ConfigError::new("RomIdInvalid", error.to_string()))
+}
+
+pub fn rom_path(manifest: &Manifest, id: &str) -> Result<String, ConfigError> {
+    validate_rom_id(id)?;
+    let path = format!("{}/{id}.toml", manifest.rom);
+    validate_relative_path(&path)?;
+    Ok(path)
+}
+
+pub fn parse_selected_rom(
+    text: &str,
+    generation: &str,
+    id: &str,
+) -> Result<RomConfig, ConfigError> {
+    validate_rom_id(id)?;
+    let rom = parse_rom(text, generation)?;
+    if rom.id != id {
+        return Err(ConfigError::new(
+            "RomIdMismatch",
+            format!("selected {id}, configured {}", rom.id),
+        ));
+    }
     Ok(rom)
 }
 
@@ -206,7 +276,12 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), ConfigError> {
     validate_generation(&manifest.generation)
         .map_err(|error| error.with_component("manifest.toml"))?;
 
-    validate_relative_path(&manifest.rom).map_err(|error| error.with_component("rom.toml"))?;
+    validate_relative_path(&manifest.rom).map_err(|error| error.with_component("manifest.toml"))?;
+    if let Some(platform) = &manifest.platform {
+        platform.validate().map_err(|error| {
+            ConfigError::at("PlatformConfiguration", "manifest.toml", error.to_string())
+        })?;
+    }
 
     if manifest.modules.is_empty() {
         return Err(ConfigError::new(
@@ -259,6 +334,7 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
     }
 
     validate_generation(&rom.generation).map_err(|error| error.with_component("rom.toml"))?;
+    validate_rom_id(&rom.id)?;
 
     if rom.generation != manifest_generation {
         return Err(ConfigError::at(
@@ -675,7 +751,7 @@ mod tests {
     const MANIFEST: &str = r#"
 schema_version = 1
 generation = "release-1"
-rom = "roms/rom.toml"
+rom = "roms"
 [[modules]]
 name = "espinit"
 path = "modules/espinit.ko"
@@ -688,6 +764,7 @@ params = "debug=0"
     const ROM: &str = r#"
 schema_version = 1
 generation = "release-1"
+id = "android-a"
 managed = true
 [[partitions]]
 name = "system"
@@ -696,11 +773,64 @@ read_only = true
 "#;
 
     #[test]
+    fn boot_selection_is_explicit_unique_and_matches_the_rom() {
+        for id in ["android-a", "android.b_2", "recovery", &"x".repeat(59)] {
+            let boot = format!("androidboot.espinit.rom = \"{id}\"\n");
+            let command = format!("androidboot.espinit.rom={id}");
+            assert_eq!(selected_rom_id(&boot, "").unwrap(), id);
+            assert_eq!(selected_rom_id("", &command).unwrap(), id);
+            assert_eq!(selected_rom_id(&boot, &command).unwrap(), id);
+            assert_eq!(
+                rom_path(&parse_manifest(MANIFEST).unwrap(), id).unwrap(),
+                format!("roms/{id}.toml")
+            );
+        }
+        for (boot, command) in [
+            ("", ""),
+            ("androidboot.qshim.rom = \"android-a\"", ""),
+            (
+                "androidboot.espinit.rom = \"a\"",
+                "androidboot.espinit.rom=b",
+            ),
+            (
+                "androidboot.espinit.rom = \"a\"\nandroidboot.espinit.rom = \"a\"",
+                "",
+            ),
+            ("", "androidboot.espinit.rom=a androidboot.espinit.rom=a"),
+        ] {
+            assert!(selected_rom_id(boot, command).is_err());
+        }
+        for id in [
+            "",
+            ".",
+            "..",
+            "../a",
+            "a/b",
+            "é",
+            "a b",
+            "\"a",
+            "a\"",
+            &"x".repeat(60),
+        ] {
+            assert!(selected_rom_id(&format!("androidboot.espinit.rom = {id}"), "").is_err());
+            assert!(rom_path(&parse_manifest(MANIFEST).unwrap(), id).is_err());
+        }
+        parse_selected_rom(ROM, "release-1", "android-a").unwrap();
+        assert_eq!(
+            parse_selected_rom(ROM, "release-1", "android-b")
+                .unwrap_err()
+                .error,
+            "RomIdMismatch"
+        );
+        assert!(parse_rom(&ROM.replace("android-a", "../a"), "release-1").is_err());
+    }
+
+    #[test]
     fn valid_managed_configuration_preserves_order_and_projection() {
         let manifest = parse_manifest(MANIFEST).unwrap();
         let rom = parse_rom(ROM, &manifest.generation).unwrap();
         validate_managed(&manifest, &rom).unwrap();
-        assert_eq!(manifest.rom, "roms/rom.toml");
+        assert_eq!(manifest.rom, "roms");
         assert_eq!(
             manifest
                 .modules
@@ -741,6 +871,7 @@ read_only = true
             format!("{ROM}unexpected = true\n"),
             ROM.replace("managed = true", "managed = true\nmanaged = false"),
             ROM.replace("read_only = true\n", ""),
+            ROM.replace("id = \"android-a\"\n", ""),
             ROM.replace("managed = true", "managed = \"true\""),
         ] {
             assert_eq!(
@@ -767,7 +898,7 @@ read_only = true
                 "ManifestDuplicateModule",
             ),
             (
-                "schema_version=1\ngeneration=\"release-1\"\nrom=\"rom.toml\"\nmodules=[]".into(),
+                "schema_version=1\ngeneration=\"release-1\"\nrom=\"roms\"\nmodules=[]".into(),
                 "ManifestModulesEmpty",
             ),
         ] {
@@ -966,7 +1097,7 @@ read_only = true
             ("", "PathEmpty"),
         ] {
             for text in [
-                MANIFEST.replace("roms/rom.toml", path),
+                MANIFEST.replace("roms", path),
                 MANIFEST.replace("modules/gpt.ko", path),
             ] {
                 assert_eq!(parse_manifest(&text).unwrap_err().error, error, "{path}");
@@ -1092,7 +1223,8 @@ read_only = true
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             generation: "release-1".to_owned(),
-            rom: "roms/rom.toml".to_owned(),
+            rom: "roms".to_owned(),
+            platform: None,
             modules: vec![
                 ModuleEntry {
                     name: "gpt".to_owned(),
@@ -1137,7 +1269,7 @@ read_only = true
         assert_eq!(unattributed.component, None);
 
         let long = Failure::from(
-            parse_manifest(&MANIFEST.replace("roms/rom.toml", &"p".repeat(MAX_PATH_BYTES + 50)))
+            parse_manifest(&MANIFEST.replace("roms", &"p".repeat(MAX_PATH_BYTES + 50)))
                 .unwrap_err(),
         );
         assert_eq!(long.error, "PathTooLong");
