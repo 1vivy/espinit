@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::os::fd::RawFd;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 // sigsys handler
 std::thread_local! {
@@ -80,9 +80,19 @@ pub fn setup_sigsys_handler() {
 
 const DRIVER_FD_NAME: &str = "anon_inode:[espinit]";
 
-// Global driver fd cache
-static DRIVER_FD: OnceLock<RawFd> = OnceLock::new();
-static INFO_CACHE: OnceLock<ksu_uapi::ksu_get_info_cmd> = OnceLock::new();
+// Cached driver state. Both initializers are fixed and idempotent, so they
+// live with the statics and run on first use: the control fd is installed once
+// through the reboot hook, and the core identity is queried once through it.
+static DRIVER_FD: LazyLock<RawFd> = LazyLock::new(|| init_driver_fd().unwrap_or(-1));
+static INFO_CACHE: LazyLock<ksu_uapi::ksu_get_info_cmd> = LazyLock::new(query_info);
+
+/// The daemon and the core module exchange exactly the v2 `ksu_get_info_cmd`
+/// from `uapi/supercall.h`. A drift in either the field layout (84 bytes) or
+/// the encoded ioctl number (`0x80544502`) must fail this build instead of
+/// silently reading a different structure, so both are checked here at compile
+/// time, mirroring the checks in the PID-1 stage.
+const _: () = assert!(std::mem::size_of::<ksu_uapi::ksu_get_info_cmd>() == 84);
+const _: () = assert!(ksu_uapi::KSU_IOCTL_GET_INFO == 0x8054_4502);
 
 fn scan_driver_fd() -> io::Result<Option<RawFd>> {
     let fd_dir = fs::read_dir("/proc/self/fd")?;
@@ -131,7 +141,7 @@ fn init_driver_fd() -> Option<RawFd> {
 fn ksuctl<T>(request: u32, arg: *mut T) -> Result<i32> {
     use std::io;
 
-    let fd = *DRIVER_FD.get_or_init(|| init_driver_fd().unwrap_or(-1));
+    let fd = *DRIVER_FD;
     if fd < 0 {
         bail!("could not retrieve espinit driver fd")
     }
@@ -145,19 +155,31 @@ fn ksuctl<T>(request: u32, arg: *mut T) -> Result<i32> {
 }
 
 // API implementations
+
+/// Query the core module once through the v2 get-info ioctl. The buffer starts
+/// fully zeroed so a legacy reply can never leave the v2-only fields
+/// (`uapi_version`, `state`, `generation`) uninitialized.
+fn query_info() -> ksu_uapi::ksu_get_info_cmd {
+    let mut cmd = ksu_uapi::ksu_get_info_cmd {
+        version: 0,
+        flags: 0,
+        features: 0,
+        uapi_version: 0,
+        state: 0,
+        generation: [0; 64],
+    };
+    if ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO, &raw mut cmd).is_err() {
+        // A core predating UAPI v2 answers only the zero-size request, and its
+        // reply carries neither a version nor a generation; the readiness and
+        // generation checks below reject that reply.
+        let _ = ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO_LEGACY, &raw mut cmd);
+    }
+    cmd
+}
+
+/// The core module identity reported by the last get-info query.
 pub fn get_info() -> ksu_uapi::ksu_get_info_cmd {
-    *INFO_CACHE.get_or_init(|| {
-        let mut cmd = ksu_uapi::ksu_get_info_cmd {
-            version: 0,
-            flags: 0,
-            features: 0,
-            uapi_version: 0,
-        };
-        if ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO, &raw mut cmd).is_err() {
-            let _ = ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO_LEGACY, &raw mut cmd);
-        }
-        cmd
-    })
+    *INFO_CACHE
 }
 
 pub fn get_version() -> i32 {
@@ -172,18 +194,82 @@ pub const fn uapi_version() -> u32 {
     ksu_uapi::ESPINIT_UAPI_VERSION
 }
 
+/// Build generation compiled into this daemon by build.rs, from
+/// `ESPINIT_GENERATION` or the full Git HEAD hash of the espinit repository.
+/// It must equal the generation of the loaded core module.
+pub const BUILD_GENERATION: &str = env!("ESPINIT_GENERATION");
+
+/// State bits reported by the core module through the last get-info query.
+pub fn core_state() -> u32 {
+    get_info().state
+}
+
+/// True when the core module reported `ESPINIT_STATE_READY`, i.e. its normal
+/// initialization completed.
+pub fn is_core_ready() -> bool {
+    core_state() & ksu_uapi::ESPINIT_STATE_READY != 0
+}
+
+/// Build generation reported by the loaded core module, decoded from the
+/// fixed-width NUL-terminated ASCII field. `generation[63]` is always NUL, so
+/// a missing terminator or non-ASCII content means the core is not speaking
+/// this ABI, and the result is `None`. Any remaining weakness in this decode
+/// cannot admit an invalid generation: the caller accepts it only when it is
+/// byte-identical to `BUILD_GENERATION`, which build.rs validates against the
+/// `[A-Za-z0-9._-]{1,63}` build charset.
+pub fn kernel_generation() -> Option<String> {
+    let generation = &get_info().generation;
+    let end = generation.iter().position(|&byte| byte == 0)?;
+    let bytes = &generation[..end];
+    if !bytes.is_ascii() {
+        return None;
+    }
+    Some(bytes.iter().map(|&byte| char::from(byte)).collect())
+}
+
 pub fn runtime_mode() -> &'static str {
     if is_lkm() { "module" } else { "built-in" }
 }
 
+/// Verify that the loaded core module matches this daemon before any operation
+/// relies on it: same UAPI, finished initialization and identical generation.
 pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
-    let kernel_uapi = get_info().uapi_version;
+    let info = get_info();
+    let kernel_uapi = info.uapi_version;
     let userspace_uapi = uapi_version();
     if kernel_uapi != userspace_uapi {
         bail!(
             "UAPI version mismatch: kernel={kernel_uapi}, espinitd={userspace_uapi}. Please update espinit!"
         );
     }
+
+    if !is_core_ready() {
+        bail!(
+            "espinit core is not ready: get-info reported state=0x{:x} without the READY bit. Load the \
+             matching espinit module to completion before the daemon runs.",
+            info.state
+        );
+    }
+
+    let Some(kernel_generation) = kernel_generation() else {
+        bail!(
+            "espinit core reported an invalid build generation: the get-info field is not \
+             NUL-terminated ASCII. Build and load a core module that implements UAPI v2."
+        );
+    };
+    if kernel_generation.is_empty() {
+        bail!(
+            "espinit core reported an empty build generation. Build the core module with \
+             ESPINIT_GENERATION or from a Git checkout and reinstall the matching payload."
+        );
+    }
+    if kernel_generation != BUILD_GENERATION {
+        bail!(
+            "espinit generation mismatch: kernel={kernel_generation}, espinitd={BUILD_GENERATION}. \
+             Install a payload whose core module and daemon share one generation."
+        );
+    }
+
     Ok(())
 }
 

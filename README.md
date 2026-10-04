@@ -1,8 +1,8 @@
 # espinit
 
-espinit is an early-boot substrate forked from [KernelSU](https://github.com/tiann/KernelSU), not an Android root product. This repository is a conservative source baseline: it retains KernelSU's kernel-module lifecycle, hook design, Rust PID-1/daemon split, and aarch64, x86_64, and riscv64 build shape where applicable. App-facing root grants, the Manager APK, and Manager-dependent packaging are outside the product.
+espinit is an early-boot substrate forked from [KernelSU](https://github.com/tiann/KernelSU), not an Android root product. It retains KernelSU's kernel-module lifecycle, hook design, Rust PID-1/daemon split, and aarch64, x86_64, and riscv64 build shape where applicable. App-facing root grants, the Manager APK, and Manager-dependent packaging are outside the product.
 
-**Status:** the ESP layout, TOML configuration, generation checks, partition projection, and failure receipts below are a **planned implementation contract**, not working features or a supported installation procedure. Source adaptation alone does not establish boot compatibility or security. The examples are configuration specifications, not files the current baseline necessarily consumes.
+**Status:** the public identity/source baseline and managed PID-1 loader are implemented. The loader consumes the ESP TOML contract, validates one ESP and every generation, preloads vendor modules, loads and self-checks the ordered payload, runs bounded early/recovery scripts, and hands off to `/init` only after detaching its mounts. `gpt.ko`, loop attachment, complete partition projection, GBL packaging, Cuttlefish behavior proof, and phone validation remain incomplete; this is not yet a supported installation procedure.
 
 ## Architecture and identity
 
@@ -21,11 +21,11 @@ No Manager APK, app-root API, `su` compatibility, allowlist/profile product, Web
 
 ## Delivery stages
 
-1. **Source baseline (current work):** isolate public identity and remove root/Manager product surfaces while preserving reusable kernel/userspace architecture and multi-architecture build logic.
-2. **Managed boot (planned):** consume the layout and manifest below, enforce generation matching, load modules in order, check readiness, and persist failure receipts before Android handoff.
-3. **ROM projection (planned):** implement the separate `gpt.ko` in-memory view and consume `rom.toml`; only then enable managed-ROM boot on validated devices.
+1. **Source baseline (implemented):** isolate public identity and remove root/Manager product surfaces while preserving reusable kernel/userspace architecture and multi-architecture build logic.
+2. **Managed boot (implemented in source):** consume the layout and manifest below, enforce generation matching, load modules in order, check readiness, persist failure receipts, detach early mounts, and then hand off to Android init.
+3. **ROM projection (in progress):** implement the separate `gpt.ko` in-memory view and consume the validated `rom.toml`; only then enable managed-ROM boot on validated devices.
 
-These are dependency stages, not claims that stage 2 or 3 already exists. Device firmware integration and testing are required before deployment.
+These are dependency stages, not claims of device compatibility. Cuttlefish and phone integration remain required before deployment.
 
 ## Build notes
 
@@ -50,15 +50,20 @@ ESP filesystem /                      # normally read-only
     ├── rom.toml
     ├── bin/
     │   ├── espinit
-    │   └── espinitd                  # install source, not the executed path
-    ├── modules/                      # kernel modules loaded by PID 1
+    │   ├── espinitd                  # install source, not the executed path
+    │   └── busybox                   # static interpreter for ESP scripts
+    ├── modules/                      # kernel modules and optional stage scripts
     │   ├── espinit.ko
-    │   └── gpt.ko                    # required only for managed-ROM projection
+    │   ├── espinit/early.sh
+    │   ├── espinit/recovery.sh
+    │   ├── gpt.ko                    # required only for managed-ROM projection
+    │   ├── gpt/early.sh
+    │   └── gpt/recovery.sh
     └── receipts/
-        └── failure.json              # planned: last failed early managed boot
+        └── failure.json              # last failed early managed boot
 ```
 
-The mutable state root `/metadata/espinit/` is separate from the ESP and holds daemon runtime state after successful handoff, once metadata is available. It is not an early-boot receipt dependency. Names already used by the baseline userspace/kernel code are listed here; anything marked planned is not yet implemented.
+The mutable state root `/metadata/espinit/` is separate from the ESP and holds daemon runtime state after successful handoff, once metadata is available. It is not an early-boot receipt dependency. Names used by the current userspace/kernel code are listed here; later platform-module packaging may add scoped files without changing the early-boot source of truth.
 
 ```text
 /metadata/espinit/
@@ -80,9 +85,9 @@ The mutable state root `/metadata/espinit/` is separate from the ESP and holds d
 
 The two `modules/` directories are unrelated and never interchangeable: the ESP `modules/` holds the tiny kernel-module payload that PID 1 loads, while `/metadata/espinit/modules/` is the Android ZIP-module store managed by `espinitd` after boot. `initrc/modules.rc` is the generated boot fragment consumed by Android init; every path under `/metadata/espinit/` is a state path, never a boot-critical source for early PID 1.
 
-The boot-image integration must arrange execution of the matching ESP `bin/espinit` as early PID 1 and make the ESP subtree available before manifest processing. It must preserve the real-init handoff target independently of ESP configuration; a manifest may not choose an arbitrary init executable. No `current` symlink, generation fallback directory, or implicit module discovery is part of this contract. `espinitd` starts through Android init only after successful handoff; it cannot repair an unsuccessful early-boot check.
+The boot-image integration must place the matching static binary at ramdisk `/espinit` and select it with `rdinit=/espinit`; the ESP payload is discovered and mounted by that binary before manifest processing. Integration must preserve the real-init handoff target independently of ESP configuration; a manifest may not choose an arbitrary init executable. No `current` symlink, generation fallback directory, or implicit module discovery is part of this contract. `espinitd` starts through Android init only after successful handoff; it cannot repair an unsuccessful early-boot check.
 
-## Manifest (planned)
+## Manifest
 
 See [`espinit/manifest.example.toml`](espinit/manifest.example.toml). TOML is used directly; no templating or executable configuration.
 
@@ -98,9 +103,9 @@ See [`espinit/manifest.example.toml`](espinit/manifest.example.toml). TOML is us
 
 All entries are required; there are no optional loads, discovery, retries with another generation, or sorting by filename. Unknown fields, duplicate entries/keys, missing fields, and incorrect types are errors. A managed ROM requires `gpt` after `espinit` and before real-init handoff. Other modules must obey the same generation and readiness requirements; dependencies must precede dependents.
 
-## ROM configuration (planned)
+## ROM configuration
 
-See [`espinit/rom.example.toml`](espinit/rom.example.toml). This file selects projected names and their existing whole block-device backends; it does not contain a new physical partition table.
+See [`espinit/rom.example.toml`](espinit/rom.example.toml). The loader parses and validates this file now; `gpt.ko` consumption remains part of the projection stage. The file selects projected names and their existing whole block-device backends; it does not contain a new physical partition table.
 
 | Field | Type and meaning |
 | --- | --- |
@@ -114,18 +119,18 @@ See [`espinit/rom.example.toml`](espinit/rom.example.toml). This file selects pr
 
 A projection spans exactly the entire backend block device; no resizing, implicit slot suffix, or offset arithmetic. Names must not collide with retained physical names or another projection. Backends must be distinct block devices, valid for the running device, and resolved without following the newly projected view. A preallocated ESP regular file must first be attached using a standard Linux loop device, with no offset or size slicing, before `gpt` APPLY; only the resulting block-device path is supplied as `backend`. The loop attachment must remain alive for the projection's lifetime. Schema v1 adds no file-extent or FIEMAP ABI to `gpt.ko`. Missing/ambiguous backends, repeated backends, invalid names, unknown fields, and unsupported schemas are validation failures. Document order defines publication order, not priority or fallback.
 
-## Generation matching and module self-check (planned)
+## Generation matching and module self-check
 
-The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; a filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
+The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; `ESPINIT_GENERATION` selects it explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
 
-Before loading dependent modules, PID 1 must query the espinit-specific kernel control interface and verify core identity, ABI compatibility, generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose a successful self-check including its identity, generation, and readiness before the next entry proceeds. `gpt` readiness additionally means every requested backend was validated and the complete projected view is active; partial publication is failure. The exact wire encoding/control commands are future implementation work, but these checks and their ordering are mandatory and may not be replaced with a log-string or load-success heuristic.
+Before loading dependent modules, PID 1 queries the espinit-specific UAPI v2 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose matching `generation` and `ready` parameters before the next entry proceeds. For `gpt`, readiness is checked in the projection failure stage and diagnostics include the validated requested partition/mode counts; `gpt.ko` must not set `ready` until its complete view is active.
 
-## Boot ordering and hard-failure receipt (planned)
+## Boot ordering and hard-failure receipt
 
-1. Prepare the minimum early mounts/logging, locate and normally mount the ESP read-only, and validate both TOML files without changing the partition view. No step here requires projected `/metadata`.
-2. Check payload generations, module ordering, backend configuration, and the ESP receipt location `/espinit/receipts` (runtime `/debug_ramdisk/esp/espinit/receipts`) and failure-only remount capability. For managed boot, unavailable receipt storage is itself a hard failure; do not mount or depend on `/metadata` for this check.
-3. Load or validate `espinit.ko`, then load the remaining modules in manifest order and perform each self-check. Before `gpt` APPLY, attach any preallocated ESP file backends using standard loop devices and resolve their block-device paths. Configure and activate the complete `gpt` projection and establish readiness before handoff for a managed ROM.
-4. Only after all required checks succeed, transfer control to real Android init. Later Android startup may make `/metadata/espinit` available and launch the matching `espinitd` for runtime receipts/logs.
+1. Prepare the minimum early mounts/logging, preload the applicable vendor modules with their dependencies/options, wait up to ten seconds for storage enumeration, locate exactly one ESP, mount it read-only, and validate both TOML files without changing the partition view. No step here requires projected `/metadata`.
+2. Check payload generations, module ordering, backend configuration, and the ESP receipt directory `/espinit/receipts` (runtime `/debug_ramdisk/esp/espinit/receipts`) structurally without opening a write window. For managed boot, unavailable receipt storage is itself a hard failure; do not mount or depend on `/metadata` for this check.
+3. Load or validate `espinit.ko`, then load the remaining modules in manifest order, perform each self-check, and run each module's optional `early.sh` or `recovery.sh` through the ESP busybox with a 35-second deadline. Before `gpt` APPLY, attach any preallocated ESP file backends using standard loop devices and resolve their block-device paths. Configure and activate the complete `gpt` projection and establish readiness before handoff for a managed ROM.
+4. Only after all required checks succeed, detach the ESP plus any `/proc`, `/sys`, and `/dev` mounts created by espinit, then replace PID 1 with fixed `/init`. Later Android startup may make `/metadata/espinit` available and launch the matching `espinitd` for runtime receipts/logs.
 
 A selected managed ROM has **no stock-ROM fallback**. Any parse, generation, load, self-check, backend, projection, or handoff failure must stop normal Android handoff. Invalid/unreadable configuration must not be interpreted as `managed = false`; only an explicitly valid unmanaged configuration permits an unchanged partition view. Do not silently skip a module or leave a partially projected boot running.
 

@@ -1,71 +1,355 @@
-use std::ffi::CString;
-use std::io::{ErrorKind, Write};
+//! espinit PID-1 early managed boot.
+//!
+//! The order is fixed by the boot contract: minimal mounts and logging, normal
+//! vendor module loading, ESP discovery and read-only mount, strict manifest
+//! and ROM validation, generation matching, ordered payload module loading with
+//! self-checks, and finally the real-init handoff. Any failure stops the
+//! handoff, persists a receipt, and enters the fatal-boot stop path. There is
+//! no soft fallback and no stock-ROM fallback.
 
-use anyhow::{Context, Result};
-use rustix::fs::{Mode, symlink, unlink};
-use rustix::{
-    fd::AsFd,
-    fs::{Access, CWD, FileType, access, makedev, mkdir, mknodat},
-    mount::{
-        FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, UnmountFlags, fsconfig_create,
-        fsmount, fsopen, move_mount, unmount,
-    },
-};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-struct AutoUmount {
-    mountpoints: Vec<String>,
+use rustix::fs::{CWD, FileType, makedev, mknodat};
+use rustix::system::{RebootCommand, reboot};
+
+use crate::config::{self, Manifest, RomConfig};
+use crate::esp;
+use crate::loader;
+use crate::receipt::{Failure, ReceiptState, Stage};
+use crate::scripts;
+use crate::selfcheck;
+
+/// Generation compiled into this PID-1 binary, derived by `build.rs` from
+/// `ESPINIT_GENERATION` or the full Git HEAD hash.
+pub const BINARY_GENERATION: &str = env!("ESPINIT_GENERATION");
+
+/// Run the early managed boot. This must run as process 1: the entry point
+/// refuses to continue otherwise, before any platform side effect. On success
+/// the caller may hand off to the real init; every error is classified for the
+/// failure receipt.
+pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
+    setup_kmsg();
+    log::info!("espinit early managed boot starting");
+    let mounts = mount_minimal()?;
+    unlimit_kmsg();
+
+    loader::load_vendor_modules()?;
+
+    let mount = wait_for_esp()?;
+    let payload_root = esp::payload_root(mount.path());
+    state.esp_mount = Some(mount);
+
+    let manifest = read_manifest(&payload_root)?;
+    let rom = read_rom(&payload_root, &manifest)?;
+
+    check_binary_generation(&manifest)?;
+    state.generation = Some(manifest.generation.clone());
+
+    config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
+
+    if rom.managed {
+        wait_for_backends(&rom)?;
+        require_receipt_storage(&payload_root)?;
+    } else if !payload_root.join("receipts").is_dir() {
+        log::warn!("ESP receipt directory is missing; failures cannot be persisted");
+    }
+
+    // Bounded, path-free summary of the validated configuration. The requested
+    // access modes are the input to projection; report them before the `gpt`
+    // module publishes anything.
+    log::info!("Validated configuration: {}", rom.partition_modes());
+
+    log::info!(
+        "Boot mode: {}, managed: {}",
+        if scripts::is_recovery() {
+            "recovery"
+        } else {
+            "normal"
+        },
+        rom.managed
+    );
+
+    load_and_check_payload(&payload_root, &manifest, &rom)?;
+
+    log::info!(
+        "Early managed boot checks passed; handing off to {}",
+        crate::handoff::REAL_INIT
+    );
+
+    prepare_handoff(state, &mounts)
 }
 
-impl Drop for AutoUmount {
-    fn drop(&mut self) {
-        for mountpoint in self.mountpoints.iter().rev() {
-            if let Err(e) = unmount(mountpoint.as_str(), UnmountFlags::DETACH) {
-                log::error!("Cannot umount {}: {}", mountpoint, e)
+/// Load the payload modules in manifest order, self-check each one, and run its
+/// early or recovery script before the next entry is processed.
+fn load_and_check_payload(
+    payload_root: &Path,
+    manifest: &Manifest,
+    rom: &RomConfig,
+) -> Result<(), Failure> {
+    let generation = manifest.generation.as_str();
+    let modes = rom.partition_modes();
+    let core = manifest
+        .modules
+        .first()
+        .ok_or_else(|| Failure::new(Stage::Configuration, "ManifestModulesEmpty", "no modules"))?;
+
+    if crate::core_loaded() {
+        log::info!("Core module is already loaded; validating it instead of reloading");
+    } else {
+        let path = loader::resolve_payload_file(payload_root, &core.path, &core.name)?;
+        loader::load_managed_module(&path, core)?;
+    }
+
+    selfcheck::check_core(generation)?;
+    scripts::run_module_scripts(payload_root, &core.name, generation)?;
+
+    let mut projection_checked = false;
+
+    for entry in manifest.modules.iter().skip(1) {
+        let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
+
+        if loader::module_loaded(&entry.name) {
+            log::info!(
+                "Module {} is already loaded; validating it instead of reloading",
+                entry.name
+            );
+        } else {
+            loader::load_managed_module(&path, entry)?;
+        }
+
+        if entry.name == "gpt" {
+            selfcheck::check_projection(&entry.name, generation, modes)?;
+            projection_checked = true;
+        } else {
+            selfcheck::check_module(&entry.name, generation)?;
+        }
+
+        scripts::run_module_scripts(payload_root, &entry.name, generation)?;
+    }
+
+    if rom.managed && !projection_checked {
+        // Configuration validation already requires `gpt` for a managed ROM;
+        // this guards against the two checks drifting apart.
+        return Err(Failure::new(
+            Stage::Projection,
+            "ProjectionModuleMissing",
+            format!("a managed ROM requires an initialized gpt module before handoff ({modes})"),
+        ));
+    }
+
+    Ok(())
+}
+
+/// The PID-1 binary must carry the same generation as the manifest.
+fn check_binary_generation(manifest: &Manifest) -> Result<(), Failure> {
+    if BINARY_GENERATION != manifest.generation {
+        return Err(Failure::at(
+            Stage::Generation,
+            Some("bin/espinit"),
+            "HandoffGenerationMismatch",
+            format!(
+                "PID-1 generation {BINARY_GENERATION} does not match manifest generation {}",
+                manifest.generation
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Receipt storage is required for a managed ROM: unavailable receipt storage
+/// is itself a hard failure, and `/metadata` must never be involved.
+fn require_receipt_storage(payload_root: &Path) -> Result<(), Failure> {
+    let receipts = payload_root.join("receipts");
+
+    match fs::symlink_metadata(&receipts) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(Failure::new(
+            Stage::Storage,
+            "ReceiptStorageUnavailable",
+            format!("{} is not a directory", receipts.display()),
+        )),
+        Err(error) => Err(Failure::new(
+            Stage::Storage,
+            "ReceiptStorageUnavailable",
+            format!("cannot use {}: {error}", receipts.display()),
+        )),
+    }
+}
+
+fn read_manifest(payload_root: &Path) -> Result<Manifest, Failure> {
+    let text = read_config_file(payload_root, "manifest.toml", "ManifestUnreadable")?;
+
+    config::parse_manifest(&text).map_err(Failure::from)
+}
+
+fn read_rom(payload_root: &Path, manifest: &Manifest) -> Result<RomConfig, Failure> {
+    let text = read_config_file(payload_root, &manifest.rom, "RomUnreadable")?;
+
+    config::parse_rom(&text, &manifest.generation).map_err(Failure::from)
+}
+
+/// Read a configuration file rooted at the ESP `/espinit` subtree, rejecting a
+/// symbolic link in any component: configuration must never traverse a link.
+fn read_config_file(
+    payload_root: &Path,
+    relative: &str,
+    unreadable: &'static str,
+) -> Result<String, Failure> {
+    let mut path = payload_root.to_path_buf();
+
+    for part in relative.split('/') {
+        path.push(part);
+
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Failure::at(
+                    Stage::Configuration,
+                    Some(relative),
+                    "PathSymlink",
+                    format!("{} is a symbolic link", path.display()),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(Failure::at(
+                    Stage::Configuration,
+                    Some(relative),
+                    unreadable,
+                    format!("cannot access {}: {error}", path.display()),
+                ));
+            }
+        }
+    }
+
+    fs::read_to_string(&path).map_err(|error| {
+        Failure::at(
+            Stage::Configuration,
+            Some(relative),
+            unreadable,
+            format!("cannot read {}: {error}", path.display()),
+        )
+    })
+}
+
+/// Upper bound for an asynchronously enumerated device to appear once the
+/// vendor storage modules have been loaded: beyond this window the ESP and the
+/// managed backends are genuinely absent.
+const ENUMERATION_WINDOW: Duration = Duration::from_secs(10);
+
+/// Delay between enumeration attempts inside the window.
+const ENUMERATION_RETRY: Duration = Duration::from_millis(100);
+
+/// Retry `probe` within a bounded window while `pending` classifies a failure
+/// as a device or sysfs entry that is not enumerated yet. A permanent failure
+/// stops immediately, and the last exact failure is returned when the window
+/// expires, so nothing is hidden behind a timeout or a fallback.
+fn retry_enumerated<T, E>(
+    what: &str,
+    window: Duration,
+    interval: Duration,
+    mut probe: impl FnMut() -> Result<T, E>,
+    pending: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    let deadline = Instant::now() + window;
+
+    loop {
+        match probe() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if !pending(&error) || Instant::now() >= deadline {
+                    return Err(error);
+                }
+
+                log::info!("{what} is not enumerated yet; retrying within the discovery window");
+                std::thread::sleep(interval);
             }
         }
     }
 }
 
-fn mount_filesystem(name: &str, mountpoint: &str) -> Result<()> {
-    mkdir(mountpoint, Mode::from_raw_mode(0o755)).or_else(|err| match err.kind() {
-        ErrorKind::AlreadyExists => Ok(()),
-        _ => Err(err),
-    })?;
-    let fs_fd = fsopen(name, FsOpenFlags::FSOPEN_CLOEXEC)?;
-    fsconfig_create(fs_fd.as_fd())?;
-    let mount_fd = fsmount(
-        fs_fd.as_fd(),
-        FsMountFlags::FSMOUNT_CLOEXEC,
-        MountAttrFlags::empty(),
-    )?;
-    move_mount(
-        mount_fd.as_fd(),
-        "",
-        CWD,
-        mountpoint,
-        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-    )?;
+/// Discover and mount the ESP, retrying within the bounded enumeration window.
+/// Block devices and their sysfs entries appear asynchronously after the vendor
+/// storage modules load, so a single probe can lose a race that is not a real
+/// failure.
+fn wait_for_esp() -> Result<esp::Mount, Failure> {
+    retry_enumerated(
+        "ESP",
+        ENUMERATION_WINDOW,
+        ENUMERATION_RETRY,
+        esp::mount_esp,
+        |failure| {
+            matches!(
+                failure.error,
+                "EspNotFound" | "EspSysfsUnavailable" | "EspPartitionMissing"
+            )
+        },
+    )
+}
+
+/// Resolve the managed backends within the bounded enumeration window. Other
+/// UFS LUN and block-device enumeration can race the managed boot, so a single
+/// probe can lose a race that is not a real failure. Ambiguous, malformed,
+/// unsupported, duplicated, and invalid configuration stays immediate fatal.
+fn wait_for_backends(rom: &RomConfig) -> Result<(), Failure> {
+    retry_enumerated(
+        "managed backend",
+        ENUMERATION_WINDOW,
+        ENUMERATION_RETRY,
+        || config::validate_backends(rom).map(|_| ()),
+        |error| error.is_pending(),
+    )
+    .map_err(Failure::from)
+}
+
+/// Prepare the minimum early mounts, retaining only the mounts created here.
+fn mount_minimal() -> Result<Vec<&'static str>, Failure> {
+    let mut owned = Vec::with_capacity(3);
+
+    for (filesystem, mountpoint, error) in [
+        ("proc", "/proc", "ProcMountFailed"),
+        ("sysfs", "/sys", "SysMountFailed"),
+        ("devtmpfs", "/dev", "DevMountFailed"),
+    ] {
+        if !esp::is_mounted(mountpoint)
+            .map_err(|detail| Failure::new(Stage::Storage, error, detail))?
+        {
+            esp::mount_kernel_fs(filesystem, mountpoint)
+                .map_err(|detail| Failure::new(Stage::Storage, error, detail))?;
+            owned.push(mountpoint);
+        }
+    }
+
+    Ok(owned)
+}
+
+/// Remove espinit's own early mounts immediately before the real init runs, so
+/// Android's first-stage init starts with a clean mount namespace. Only mounts
+/// espinit created are removed, and a teardown failure is a handoff failure.
+/// The ESP's block device identity is retained so a failed handoff exec can
+/// still re-attach the ESP and persist its receipt.
+fn prepare_handoff(state: &mut ReceiptState, mounts: &[&str]) -> Result<(), Failure> {
+    if let Some(mount) = state.esp_mount.as_mut() {
+        mount.detach()?;
+    }
+
+    for mountpoint in mounts.iter().rev() {
+        esp::detach_owned(mountpoint)?;
+    }
+
     Ok(())
 }
 
-fn prepare_mount() -> AutoUmount {
-    let mut mountpoints = vec![];
-
-    // mount procfs
-    match mount_filesystem("proc", "/proc") {
-        Ok(_) => mountpoints.push("/proc".to_string()),
-        Err(e) => log::error!("Cannot mount procfs: {:?}", e),
-    }
-
-    AutoUmount { mountpoints }
-}
-
+/// Set up kernel logging as early as possible.
 fn setup_kmsg() {
     const KMSG: &str = "/dev/kmsg";
-    let device = match access(KMSG, Access::EXISTS) {
+
+    let device = match rustix::fs::access(KMSG, rustix::fs::Access::EXISTS) {
         Ok(_) => KMSG,
         Err(_) => {
-            // try to create it
             mknodat(
                 CWD,
                 "/kmsg",
@@ -82,8 +366,7 @@ fn setup_kmsg() {
 }
 
 fn unlimit_kmsg() {
-    // Disable kmsg rate limiting
-    if let Ok(mut rate) = std::fs::File::options()
+    if let Ok(mut rate) = fs::File::options()
         .write(true)
         .open("/proc/sys/kernel/printk_devkmsg")
     {
@@ -91,46 +374,96 @@ fn unlimit_kmsg() {
     }
 }
 
-pub fn init() -> Result<()> {
-    // Setup kernel log first
-    setup_kmsg();
+/// Enter the fatal-boot stop path: sync, reboot, and never continue normal
+/// boot when the reboot itself does not take effect.
+pub fn stop_boot() -> ! {
+    rustix::fs::sync();
 
-    log::info!("Hello, espinit!");
-
-    // mount /proc to access kernel interface
-    let _dontdrop = prepare_mount();
-
-    // This relies on the fact that we have /proc mounted
-    unlimit_kmsg();
-
-    if espinit::has_espinit() {
-        log::info!("espinit may be already loaded in kernel, skip!");
-    } else {
-        log::info!("Loading espinit.ko..");
-        if let Err(e) = load_module_from_path("/espinit.ko") {
-            log::error!("Cannot load espinit.ko: {:?}", e);
-        }
+    if let Err(error) = reboot(RebootCommand::Restart) {
+        log::error!("cannot reboot after a failed early boot: {error}");
     }
 
-    // And now we should prepare the real init to transfer control to it
-    unlink("/init")?;
-
-    let real_init = match access("/init.real", Access::EXISTS) {
-        Ok(_) => "init.real",
-        Err(_) => "/system/bin/init",
-    };
-
-    log::info!("init is {}", real_init);
-    symlink(real_init, "/init")?;
-
-    Ok(())
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(600));
+    }
 }
 
-fn load_module_from_path(path: &str) -> Result<()> {
-    anyhow::ensure!(rustix::process::getpid().is_init(), "Invalid process");
-    let buffer = std::fs::read(path).with_context(|| format!("Cannot read file {}", path))?;
-    let params = std::fs::read("/espinit_config").unwrap_or_default();
-    let params = unsafe { CString::from_vec_unchecked(params) };
-    log::info!("load espinit with params {params:?}");
-    espinit::load_module(&buffer, &params)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permanent_failures_stop_without_retrying() {
+        let mut attempts = 0;
+        let error = retry_enumerated(
+            "probe",
+            Duration::from_secs(10),
+            Duration::ZERO,
+            || {
+                attempts += 1;
+                Err::<(), &str>("ambiguous backend")
+            },
+            |_| false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "ambiguous backend");
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn pending_failures_retry_until_the_probe_succeeds() {
+        let mut attempts = 0;
+        let value = retry_enumerated(
+            "probe",
+            Duration::from_secs(10),
+            Duration::ZERO,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err("absent")
+                } else {
+                    Ok(attempts)
+                }
+            },
+            |_| true,
+        )
+        .unwrap();
+
+        assert_eq!(value, 3);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn an_expired_window_returns_the_last_exact_failure() {
+        let mut attempts = 0;
+        let error = retry_enumerated(
+            "probe",
+            Duration::ZERO,
+            Duration::ZERO,
+            || {
+                attempts += 1;
+                Err::<(), &str>("absent")
+            },
+            |_| true,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "absent");
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn enumeration_retry_succeeds_and_reuses_the_published_set() {
+        let rom = config::parse_rom(
+            "schema_version = 1\ngeneration = \"release-1\"\nmanaged = false\n",
+            "release-1",
+        )
+        .unwrap();
+
+        wait_for_backends(&rom).unwrap();
+        // A second resolution reuses the published set instead of re-resolving.
+        config::validate_backends(&rom).unwrap();
+        assert!(rom.resolved_backends().is_empty());
+    }
 }

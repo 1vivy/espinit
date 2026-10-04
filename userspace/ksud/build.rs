@@ -1,5 +1,12 @@
 use std::env;
+use std::path::Path;
 use std::process::Command;
+
+/// Maximum length of the generation string, excluding its NUL terminator. It
+/// must stay in sync with the `generation[64]` field of `struct
+/// ksu_get_info_cmd` in uapi/supercall.h and with the validation in
+/// kernel/Kbuild.
+const GENERATION_MAX_LEN: usize = 63;
 
 fn get_git_version() -> Result<(u32, String), std::io::Error> {
     let output = Command::new("git")
@@ -23,6 +30,91 @@ fn get_git_version() -> Result<(u32, String), std::io::Error> {
     .map_err(|_| std::io::Error::other("Failed to read git describe stdout"))?;
     let version_name = version_name.trim_start_matches('v').to_string();
     Ok((version_code, version_name))
+}
+
+/// Run a git command in the espinit repository and return its trimmed stdout
+/// when the command succeeded and produced something.
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = stdout.trim().to_string();
+    (!stdout.is_empty()).then_some(stdout)
+}
+
+fn is_generation_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
+}
+
+/// Reject a generation that must not be shipped. The value is embedded into a
+/// fixed-width C field and into matching kernel/module builds, so a bad value
+/// must fail the build instead of being truncated or mangled.
+fn validate_generation(value: &str, source: &str) {
+    if value.is_empty() {
+        panic!("espinit {source} is empty, but the generation must not be empty");
+    }
+    if value.len() > GENERATION_MAX_LEN {
+        panic!(
+            "espinit {source} is {} bytes long, but a generation may hold at most \
+             {GENERATION_MAX_LEN} bytes; refusing to truncate it",
+            value.len()
+        );
+    }
+    if let Some(ch) = value.chars().find(|ch| !is_generation_char(*ch)) {
+        panic!(
+            "espinit {source} contains {ch:?}, but a generation must be ASCII \
+             letters/digits or one of . _ -"
+        );
+    }
+}
+
+/// The generation shared by the PID-1 stage, the core kernel module, every ESP
+/// module and this daemon. `ESPINIT_GENERATION` wins when set, otherwise the
+/// full 40-byte lowercase Git HEAD hash of the espinit repository is used.
+/// Keep this logic in sync with kernel/Kbuild and userspace/ksuinit/build.rs.
+fn build_generation() -> String {
+    match env::var("ESPINIT_GENERATION") {
+        Ok(value) if !value.is_empty() => {
+            validate_generation(&value, "ESPINIT_GENERATION");
+            value
+        }
+        Ok(_) => {
+            panic!("ESPINIT_GENERATION is set but empty; unset it to derive the full Git HEAD hash")
+        }
+        Err(_) => {
+            let head = git_output(&["rev-parse", "HEAD"]).unwrap_or_else(|| {
+                panic!(
+                    "cannot derive the espinit generation: ESPINIT_GENERATION is unset and \
+                     `git rev-parse HEAD` failed or returned no usable output. Set ESPINIT_GENERATION explicitly when building from a source tarball."
+                )
+            });
+            if head.len() != 40
+                || !head
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                panic!(
+                    "git rev-parse HEAD did not return 40 lowercase hex bytes; set ESPINIT_GENERATION explicitly when building from a source tarball"
+                );
+            }
+            head
+        }
+    }
+}
+
+/// Files whose content changes the generation or the generated UAPI bindings.
+/// Cargo reruns this script when one of them changes; without this the daemon
+/// could keep a stale generation after a checkout or a UAPI edit.
+fn generation_inputs() -> Vec<String> {
+    let mut inputs = vec!["src/ksu_uapi.h".to_string(), "../../uapi".to_string()];
+    if let Some(git_dir) = git_output(&["rev-parse", "--absolute-git-dir"]) {
+        let git_dir = Path::new(&git_dir);
+        inputs.push(git_dir.join("HEAD").display().to_string());
+        inputs.push(git_dir.join("refs").join("heads").display().to_string());
+    }
+    inputs
 }
 
 fn configure_bindgen() {
@@ -68,6 +160,13 @@ fn main() {
     };
     println!("cargo:rustc-env=VERSION_CODE={code}");
     println!("cargo:rustc-env=VERSION_NAME={name}");
+
+    let generation = build_generation();
+    println!("cargo:rustc-env=ESPINIT_GENERATION={generation}");
+    println!("cargo:rerun-if-env-changed=ESPINIT_GENERATION");
+    for input in generation_inputs() {
+        println!("cargo:rerun-if-changed={input}");
+    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
     if target_os == "android" {
