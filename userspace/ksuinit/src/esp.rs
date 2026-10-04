@@ -1,13 +1,15 @@
 //! ESP discovery and read-only mounting.
 //!
 //! There is no device-name allowlist: whole block disks are enumerated from
-//! sysfs, their dev_t is read from sysfs, and the EFI System Partition is found
-//! by parsing the GPT and matching the ESP type GUID. Exactly one such
-//! partition may exist. The block node is created from the major/minor pair
-//! discovered through sysfs, and the filesystem is mounted read-only. The mount
-//! stays executable so the payload busybox can run from it, and it is detached
-//! again before the real init is executed; the block device identity is kept so
-//! a failed handoff can re-attach it for the failure receipt.
+//! sysfs, their dev_t is read from sysfs, and EFI System Partitions are found
+//! by parsing the GPT and matching the ESP type GUID. Devices may carry other
+//! ESPs (for example, the firmware's own loader partition), so candidates are
+//! mounted read-only and exactly one must contain a regular
+//! `/espinit/manifest.toml`. The selected block node is created from the
+//! major/minor pair discovered through sysfs. The mount stays executable so the
+//! payload busybox can run from it, and it is detached again before the real
+//! init is executed; the block device identity is kept so a failed handoff can
+//! re-attach it for the failure receipt.
 
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
@@ -27,6 +29,9 @@ const DEVICE_DIR: &str = "/dev/espinit";
 
 /// sysfs whole-disk directory.
 const SYS_BLOCK: &str = "/sys/block";
+
+/// Marker that identifies the managed payload among other firmware ESPs.
+const PAYLOAD_MANIFEST: &str = "espinit/manifest.toml";
 
 /// Sectors are always 512 bytes for sysfs `start`/`size` units.
 const SYSFS_SECTOR: u64 = 512;
@@ -125,15 +130,75 @@ impl Mount {
     }
 }
 
-/// Discover the single ESP and mount it read-only at [`ESP_MOUNT_POINT`].
+/// Discover the payload ESP and mount it read-only at [`ESP_MOUNT_POINT`].
 pub fn mount_esp() -> Result<Mount, Failure> {
-    let device = discover_esp()?;
+    let devices = discover_esps()?;
+    let mut selected = None;
+
+    for (index, device) in devices.iter().enumerate() {
+        let node = create_block_node(
+            &format!("esp-{}-{}", device.major, device.minor),
+            device.major,
+            device.minor,
+        )
+        .map_err(|detail| Failure::new(Stage::Storage, "EspDeviceNodeCreate", detail))?;
+
+        if let Err(error) = mount_read_only(&node) {
+            log::warn!(
+                "Skipping ESP candidate {}({}:{}): {}",
+                device.disk,
+                device.major,
+                device.minor,
+                error.detail
+            );
+            continue;
+        }
+
+        let marker = Path::new(ESP_MOUNT_POINT).join(PAYLOAD_MANIFEST);
+        let payload = match fs::symlink_metadata(&marker) {
+            Ok(metadata) => Ok(metadata.file_type().is_file()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Failure::new(
+                Stage::Storage,
+                "EspPayloadProbe",
+                format!("cannot examine {}: {error}", marker.display()),
+            )),
+        };
+        let detached = unmount(ESP_MOUNT_POINT, UnmountFlags::empty()).map_err(|error| {
+            Failure::new(
+                Stage::Storage,
+                "EspProbeUnmount",
+                format!("cannot unmount ESP candidate {node}: {error}"),
+            )
+        });
+        detached?;
+
+        if payload? && selected.replace(index).is_some() {
+            return Err(Failure::new(
+                Stage::Storage,
+                "EspAmbiguous",
+                "multiple EFI System Partitions contain espinit/manifest.toml",
+            ));
+        }
+    }
+
+    let Some(index) = selected else {
+        return Err(Failure::new(
+            Stage::Storage,
+            "EspPayloadNotFound",
+            format!(
+                "{} EFI System Partition candidate(s), none containing a regular {PAYLOAD_MANIFEST}",
+                devices.len()
+            ),
+        ));
+    };
+    let device = &devices[index];
     let node = create_block_node("esp", device.major, device.minor)
         .map_err(|detail| Failure::new(Stage::Storage, "EspDeviceNodeCreate", detail))?;
     mount_read_only(&node)?;
 
     log::info!(
-        "Mounted ESP partition {}({}:{}) at {}",
+        "Mounted payload ESP partition {}({}:{}) at {}",
         device.disk,
         device.major,
         device.minor,
@@ -185,8 +250,8 @@ pub fn is_mounted(mountpoint: &str) -> Result<bool, String> {
     Ok(target.dev() != parent.dev())
 }
 
-/// Walk every whole block disk and return the one ESP partition.
-fn discover_esp() -> Result<EspDevice, Failure> {
+/// Walk every whole disk and return all enumerated ESP partition devices.
+fn discover_esps() -> Result<Vec<EspDevice>, Failure> {
     let disks = fs::read_dir(SYS_BLOCK).map_err(|error| {
         Failure::new(
             Stage::Storage,
@@ -265,19 +330,15 @@ fn discover_esp() -> Result<EspDevice, Failure> {
         }
     }
 
-    match found.len() {
-        0 => Err(Failure::new(
+    if found.is_empty() {
+        return Err(Failure::new(
             Stage::Storage,
             "EspNotFound",
             "no EFI System Partition found on any whole block disk",
-        )),
-        1 => Ok(found.remove(0)),
-        count => Err(Failure::new(
-            Stage::Storage,
-            "EspAmbiguous",
-            format!("found {count} EFI System Partitions; exactly one is required"),
-        )),
+        ));
     }
+
+    Ok(found)
 }
 
 /// Read and parse the GPT of one disk, returning its ESP entries.
