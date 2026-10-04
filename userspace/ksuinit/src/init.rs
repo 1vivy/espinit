@@ -330,7 +330,10 @@ fn wait_for_esp() -> Result<esp::Mount, Failure> {
         |failure| {
             matches!(
                 failure.error,
-                "EspNotFound" | "EspSysfsUnavailable" | "EspPartitionMissing"
+                "EspNotFound"
+                    | "EspPayloadNotFound"
+                    | "EspSysfsUnavailable"
+                    | "EspPartitionMissing"
             )
         },
     )
