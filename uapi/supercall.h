@@ -4,21 +4,12 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#include "uapi/app_profile.h"
+// 1: initial espinit ABI (distinct from any KernelSU installation)
+static const __u32 ESPINIT_UAPI_VERSION = 1;
 
-// 2: allowlist v4 root profile flags
-// 3: scoped su-session driver fd
-// 4: add KSU_GET_INFO_FLAG_BUNDLED
-// 5: add EVENT_SERVICES with a start/skip result
-static const __u32 KERNEL_SU_UAPI_VERSION = 5;
-
-/* Magic numbers for reboot hook to install fd */
-static const __u32 KSU_INSTALL_MAGIC1 = 0xDEADBEEF;
-static const __u32 KSU_INSTALL_MAGIC2 = 0xCAFEBABE;
-
-struct ksu_become_daemon_cmd {
-    __u8 token[65]; /* Input: daemon token (null-terminated) */
-};
+/* Magic numbers for the reboot hook to install the driver fd */
+static const __u32 ESPINIT_INSTALL_MAGIC1 = 0x45535049; /* 'ESPI' */
+static const __u32 ESPINIT_INSTALL_MAGIC2 = 0x4e495446; /* 'NITF' */
 
 static const __u32 EVENT_POST_FS_DATA = 1;
 static const __u32 EVENT_BOOT_COMPLETED = 2;
@@ -26,20 +17,16 @@ static const __u32 EVENT_MODULE_MOUNTED = 3;
 static const __u32 EVENT_SERVICES = 4;
 
 static const __u32 KSU_GET_INFO_FLAG_LKM = (1U << 0);
-static const __u32 KSU_GET_INFO_FLAG_MANAGER = (1U << 1);
-static const __u32 KSU_GET_INFO_FLAG_LATE_LOAD = (1U << 2);
-static const __u32 KSU_GET_INFO_FLAG_PR_BUILD = (1U << 3);
-static const __u32 KSU_GET_INFO_FLAG_BUNDLED = (1U << 4);
 
 struct ksu_get_info_cmd {
-    __u32 version; /* Output: KERNEL_SU_VERSION */
+    __u32 version; /* Output: kernel module version */
     __u32 flags; /* Output: KSU_GET_INFO_FLAG_* bits */
     __u32 features; /* Output: max feature ID supported */
-    __u32 uapi_version; /* Output: KERNEL_SU_UAPI_VERSION */
+    __u32 uapi_version; /* Output: ESPINIT_UAPI_VERSION */
 };
 
 struct ksu_get_info_legacy_cmd {
-    __u32 version; /* Output: KERNEL_SU_VERSION */
+    __u32 version; /* Output: kernel module version */
     __u32 flags; /* Output: KSU_GET_INFO_FLAG_* bits */
     __u32 features; /* Output: max feature ID supported */
 };
@@ -71,41 +58,6 @@ struct ksu_sepolicy_cmd_hdr {
 
 struct ksu_check_safemode_cmd {
     __u8 in_safe_mode; /* Output: true if in safe mode, false otherwise */
-};
-
-/* deprecated */
-struct ksu_get_allow_list_cmd {
-    __u32 uids[128]; /* Output: array of allowed/denied UIDs */
-    __u32 count; /* Output: number of UIDs in array */
-    __u8 allow; /* Input: true for allow list, false for deny list */
-};
-
-struct ksu_new_get_allow_list_cmd {
-    __u16 count; /* Input / Output: number of UIDs in array */
-    __u16 total_count; /* Output: total number of UIDs in requested list */
-    __u32 uids[0]; /* Output: array of allowed/denied UIDs */
-};
-
-struct ksu_uid_granted_root_cmd {
-    __u32 uid; /* Input: target UID to check */
-    __u8 granted; /* Output: true if granted, false otherwise */
-};
-
-struct ksu_uid_should_umount_cmd {
-    __u32 uid; /* Input: target UID to check */
-    __u8 should_umount; /* Output: true if should umount, false otherwise */
-};
-
-struct ksu_get_manager_appid_cmd {
-    __u32 appid; /* Output: manager app id */
-};
-
-struct ksu_get_app_profile_cmd {
-    struct app_profile profile; /* Input/Output: app profile structure */
-};
-
-struct ksu_set_app_profile_cmd {
-    struct app_profile profile; /* Input: app profile structure */
 };
 
 struct ksu_get_feature_cmd {
@@ -145,41 +97,24 @@ struct ksu_add_try_umount_cmd {
     __u8 mode; /* denotes what to do with it 0:wipe_list 1:add_to_list 2:delete_entry */
 };
 
-struct ksu_get_sulog_fd_cmd {
-    __u32 flags; /* Input: reserved for future use, must be 0 */
-};
-
 static const __u8 KSU_UMOUNT_WIPE = 0; /* ignore everything and wipe list */
 static const __u8 KSU_UMOUNT_ADD = 1; /* add entry (path + flags) */
 static const __u8 KSU_UMOUNT_DEL = 2; /* delete entry, strcmp */
 
-/* IOCTL command definitions */
-static const __u32 KSU_IOCTL_GRANT_ROOT = _IOC(_IOC_NONE, 'K', 1, 0);
-static const __u32 KSU_IOCTL_GET_INFO = _IOR('K', 2, struct ksu_get_info_cmd);
+/* IOCTL command definitions. The 'E' type keeps espinit distinct from
+ * any existing KernelSU installation using type 'K'. */
+static const __u32 KSU_IOCTL_GET_INFO = _IOR('E', 2, struct ksu_get_info_cmd);
 /* deprecated */
-static const __u32 KSU_IOCTL_GET_INFO_LEGACY = _IOC(_IOC_READ, 'K', 2, 0);
-static const __u32 KSU_IOCTL_REPORT_EVENT = _IOC(_IOC_WRITE, 'K', 3, 0);
-static const __u32 KSU_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'K', 4, 0);
-static const __u32 KSU_IOCTL_CHECK_SAFEMODE = _IOC(_IOC_READ, 'K', 5, 0);
-/* deprecated */
-static const __u32 KSU_IOCTL_GET_ALLOW_LIST = _IOC(_IOC_READ | _IOC_WRITE, 'K', 6, 0);
-/* deprecated */
-static const __u32 KSU_IOCTL_GET_DENY_LIST = _IOC(_IOC_READ | _IOC_WRITE, 'K', 7, 0);
-static const __u32 KSU_IOCTL_NEW_GET_ALLOW_LIST = _IOWR('K', 6, struct ksu_new_get_allow_list_cmd);
-static const __u32 KSU_IOCTL_NEW_GET_DENY_LIST = _IOWR('K', 7, struct ksu_new_get_allow_list_cmd);
-static const __u32 KSU_IOCTL_UID_GRANTED_ROOT = _IOC(_IOC_READ | _IOC_WRITE, 'K', 8, 0);
-static const __u32 KSU_IOCTL_UID_SHOULD_UMOUNT = _IOC(_IOC_READ | _IOC_WRITE, 'K', 9, 0);
-static const __u32 KSU_IOCTL_GET_MANAGER_APPID = _IOC(_IOC_READ, 'K', 10, 0);
-static const __u32 KSU_IOCTL_GET_APP_PROFILE = _IOC(_IOC_READ | _IOC_WRITE, 'K', 11, 0);
-static const __u32 KSU_IOCTL_SET_APP_PROFILE = _IOC(_IOC_WRITE, 'K', 12, 0);
-static const __u32 KSU_IOCTL_GET_FEATURE = _IOC(_IOC_READ | _IOC_WRITE, 'K', 13, 0);
-static const __u32 KSU_IOCTL_SET_FEATURE = _IOC(_IOC_WRITE, 'K', 14, 0);
-static const __u32 KSU_IOCTL_GET_WRAPPER_FD = _IOC(_IOC_WRITE, 'K', 15, 0);
-static const __u32 KSU_IOCTL_MANAGE_MARK = _IOC(_IOC_READ | _IOC_WRITE, 'K', 16, 0);
-static const __u32 KSU_IOCTL_NUKE_EXT4_SYSFS = _IOC(_IOC_WRITE, 'K', 17, 0);
-static const __u32 KSU_IOCTL_ADD_TRY_UMOUNT = _IOC(_IOC_WRITE, 'K', 18, 0);
-static const __u32 KSU_IOCTL_SET_INIT_PGRP = _IO('K', 19);
-static const __u32 KSU_IOCTL_GET_SULOG_FD = _IOW('K', 20, struct ksu_get_sulog_fd_cmd);
-static const __u32 KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT = _IO('K', 21);
+static const __u32 KSU_IOCTL_GET_INFO_LEGACY = _IOC(_IOC_READ, 'E', 2, 0);
+static const __u32 KSU_IOCTL_REPORT_EVENT = _IOC(_IOC_WRITE, 'E', 3, 0);
+static const __u32 KSU_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'E', 4, 0);
+static const __u32 KSU_IOCTL_CHECK_SAFEMODE = _IOC(_IOC_READ, 'E', 5, 0);
+static const __u32 KSU_IOCTL_GET_FEATURE = _IOC(_IOC_READ | _IOC_WRITE, 'E', 13, 0);
+static const __u32 KSU_IOCTL_SET_FEATURE = _IOC(_IOC_WRITE, 'E', 14, 0);
+static const __u32 KSU_IOCTL_GET_WRAPPER_FD = _IOC(_IOC_WRITE, 'E', 15, 0);
+static const __u32 KSU_IOCTL_MANAGE_MARK = _IOC(_IOC_READ | _IOC_WRITE, 'E', 16, 0);
+static const __u32 KSU_IOCTL_NUKE_EXT4_SYSFS = _IOC(_IOC_WRITE, 'E', 17, 0);
+static const __u32 KSU_IOCTL_ADD_TRY_UMOUNT = _IOC(_IOC_WRITE, 'E', 18, 0);
+static const __u32 KSU_IOCTL_SET_INIT_PGRP = _IO('E', 19);
 
 #endif

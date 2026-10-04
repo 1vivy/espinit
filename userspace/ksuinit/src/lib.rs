@@ -389,30 +389,12 @@ pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
     }
 }
 
-fn has_kernelsu_legacy() -> bool {
+fn detect_espinit() -> bool {
     use syscalls::{Sysno, syscall};
-    let mut version = 0;
-    const CMD_GET_VERSION: i32 = 2;
-    unsafe {
-        let _ = syscall!(
-            Sysno::prctl,
-            0xDEADBEEF,
-            CMD_GET_VERSION,
-            std::ptr::addr_of_mut!(version)
-        );
-    }
-
-    log::info!("KernelSU version: {}", version);
-
-    version != 0
-}
-
-fn has_kernelsu_v2() -> bool {
-    use syscalls::{Sysno, syscall};
-    const KSU_INSTALL_MAGIC1: u32 = 0xDEADBEEF;
-    const KSU_INSTALL_MAGIC2: u32 = 0xCAFEBABE;
-    const KSU_IOCTL_GET_INFO: u32 = 0x80104b02; // _IOR('K', 2, struct ksu_get_info_cmd)
-    const KSU_IOCTL_GET_INFO_LEGACY: u32 = 0x80004b02; // _IOC(_IOC_READ, 'K', 2, 0)
+    const ESPINIT_INSTALL_MAGIC1: u32 = 0x45535049; // 'ESPI'
+    const ESPINIT_INSTALL_MAGIC2: u32 = 0x4e495446; // 'NITF'
+    const ESPINIT_IOCTL_GET_INFO: u32 = 0x80104502; // _IOR('E', 2, struct ksu_get_info_cmd)
+    const ESPINIT_IOCTL_GET_INFO_LEGACY: u32 = 0x80004502; // _IOC(_IOC_READ, 'E', 2, 0)
 
     #[repr(C)]
     #[derive(Default)]
@@ -436,8 +418,8 @@ fn has_kernelsu_v2() -> bool {
     unsafe {
         let _ = syscall!(
             Sysno::reboot,
-            KSU_INSTALL_MAGIC1,
-            KSU_INSTALL_MAGIC2,
+            ESPINIT_INSTALL_MAGIC1,
+            ESPINIT_INSTALL_MAGIC2,
             0,
             std::ptr::addr_of_mut!(fd)
         );
@@ -447,7 +429,7 @@ fn has_kernelsu_v2() -> bool {
         // New method: try to get version info via ioctl
         let mut cmd = GetInfoCmd::default();
         let version = unsafe {
-            let ret = syscall!(Sysno::ioctl, fd, KSU_IOCTL_GET_INFO, &mut cmd as *mut _);
+            let ret = syscall!(Sysno::ioctl, fd, ESPINIT_IOCTL_GET_INFO, &mut cmd as *mut _);
 
             match ret {
                 Ok(_) => cmd.version,
@@ -456,7 +438,7 @@ fn has_kernelsu_v2() -> bool {
                     match syscall!(
                         Sysno::ioctl,
                         fd,
-                        KSU_IOCTL_GET_INFO_LEGACY,
+                        ESPINIT_IOCTL_GET_INFO_LEGACY,
                         &mut cmd as *mut _
                     ) {
                         Ok(_) => cmd.version,
@@ -475,11 +457,11 @@ fn has_kernelsu_v2() -> bool {
         0
     };
 
-    log::info!("KernelSU version: {}", version);
+    log::info!("espinit version: {}", version);
 
     version != 0
 }
 
-pub fn has_kernelsu() -> bool {
-    has_kernelsu_v2() || has_kernelsu_legacy()
+pub fn has_espinit() -> bool {
+    detect_espinit()
 }

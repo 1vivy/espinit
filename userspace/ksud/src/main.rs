@@ -11,13 +11,9 @@
     clippy::redundant_field_names
 )]
 
-mod apk_sign;
 mod assets;
-mod boot_patch;
 #[cfg(target_os = "android")]
 mod cli;
-#[cfg(not(target_os = "android"))]
-mod cli_non_android;
 #[cfg(target_os = "android")]
 mod debug;
 mod defs;
@@ -28,19 +24,11 @@ mod init_event;
 #[cfg(target_os = "android")]
 mod ksucalls;
 #[cfg(target_os = "android")]
-mod late_load;
-mod lkm_image;
-mod lkm_image_btf;
-#[cfg(target_os = "android")]
-mod magica;
-#[cfg(target_os = "android")]
 mod metamodule;
 #[cfg(target_os = "android")]
 mod module;
 #[cfg(target_os = "android")]
 mod module_config;
-#[cfg(target_os = "android")]
-mod profile;
 #[cfg(target_os = "android")]
 mod resetprop;
 #[cfg(target_os = "android")]
@@ -49,10 +37,6 @@ mod restorecon;
 mod sepolicy;
 #[cfg(target_os = "android")]
 mod soft_reboot;
-#[cfg(target_os = "android")]
-mod su;
-#[cfg(target_os = "android")]
-mod sulog;
 #[cfg(target_os = "android")]
 mod unload;
 #[cfg(target_os = "android")]
@@ -69,6 +53,6 @@ fn main() -> anyhow::Result<()> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        cli_non_android::run()
+        anyhow::bail!("espinitd only runs on Android")
     }
 }

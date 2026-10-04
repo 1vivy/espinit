@@ -63,12 +63,15 @@ pub fn validate_module_id(module_id: &str) -> Result<()> {
 pub fn get_common_script_envs(module_id: Option<&str>) -> Vec<(&'static str, String)> {
     let mut envs = vec![
         ("ASH_STANDALONE", "1".to_string()),
-        ("KSU", "true".to_string()),
-        ("KSU_KERNEL_VER_CODE", ksucalls::get_version().to_string()),
-        ("KSU_VER_CODE", defs::VERSION_CODE.to_string()),
-        ("KSU_VER", defs::VERSION_NAME.to_string()),
-        ("KSU_UAPI_VER", ksucalls::uapi_version().to_string()),
-        ("KSU_RUNTIME_MODE", ksucalls::runtime_mode().to_string()),
+        ("ESPINIT", "true".to_string()),
+        (
+            "ESPINIT_KERNEL_VER_CODE",
+            ksucalls::get_version().to_string(),
+        ),
+        ("ESPINIT_VER_CODE", defs::VERSION_CODE.to_string()),
+        ("ESPINIT_VER", defs::VERSION_NAME.to_string()),
+        ("ESPINIT_UAPI_VER", ksucalls::uapi_version().to_string()),
+        ("ESPINIT_RUNTIME_MODE", ksucalls::runtime_mode().to_string()),
         (
             "PATH",
             format!(
@@ -81,14 +84,10 @@ pub fn get_common_script_envs(module_id: Option<&str>) -> Vec<(&'static str, Str
 
     if let Some(id) = module_id {
         if validate_module_id(id).is_ok() {
-            envs.push(("KSU_MODULE", id.to_string()));
+            envs.push(("ESPINIT_MODULE", id.to_string()));
         } else {
             error!("Invalid module_id provided: {id}");
         }
-    }
-
-    if ksucalls::is_late_load() {
-        envs.push(("KSU_LATE_LOAD", "1".to_string()));
     }
 
     envs
@@ -274,7 +273,7 @@ pub fn exec_script<T: AsRef<Path>>(path: T, wait: ScriptWait) -> Result<()> {
     info!("exec {}", path.as_ref().display());
 
     let is_module_script = path.as_ref().starts_with(defs::MODULE_DIR);
-    // Extract module_id from path if it matches /data/adb/modules/{id}/...
+    // Extract module_id from path if it matches <state>/modules/{id}/...
     let module_id = if is_module_script {
         path.as_ref()
             .strip_prefix(defs::MODULE_DIR)
@@ -305,7 +304,7 @@ pub fn exec_script<T: AsRef<Path>>(path: T, wait: ScriptWait) -> Result<()> {
 
     if is_module_script && module_id.is_none() {
         debug!(
-            "Failed to extract module_id from script path '{}'. Script will run without KSU_MODULE environment variable.",
+            "Failed to extract module_id from script path '{}'. Script will run without ESPINIT_MODULE environment variable.",
             path.as_ref().display()
         );
     }
@@ -373,7 +372,7 @@ pub fn exec_stage_script(stage: &str, wait: ScriptWait) -> Result<()> {
 }
 
 pub fn exec_common_scripts(dir: &str, wait: ScriptWait) -> Result<()> {
-    let script_dir = Path::new(defs::ADB_DIR).join(dir);
+    let script_dir = Path::new(defs::WORKING_DIR).join(dir);
     if !script_dir.exists() {
         info!("{} not exists, skip", script_dir.display());
         return Ok(());
@@ -470,13 +469,9 @@ pub fn prune_modules() -> Result<()> {
 
 const METADATA_FILE_CON: &str = "u:object_r:metadata_file:s0";
 
-// Prefer /metadata/watchdog/ when present, else /metadata.
-fn preinit_ksu_dir() -> &'static str {
-    if Path::new("/metadata/watchdog").is_dir() {
-        defs::PREINIT_DIR_WATCHDOG
-    } else {
-        defs::PREINIT_DIR_DEFAULT
-    }
+// Persistent state root holding the generated modules.rc.
+const fn preinit_dir() -> &'static str {
+    defs::PREINIT_DIR
 }
 
 fn collect_rc_files<P: AsRef<Path>>(
@@ -516,13 +511,13 @@ fn collect_rc_files<P: AsRef<Path>>(
 /// module. The kernel-side read hook splices this file into init.rc on the
 /// next boot.
 pub fn regenerate_preinit_rc() -> Result<()> {
-    let preinit_str = preinit_ksu_dir();
-    let preinit_dir = Path::new(preinit_str);
-    std::fs::create_dir_all(preinit_dir)
-        .with_context(|| format!("Failed to create {}", preinit_dir.display()))?;
+    let preinit_str = preinit_dir();
+    let preinit_path = Path::new(preinit_str);
+    std::fs::create_dir_all(preinit_path)
+        .with_context(|| format!("Failed to create {}", preinit_path.display()))?;
 
-    let tmp_path_buf = preinit_dir.join(defs::MODULES_RC_TMP_FILE);
-    let out_path_buf = preinit_dir.join(defs::MODULES_RC_FILE);
+    let tmp_path_buf = preinit_path.join(defs::MODULES_RC_TMP_FILE);
+    let out_path_buf = preinit_path.join(defs::MODULES_RC_FILE);
     let tmp_path = tmp_path_buf.as_path();
     let out_path = out_path_buf.as_path();
 
@@ -533,7 +528,11 @@ pub fn regenerate_preinit_rc() -> Result<()> {
         // collect modules in alphabetical order, with their effective module path in the next boot
         let mut modules: BTreeMap<String, Option<PathBuf>> = BTreeMap::new();
         // collect common initrc first
-        collect_rc_files(Path::new(defs::ADB_DIR).join("initrc.d"), None, &mut tmp)?;
+        collect_rc_files(
+            Path::new(defs::WORKING_DIR).join("initrc.d"),
+            None,
+            &mut tmp,
+        )?;
         // modules_update/ first so freshly-installed modules win on id collision.
         for src_dir in [defs::MODULE_UPDATE_DIR, defs::MODULE_DIR] {
             let Ok(entries) = std::fs::read_dir(src_dir) else {
@@ -577,14 +576,6 @@ pub fn regenerate_preinit_rc() -> Result<()> {
     if let Err(e) = crate::restorecon::lsetfilecon(out_path, METADATA_FILE_CON) {
         debug!("set context on {} failed: {e}", out_path.display());
     }
-
-    // Clear stale file at the other candidate path.
-    let stale_dir = if preinit_str == defs::PREINIT_DIR_WATCHDOG {
-        defs::PREINIT_DIR_DEFAULT
-    } else {
-        defs::PREINIT_DIR_WATCHDOG
-    };
-    std::fs::remove_file(Path::new(stale_dir).join(defs::MODULES_RC_FILE)).ok();
 
     Ok(())
 }
@@ -825,7 +816,7 @@ pub fn run_action(id: &str) -> Result<()> {
     validate_module_id(id)?;
     ksucalls::ensure_uapi_version_matched()?;
 
-    let action_script_path = format!("/data/adb/modules/{id}/action.sh");
+    let action_script_path = format!("{}{id}/action.sh", defs::MODULE_DIR);
     exec_script(&action_script_path, ScriptWait::Forever)
 }
 

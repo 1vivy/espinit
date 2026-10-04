@@ -1,17 +1,6 @@
-name: Build LKM for KernelSU
+name: Build espinit.ko
 on:
   workflow_call:
-    inputs:
-      expected_size2:
-        description: 'Second expected signature size (for PR builds)'
-        required: false
-        default: ''
-        type: string
-      expected_hash2:
-        description: 'Second expected signature hash (for PR builds)'
-        required: false
-        default: ''
-        type: string
   workflow_dispatch:
 jobs:
   build-lkm:
@@ -29,5 +18,3 @@ jobs:
     uses: ./.github/workflows/ddk-lkm.yml
     with:
       kmi: ${{ matrix.kmi }}
-      expected_size2: ${{ inputs.expected_size2 || '' }}
-      expected_hash2: ${{ inputs.expected_hash2 || '' }}

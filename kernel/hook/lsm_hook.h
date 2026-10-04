@@ -46,9 +46,9 @@ struct ksu_lsm_hook {
 // This API implements runtime patching of existing LSM hook slots. It is a
 // workaround for out-of-tree modules, not the normal LSM registration path via
 // security_add_hooks(). The security framework does not expose a dedicated
-// runtime lock for security_hook_heads mutations; callers rely on KernelSU's
-// internal serialization plus text patching / RCU synchronization in the
-// implementation to keep replacement and restoration coherent.
+// runtime lock for security_hook_heads mutations; callers rely on
+// espinit's internal serialization plus text patching / RCU synchronization
+// in the implementation to keep replacement and restoration coherent.
 
 // --- Direct LSM hook patching API (hook/unhook) ---
 // Replace the hook function in security_hook_heads[@head_name] that currently
@@ -65,7 +65,7 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook);
 // Register a handler by replacing the BPF LSM implementation for this hook.
 // If hook->target_name is NULL, the target symbol defaults to "bpf_lsm_<hook>".
 // The replacement can call hook->original to run the original BPF LSM handler
-// after KernelSU-specific logic.
+// after espinit-specific logic.
 int ksu_register_lsm_hook(struct ksu_lsm_hook *hook);
 
 // Undo ksu_register_lsm_hook() and restore the original BPF LSM handler.

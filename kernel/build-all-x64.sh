@@ -55,9 +55,9 @@ for i in "${!KMIS[@]}"; do
     KDIR=/opt/ddk/kdir-x64/$kmi
 
     if [ "$kmi" == "android17-6.18" ]; then
-        make -C "$KDIR" "M=$MDIR" "MO=$ODIR" compile_commands.json modules CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y
+        make -C "$KDIR" "M=$MDIR" "MO=$ODIR" compile_commands.json modules CONFIG_ESPINIT=m CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER=y
     else
-        make -C "$KDIR" "M=$ODIR" "src=$MDIR" compile_commands.json modules CONFIG_KSU=m CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y
+        make -C "$KDIR" "M=$ODIR" "src=$MDIR" compile_commands.json modules CONFIG_ESPINIT=m CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER=y
     fi
 
     export PATH="$ORIG_PATH"
@@ -65,4 +65,4 @@ for i in "${!KMIS[@]}"; do
 done
 
 echo "========== Final output =========="
-ls -l out-x64/*/kernelsu.ko
+ls -l out-x64/*/espinit.ko

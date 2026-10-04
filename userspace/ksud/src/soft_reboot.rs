@@ -149,7 +149,7 @@ fn wait_for_boot_completed() -> Result<()> {
 }
 
 pub fn soft_reboot() -> Result<()> {
-    // check it avoid user click "soft_reboot" in manager when version mismatch
+    // check it to avoid triggering soft_reboot when version mismatch
     if let Err(e) = ksucalls::ensure_uapi_version_matched() {
         error!("{e:#}, skip soft_reboot");
         return Ok(());

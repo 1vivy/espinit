@@ -12,7 +12,6 @@
 
 #include "feature/kernel_umount.h"
 #include "klog.h" // IWYU pragma: keep
-#include "policy/allowlist.h"
 #include "selinux/selinux.h"
 #include "policy/feature.h"
 #include "runtime/ksud_boot.h"
@@ -91,10 +90,6 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
     // 5. Isolated process forked from app zygote: appuid -> isolated_process (already handled by 3)
     // 6. Isolated process forked from webview zygote (already handled by 4)
     if (!is_appuid(new_uid) && new_uid != WEBVIEW_ZYGOTE_UID && !is_isolated_process(new_uid)) {
-        return 0;
-    }
-
-    if (!ksu_uid_should_umount(new_uid) && !is_isolated_process(new_uid)) {
         return 0;
     }
 

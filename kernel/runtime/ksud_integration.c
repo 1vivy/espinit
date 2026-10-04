@@ -161,7 +161,7 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
         if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
             pr_info("/system/bin/init second_stage executed\n");
             ksu_selinux_hide_handle_second_stage();
-            apply_kernelsu_rules();
+            apply_espinit_rules();
             cache_sid();
             setup_ksu_cred();
             init_second_stage_executed = true;
@@ -185,26 +185,16 @@ static struct file_operations fops_proxy;
 static ssize_t ksu_rc_pos = 0;
 const size_t ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
 
-// Prefer /metadata/watchdog/ when present, else /metadata.
-#define MODULE_RC_PATH_WATCHDOG "/metadata/watchdog/ksu/modules.rc"
-#define MODULE_RC_PATH_DEFAULT "/metadata/ksu/modules.rc"
+#define MODULE_RC_PATH "/metadata/espinit/initrc/modules.rc"
 static char *module_rc_buf;
 static size_t module_rc_len;
 static ssize_t module_rc_pos;
 
 static struct file *open_module_rc(const char **chosen_path)
 {
-    struct file *f = filp_open(MODULE_RC_PATH_WATCHDOG, O_RDONLY, 0);
-    if (!IS_ERR(f)) {
-        *chosen_path = MODULE_RC_PATH_WATCHDOG;
-        return f;
-    }
-    f = filp_open(MODULE_RC_PATH_DEFAULT, O_RDONLY, 0);
-    if (!IS_ERR(f)) {
-        *chosen_path = MODULE_RC_PATH_DEFAULT;
-        return f;
-    }
-    *chosen_path = MODULE_RC_PATH_DEFAULT;
+    struct file *f = filp_open(MODULE_RC_PATH, O_RDONLY, 0);
+
+    *chosen_path = MODULE_RC_PATH;
     return f;
 }
 
@@ -501,10 +491,6 @@ bool ksu_is_safe_mode()
         return true;
     }
 
-    if (ksu_late_loaded) {
-        return false;
-    }
-
     // stop hook first!
     ksu_stop_input_hook_runtime();
 
@@ -655,7 +641,7 @@ void __init ksu_ksud_init()
     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
 
     ret = register_kprobe(&input_event_kp);
-    pr_info("ksud: input_event_kp: %d\n", ret);
+    pr_info("espinitd: input_event_kp: %d\n", ret);
 
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
 }

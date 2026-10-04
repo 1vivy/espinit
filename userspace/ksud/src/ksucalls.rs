@@ -78,8 +78,7 @@ pub fn setup_sigsys_handler() {
     }
 }
 
-const DRIVER_FD_NAME: &str = "anon_inode:[ksu_driver]";
-const SU_DRIVER_FD_NAME: &str = "anon_inode:[ksu_driver_su]";
+const DRIVER_FD_NAME: &str = "anon_inode:[espinit]";
 
 // Global driver fd cache
 static DRIVER_FD: OnceLock<RawFd> = OnceLock::new();
@@ -94,9 +93,6 @@ fn scan_driver_fd() -> io::Result<Option<RawFd>> {
             let link_path = format!("/proc/self/fd/{fd_num}");
             if let Ok(target) = fs::read_link(&link_path) {
                 let target_str = target.to_string_lossy();
-                if target_str == SU_DRIVER_FD_NAME {
-                    return Ok(Some(fd_num));
-                }
                 if target_str == DRIVER_FD_NAME {
                     driver_fd = Some(fd_num);
                 }
@@ -107,15 +103,6 @@ fn scan_driver_fd() -> io::Result<Option<RawFd>> {
     Ok(driver_fd)
 }
 
-pub fn claim_inherited_driver_fd() -> io::Result<()> {
-    if DRIVER_FD.get().is_none()
-        && let Some(fd) = scan_driver_fd()?
-    {
-        let _ = DRIVER_FD.set(fd);
-    }
-    Ok(())
-}
-
 // Get cached driver fd
 fn init_driver_fd() -> Option<RawFd> {
     let fd = scan_driver_fd().ok().flatten();
@@ -124,15 +111,15 @@ fn init_driver_fd() -> Option<RawFd> {
         with_svc_call(|| unsafe {
             libc::syscall(
                 libc::SYS_reboot,
-                ksu_uapi::KSU_INSTALL_MAGIC1,
-                ksu_uapi::KSU_INSTALL_MAGIC2,
+                ksu_uapi::ESPINIT_INSTALL_MAGIC1,
+                ksu_uapi::ESPINIT_INSTALL_MAGIC2,
                 0,
                 &mut fd,
             )
         });
         if take_sigsys_occurred() {
-            eprintln!("KernelSU driver install syscall was blocked by seccomp");
-            log::error!("KernelSU driver install syscall was blocked by seccomp");
+            eprintln!("espinit driver install syscall was blocked by seccomp");
+            log::error!("espinit driver install syscall was blocked by seccomp");
         }
         if fd >= 0 { Some(fd) } else { None }
     } else {
@@ -146,7 +133,7 @@ fn ksuctl<T>(request: u32, arg: *mut T) -> Result<i32> {
 
     let fd = *DRIVER_FD.get_or_init(|| init_driver_fd().unwrap_or(-1));
     if fd < 0 {
-        bail!("could not retrieve kernelsu driver fd")
+        bail!("could not retrieve espinit driver fd")
     }
     unsafe {
         let ret = libc::ioctl(fd as libc::c_int, request as i32, arg);
@@ -177,26 +164,16 @@ pub fn get_version() -> i32 {
     get_info().version as i32
 }
 
-pub fn is_late_load() -> bool {
-    get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_LATE_LOAD != 0
-}
-
 pub fn is_lkm() -> bool {
     get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_LKM != 0
 }
 
 pub const fn uapi_version() -> u32 {
-    ksu_uapi::KERNEL_SU_UAPI_VERSION
+    ksu_uapi::ESPINIT_UAPI_VERSION
 }
 
 pub fn runtime_mode() -> &'static str {
-    if is_late_load() {
-        "late-load"
-    } else if is_lkm() {
-        "lkm"
-    } else {
-        "built-in"
-    }
+    if is_lkm() { "module" } else { "built-in" }
 }
 
 pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
@@ -204,14 +181,9 @@ pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
     let userspace_uapi = uapi_version();
     if kernel_uapi != userspace_uapi {
         bail!(
-            "UAPI version mismatch: kernel={kernel_uapi}, ksud={userspace_uapi}. Please update KernelSU!"
+            "UAPI version mismatch: kernel={kernel_uapi}, espinitd={userspace_uapi}. Please update espinit!"
         );
     }
-    Ok(())
-}
-
-pub fn grant_root() -> Result<()> {
-    ksuctl(ksu_uapi::KSU_IOCTL_GRANT_ROOT, std::ptr::null_mut::<u8>())?;
     Ok(())
 }
 
@@ -271,21 +243,6 @@ pub fn set_feature(feature_id: u32, value: u64) -> Result<()> {
     let mut cmd = ksu_uapi::ksu_set_feature_cmd { feature_id, value };
     ksuctl(ksu_uapi::KSU_IOCTL_SET_FEATURE, &raw mut cmd)?;
     Ok(())
-}
-
-pub fn get_wrapped_fd(fd: RawFd) -> Result<RawFd> {
-    let mut cmd = ksu_uapi::ksu_get_wrapper_fd_cmd {
-        fd: fd as u32,
-        flags: 0,
-    };
-    let result = ksuctl(ksu_uapi::KSU_IOCTL_GET_WRAPPER_FD, &raw mut cmd)?;
-    Ok(result)
-}
-
-pub fn get_sulog_fd() -> Result<RawFd> {
-    let mut cmd = ksu_uapi::ksu_get_sulog_fd_cmd { flags: 0 };
-    let result = ksuctl(ksu_uapi::KSU_IOCTL_GET_SULOG_FD, &raw mut cmd)?;
-    Ok(result)
 }
 
 /// Get mark status for a process (pid=0 returns total marked count)
@@ -382,16 +339,5 @@ pub fn set_init_pgrp() -> Result<()> {
         ksu_uapi::KSU_IOCTL_SET_INIT_PGRP,
         std::ptr::null_mut::<u8>(),
     )?;
-    Ok(())
-}
-
-pub fn set_ksu_no_new_privs() -> anyhow::Result<()> {
-    let result = ksuctl(
-        ksu_uapi::KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT,
-        std::ptr::null_mut::<u8>(),
-    )?;
-    if result != 0 {
-        bail!("unexpected result: {result}");
-    }
     Ok(())
 }

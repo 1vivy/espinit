@@ -120,10 +120,10 @@ void cache_sid(void)
 
     err = security_secctx_to_secid(KERNEL_SU_CONTEXT, strlen(KERNEL_SU_CONTEXT), &cached_su_sid);
     if (err) {
-        pr_warn("Failed to cache kernel su domain SID: %d\n", err);
+        pr_warn("Failed to cache espinit domain SID: %d\n", err);
         cached_su_sid = 0;
     } else {
-        pr_info("Cached su SID: %u\n", cached_su_sid);
+        pr_info("Cached espinit SID: %u\n", cached_su_sid);
     }
 
     err = security_secctx_to_secid(ZYGOTE_CONTEXT, strlen(ZYGOTE_CONTEXT), &cached_zygote_sid);
@@ -144,10 +144,10 @@ void cache_sid(void)
 
     err = security_secctx_to_secid(KSU_FILE_CONTEXT, strlen(KSU_FILE_CONTEXT), &ksu_file_sid);
     if (err) {
-        pr_warn("Failed to cache ksu_file SID: %d\n", err);
+        pr_warn("Failed to cache espinit_file SID: %d\n", err);
         ksu_file_sid = 0;
     } else {
-        pr_info("Cached ksu_file SID: %u\n", ksu_file_sid);
+        pr_info("Cached espinit_file SID: %u\n", ksu_file_sid);
     }
 }
 
@@ -205,11 +205,11 @@ bool is_init(const struct cred *cred)
     return is_sid_match(cred, cached_init_sid, INIT_CONTEXT);
 }
 
-void escape_to_root_for_adb_root(void)
+void escape_to_root_for_init(void)
 {
     struct cred *cred = prepare_creds();
     if (!cred) {
-        pr_err("Failed to prepare adbd's creds!\n");
+        pr_err("Failed to prepare init's creds!\n");
         return;
     }
 

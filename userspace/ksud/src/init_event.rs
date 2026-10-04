@@ -66,9 +66,9 @@ pub fn on_post_fs_data() -> Result<()> {
         warn!("prune modules failed: {e}");
     }
 
-    // Refresh /metadata/watchdog/ksu/modules.rc so the next boot's kernel hook sees the
+    // Refresh /metadata/espinit/initrc/modules.rc so the next boot's kernel hook sees the
     // current module set. Acts as a safety net when state was changed outside
-    // of ksud's normal mutation commands.
+    // of espinitd's normal mutation commands.
     if let Err(e) = crate::module::regenerate_preinit_rc() {
         warn!("regenerate preinit rc failed: {e}");
     }
@@ -80,10 +80,6 @@ pub fn on_post_fs_data() -> Result<()> {
     // load sepolicy.rule
     if crate::module::load_sepolicy_rule().is_err() {
         warn!("load sepolicy.rule failed");
-    }
-
-    if let Err(e) = crate::profile::apply_sepolies() {
-        warn!("apply root profile sepolicy failed: {e}");
     }
 
     // load feature config

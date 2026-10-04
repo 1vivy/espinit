@@ -1,4 +1,3 @@
-use crate::sulog;
 use anyhow::{Context, Result, bail};
 use const_format::concatcp;
 use std::collections::HashMap;
@@ -10,53 +9,37 @@ use crate::defs;
 
 const FEATURE_CONFIG_PATH: &str = concatcp!(defs::WORKING_DIR, ".feature_config");
 #[allow(clippy::unreadable_literal)]
-const FEATURE_MAGIC: u32 = 0x7f4b5355;
+const FEATURE_MAGIC: u32 = 0x7f455350; // 0x7f + "ESP"
 const FEATURE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FeatureId {
-    SuCompat = 0,
-    KernelUmount = 1,
-    Sulog = 2,
-    AdbRoot = 3,
-    SelinuxHide = 4,
+    KernelUmount = 0,
+    SelinuxHide = 1,
 }
 
 impl FeatureId {
     pub const fn from_u32(id: u32) -> Option<Self> {
         match id {
-            0 => Some(Self::SuCompat),
-            1 => Some(Self::KernelUmount),
-            2 => Some(Self::Sulog),
-            3 => Some(Self::AdbRoot),
-            4 => Some(Self::SelinuxHide),
+            0 => Some(Self::KernelUmount),
+            1 => Some(Self::SelinuxHide),
             _ => None,
         }
     }
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::SuCompat => "su_compat",
             Self::KernelUmount => "kernel_umount",
-            Self::Sulog => "sulog",
-            Self::AdbRoot => "adb_root",
             Self::SelinuxHide => "selinux_hide",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::SuCompat => {
-                "SU Compatibility Mode - allows authorized apps to gain root via traditional 'su' command"
-            }
             Self::KernelUmount => {
                 "Kernel Umount - controls whether kernel automatically unmounts modules when not needed"
             }
-            Self::Sulog => {
-                "SU Log - streams kernel sulog events to userspace and persists them to disk"
-            }
-            Self::AdbRoot => "ADB Root - Enable adbd root",
             Self::SelinuxHide => {
                 "SELinux Hide - sanitize /sys/fs/selinux access results for app UIDs"
             }
@@ -66,11 +49,8 @@ impl FeatureId {
 
 fn parse_feature_id(name: &str) -> Result<FeatureId> {
     match name {
-        "su_compat" | "0" => Ok(FeatureId::SuCompat),
-        "kernel_umount" | "1" => Ok(FeatureId::KernelUmount),
-        "sulog" | "2" => Ok(FeatureId::Sulog),
-        "adb_root" | "3" => Ok(FeatureId::AdbRoot),
-        "selinux_hide" | "4" => Ok(FeatureId::SelinuxHide),
+        "kernel_umount" | "0" => Ok(FeatureId::KernelUmount),
+        "selinux_hide" | "1" => Ok(FeatureId::SelinuxHide),
         _ => bail!("Unknown feature: {name}"),
     }
 }
@@ -78,13 +58,6 @@ fn parse_feature_id(name: &str) -> Result<FeatureId> {
 fn set_kernel_feature(feature_id: FeatureId, value: u64) -> Result<()> {
     crate::ksucalls::set_feature(feature_id as u32, value)
         .with_context(|| format!("Failed to set feature {} to {value}", feature_id.name()))?;
-
-    if feature_id == FeatureId::Sulog
-        && value != 0
-        && let Err(err) = sulog::ensure_sulogd_running()
-    {
-        log::warn!("failed to ensure sulogd is running after feature init: {err:#}");
-    }
 
     Ok(())
 }
@@ -261,7 +234,7 @@ pub fn set_feature(id: &str, value: u64) -> Result<()> {
 
         if !managing_modules.is_empty() {
             // Feature is managed, check if caller is an authorized module
-            let caller_module = std::env::var("KSU_MODULE").unwrap_or_default();
+            let caller_module = std::env::var("ESPINIT_MODULE").unwrap_or_default();
 
             if caller_module.is_empty() || !managing_modules.contains(&&caller_module) {
                 bail!(
@@ -311,13 +284,7 @@ pub fn list_features() {
         }
     }
 
-    let all_features = [
-        FeatureId::SuCompat,
-        FeatureId::KernelUmount,
-        FeatureId::Sulog,
-        FeatureId::AdbRoot,
-        FeatureId::SelinuxHide,
-    ];
+    let all_features = [FeatureId::KernelUmount, FeatureId::SelinuxHide];
 
     for feature_id in &all_features {
         let id = *feature_id as u32;
@@ -374,13 +341,7 @@ pub fn load_config_and_apply() -> Result<()> {
 pub fn save_config() -> Result<()> {
     let mut features = HashMap::new();
 
-    let all_features = [
-        FeatureId::SuCompat,
-        FeatureId::KernelUmount,
-        FeatureId::Sulog,
-        FeatureId::AdbRoot,
-        FeatureId::SelinuxHide,
-    ];
+    let all_features = [FeatureId::KernelUmount, FeatureId::SelinuxHide];
 
     for feature_id in &all_features {
         let id = *feature_id as u32;
