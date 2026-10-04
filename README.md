@@ -39,6 +39,8 @@ llvm-objcopy --add-section __versions=/tmp/__versions.empty \
 
 `check_symbol` never adds, rewrites, or relaxes the section itself; a module lacking the empty section, or one carrying a populated `__versions`, is rejected rather than repaired.
 
+The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--espinit-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. That lane is packaging and boot plumbing only: it is unsigned and proves no boot by itself.
+
 ## Exact ESP and runtime layout
 
 The filesystem mounted as the ESP carries the espinit payload and is normally mounted read-only. Mounting it at `/debug_ramdisk/esp` yields the runtime root below; configuration paths are relative to `/espinit` on that filesystem, not to `/metadata` or the host checkout. The only early-boot write window is the bounded failure-receipt replacement described below.
