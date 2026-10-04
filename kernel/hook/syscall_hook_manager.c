@@ -15,7 +15,6 @@
 #include "klog.h" // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
-#include "feature/sucompat.h"
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
@@ -139,8 +138,6 @@ void __init ksu_syscall_hook_manager_init(void)
     ksu_register_syscall_hook(__NR_setresuid, ksu_hook_setresuid);
     ksu_register_syscall_hook(__NR_execve, ksu_hook_execve);
     ksu_register_syscall_hook(__NR_execveat, ksu_hook_execveat);
-    ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
-    ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
     ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
@@ -155,7 +152,6 @@ void __init ksu_syscall_hook_manager_init(void)
 #endif
 
     ksu_setuid_hook_init();
-    ksu_sucompat_init();
 }
 
 void __exit ksu_syscall_hook_manager_exit(void)
@@ -175,11 +171,8 @@ void __exit ksu_syscall_hook_manager_exit(void)
     ksu_unregister_syscall_hook(__NR_setresuid);
     ksu_unregister_syscall_hook(__NR_execve);
     ksu_unregister_syscall_hook(__NR_execveat);
-    ksu_unregister_syscall_hook(__NR_newfstatat);
-    ksu_unregister_syscall_hook(__NR_faccessat);
 
     ksu_syscall_hook_exit();
 
-    ksu_sucompat_exit();
     ksu_setuid_hook_exit();
 }

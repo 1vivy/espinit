@@ -1,0 +1,47 @@
+name: Build espinitd with cross
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      os:
+        required: false
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Setup rustup
+      run: |
+        rustup update stable
+        if [[ ${{ inputs.target }} == *"-apple-darwin" ]]; then
+          rustup target add ${{ inputs.target }}
+        fi
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: . -> target
+        cache-targets: false
+        cache-bin: false
+
+    - name: Install cross
+      run: |
+        RUSTFLAGS="" cargo install cross --git https://github.com/cross-rs/cross --rev 66845c1
+
+    - name: Build espinitd
+      run: CROSS_NO_WARNINGS=0 cross build --package espinitd --target ${{ inputs.target }} --release
+
+    - name: Upload espinitd artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: espinitd-${{ inputs.target }}
+        path: target/${{ inputs.target }}/release/espinitd${{ contains(inputs.target, '-windows-') && '.exe' || '' }}

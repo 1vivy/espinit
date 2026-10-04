@@ -5,42 +5,46 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build-manager:
-    uses: ./.github/workflows/build-manager.yml
-    secrets: inherit
+  build:
+    uses: ./.github/workflows/build.yml
   release:
     needs:
-      - build-manager
+      - build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v8
 
-      - name: Rename ksud
+      - name: Rename espinitd
         run: |
-          mkdir -p ksud
-          for dir in ./ksud-*; do
+          mkdir -p espinitd
+          for dir in ./espinitd-*; do
             if [ -d "$dir" ]; then
                 echo "----- Rename $dir -----"
-                ksud_platform_name=$(basename "$dir")
-                if [ -f "$dir/ksud" ]; then
-                  mv "$dir/ksud" "ksud/$ksud_platform_name"
-                elif [ -f "$dir/ksud.exe" ]; then
-                  mv "$dir/ksud.exe" "ksud/$ksud_platform_name.exe"
+                espinitd_platform_name=$(basename "$dir")
+                if [ -f "$dir/espinitd" ]; then
+                  mv "$dir/espinitd" "espinitd/$espinitd_platform_name"
+                elif [ -f "$dir/espinitd.exe" ]; then
+                  mv "$dir/espinitd.exe" "espinitd/$espinitd_platform_name.exe"
                 fi
             fi
           done
 
-      - name: Rename ksuinit
+      - name: Rename espinit
         run: |
-          mkdir -p ksuinit
-          for dir in ./ksuinit-*; do
+          mkdir -p espinit
+          for dir in ./espinit-*; do
             if [ -d "$dir" ]; then
                 echo "----- Rename $dir -----"
-                ksuinit_platform_name=$(basename "$dir")
-                if [ -f "$dir/ksuinit" ]; then
-                  mv "$dir/ksuinit" "ksuinit/$ksuinit_platform_name"
+                espinit_platform_name=$(basename "$dir")
+                if [ -f "$dir/espinit" ]; then
+                  mv "$dir/espinit" "espinit/$espinit_platform_name"
                 fi
             fi
           done
@@ -48,13 +52,13 @@ jobs:
       - name: Rename lkm
         run: |
           mkdir -p lkm
-          for dir in ./*-android*-lkm; do
+          for dir in ./*-android*-espinit-lkm; do
             if [ -d "$dir" ]; then
                 echo "----- Rename $dir -----"
                 lkm_platform_name=$(basename "$dir")
-                lkm_platform_name="lkm-${lkm_platform_name%-lkm}_kernelsu.ko"
-                KO="$(ls $dir/*_kernelsu.ko)"
-                mv "$KO" "lkm/$lkm_platform_name"
+                lkm_target="${lkm_platform_name%-espinit-lkm}"
+                lkm_kmi="${lkm_target#*-}"
+                mv "$dir/${lkm_kmi}_espinit.ko" "lkm/lkm-${lkm_target}_espinit.ko"
             fi
           done
 
@@ -65,7 +69,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            manager/*.apk
-            lkm/lkm-*_kernelsu.ko
-            ksud/ksud-*
-            ksuinit/*
+            espinit/*
+            espinitd/*
+            lkm/lkm-*_espinit.ko

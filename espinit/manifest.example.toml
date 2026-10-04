@@ -1,0 +1,41 @@
+# espinit manifest (planned)
+#
+# Deployed path: /debug_ramdisk/esp/espinit/manifest.toml
+# All relative paths are resolved from the ESP subtree /espinit, and may not
+# be absolute or traverse symlinks or `..`.
+#
+# The manifest, rom.toml, the PID-1 binary, espinitd, and every listed module
+# must all carry the same `generation` value.
+#
+# The ESP is normally mounted read-only. Early hard-failure receipts use ESP
+# /espinit/receipts/failure.json, never unprojected /metadata. On failure only,
+# use a bounded RW remount: temporary file + fsync + atomic rename + directory
+# fsync, then sync the ESP and remount RO. Storage errors still stop handoff.
+# /metadata/espinit holds daemon runtime receipts/logs only after handoff.
+
+schema_version = 1
+generation = "esp-2026.10"
+rom = "rom.toml"
+
+# Modules load strictly in document order. The first entry must be the core
+# module, named `espinit`. A managed ROM additionally requires `gpt` after it
+# and before real-init handoff. Each module must pass its readiness self-check
+# before the next entry is processed.
+# Retaining the core's inherited lifecycle is intentional boot-substrate reuse,
+# not KernelSU Manager or root compatibility. For schema v1, gpt.ko accepts
+# whole block-device backends only. Attach preallocated ESP regular files using
+# standard loop devices before gpt APPLY; supply the resulting block paths,
+# not file paths or an extent/FIEMAP ABI, and retain the loop attachments.
+
+[[modules]]
+name = "espinit"
+path = "modules/espinit.ko"
+params = ""
+
+# Required only when rom.toml selects `managed = true`; omit this entry for an
+# unmanaged configuration. `params` is passed to the kernel as module
+# parameters and is never evaluated by a shell. Empty string = no parameters.
+[[modules]]
+name = "gpt"
+path = "modules/gpt.ko"
+params = ""

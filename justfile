@@ -1,12 +1,13 @@
-alias bk := build_ksud
-alias bm := build_manager
+alias bi := build_init
+alias bd := build_daemon
 
-build_ksud:
-    cross build --target aarch64-linux-android --release
+# PID-1 loader for aarch64 Android.
+build_init:
+    cross build --package espinit --target aarch64-linux-android --release
 
-build_manager: build_ksud
-    cp target/aarch64-linux-android/release/ksud manager/app/src/main/jniLibs/arm64-v8a/libksud.so
-    cd manager && ./gradlew aDebug
+# espinitd daemon for aarch64 Android.
+build_daemon:
+    cross build --package espinitd --target aarch64-linux-android --release
 
 clippy:
     cargo fmt

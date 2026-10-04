@@ -42,7 +42,7 @@ static void reset_avc_cache()
     selinux_xfrm_notify_policyload();
 }
 
-void apply_kernelsu_rules()
+void apply_espinit_rules()
 {
     struct selinux_policy *pol, *old_pol;
     struct policydb *db;

@@ -147,7 +147,7 @@ int main(int argc, char *argv[])
     }
 
     if (ko_version_sec->sh_size != 0) {
-        fprintf(stderr, "Error: __versions section in %s must have size 0 (actual=%llu)\n", ko_path,
+        fprintf(stderr, "Error: __versions section in %s must be empty (actual=%llu)\n", ko_path,
                 (unsigned long long)ko_version_sec->sh_size);
         close_elf(&ko_elf);
         close_elf(&vmlinux);

@@ -1,0 +1,43 @@
+# espinit ROM configuration (planned)
+#
+# Deployed path: /debug_ramdisk/esp/espinit/rom.toml
+# `generation` must equal the manifest generation. This file selects projected
+# names and existing whole block-device backends; it does not define a new
+# physical partition table, offsets, sizes, or implicit slot suffixes.
+#
+# Early failures use ESP /espinit/receipts/failure.json, not projected metadata.
+# The ESP is normally RO; only failure replacement opens a bounded RW remount
+# window: temporary file + fsync + atomic rename + directory fsync, then sync
+# the ESP and remount RO. /metadata/espinit is for daemon runtime receipts/logs
+# after successful handoff, not a prerequisite for gpt readiness.
+
+schema_version = 1
+generation = "esp-2026.10"
+
+# managed = true requires successful gpt.ko projection of the complete list
+# below before Android handoff, with no stock-ROM fallback. managed = false
+# requires the partitions array to be empty or absent.
+managed = true
+
+# Order is publication order, not priority or fallback. Names are unique at the
+# Android partition surface, must not collide with a retained physical name,
+# and must not collide with another projection. Schema v1 `backend` is an
+# absolute block-device path, such as /dev/block/by-name/<physical-name> or a
+# prepared /dev/loopN, resolved and retained before physical aliases are hidden.
+# Each projection spans the entire block backend; whole-LU devices, regular
+# files, offsets and size slicing are not accepted by gpt.ko. A preallocated ESP
+# regular file must be attached with a standard loop device before gpt APPLY;
+# supply only that block-device path and retain the attachment for the lifetime
+# of the projection. There is no extent/FIEMAP ABI.
+# `read_only` explicitly selects projected access; physical residual exposure
+# is read-only regardless of this value.
+
+[[partitions]]
+name = "super"
+backend = "/dev/block/by-name/super_1"
+read_only = false
+
+[[partitions]]
+name = "vbmeta_system"
+backend = "/dev/block/by-name/vbmeta_system_1"
+read_only = true

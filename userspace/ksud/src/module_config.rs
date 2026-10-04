@@ -9,7 +9,7 @@ use crate::defs;
 use crate::utils::ensure_dir_exists;
 
 #[allow(clippy::unreadable_literal)]
-const MODULE_CONFIG_MAGIC: u32 = 0x4b53554d; // "KSUM"
+const MODULE_CONFIG_MAGIC: u32 = 0x45535043; // "ESPC"
 const MODULE_CONFIG_VERSION: u32 = 1;
 
 // Validation limits

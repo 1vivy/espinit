@@ -95,7 +95,7 @@ pub fn init() -> Result<()> {
     // Setup kernel log first
     setup_kmsg();
 
-    log::info!("Hello, KernelSU!");
+    log::info!("Hello, espinit!");
 
     // mount /proc to access kernel interface
     let _dontdrop = prepare_mount();
@@ -103,12 +103,12 @@ pub fn init() -> Result<()> {
     // This relies on the fact that we have /proc mounted
     unlimit_kmsg();
 
-    if ksuinit::has_kernelsu() {
-        log::info!("KernelSU may be already loaded in kernel, skip!");
+    if espinit::has_espinit() {
+        log::info!("espinit may be already loaded in kernel, skip!");
     } else {
-        log::info!("Loading kernelsu.ko..");
-        if let Err(e) = load_module_from_path("/kernelsu.ko") {
-            log::error!("Cannot load kernelsu.ko: {:?}", e);
+        log::info!("Loading espinit.ko..");
+        if let Err(e) = load_module_from_path("/espinit.ko") {
+            log::error!("Cannot load espinit.ko: {:?}", e);
         }
     }
 
@@ -129,8 +129,8 @@ pub fn init() -> Result<()> {
 fn load_module_from_path(path: &str) -> Result<()> {
     anyhow::ensure!(rustix::process::getpid().is_init(), "Invalid process");
     let buffer = std::fs::read(path).with_context(|| format!("Cannot read file {}", path))?;
-    let params = std::fs::read("/ksu_config").unwrap_or_default();
+    let params = std::fs::read("/espinit_config").unwrap_or_default();
     let params = unsafe { CString::from_vec_unchecked(params) };
-    log::info!("load kernelsu with params {params:?}");
-    ksuinit::load_module(&buffer, &params)
+    log::info!("load espinit with params {params:?}");
+    espinit::load_module(&buffer, &params)
 }

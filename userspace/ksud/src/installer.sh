@@ -1,6 +1,6 @@
 #!/system/bin/sh
 ############################################
-# KernelSU installer script
+# espinit module installer script
 # mostly from module_installer.sh
 # and util_functions.sh in Magisk
 ############################################
@@ -72,7 +72,7 @@ print_title() {
 }
 
 check_sepolicy() {
-    /data/adb/ksud sepolicy check "$1"
+    /metadata/espinit/espinitd sepolicy check "$1"
     return $?
 }
 
@@ -266,8 +266,8 @@ check_managed_features() {
     feature=$(echo "$feature" | xargs)
     [ -z "$feature" ] && continue
 
-    # Check feature status using ksud
-    local status=$(/data/adb/ksud feature check "$feature" 2>/dev/null)
+    # Check feature status using espinitd
+    local status=$(/metadata/espinit/espinitd feature check "$feature" 2>/dev/null)
 
     case "$status" in
       "unsupported")
@@ -407,7 +407,7 @@ install_module() {
     set_permissions
   else
     print_title "$MODNAME" "by $MODAUTH"
-    print_title "Powered by KernelSU"
+    print_title "Powered by espinit"
 
     unzip -o "$ZIPFILE" customize.sh -d $MODPATH >&2
 
@@ -473,7 +473,7 @@ install_module() {
 [ -z $BOOTMODE ] && ps -A 2>/dev/null | grep zygote | grep -qv grep && BOOTMODE=true
 [ -z $BOOTMODE ] && BOOTMODE=false
 
-NVBASE=/data/adb
+NVBASE=/metadata/espinit
 TMPDIR=/dev/tmp
 POSTFSDATAD=$NVBASE/post-fs-data.d
 SERVICED=$NVBASE/service.d

@@ -258,7 +258,7 @@ static void initialize_fake_status()
     }
 
     struct selinux_kernel_status *status = page_address(selinux_state.status_page);
-    if (!status->enforcing && !ksu_late_loaded) {
+    if (!status->enforcing) {
         pr_warn("initialize_fake_status: skip not enforcing\n");
         goto out;
     }
@@ -271,22 +271,6 @@ static void initialize_fake_status()
 
     struct selinux_kernel_status *new_status = page_address(new_page);
     memcpy(new_status, status, sizeof(*status));
-    if (ksu_late_loaded) {
-        // In late_load mode the loader may have reloaded sepolicy before us,
-        // so the captured page is not stock. Serve what a stock boot ends
-        // with instead: creation sentinel below 6.10, one load plus one
-        // setenforce above.
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
-        new_status->sequence = 4;
-        new_status->policyload = 1;
-#else
-        new_status->sequence = 0;
-        new_status->policyload = 0;
-#endif
-        if (!new_status->enforcing) {
-            new_status->enforcing = 1;
-        }
-    }
 
     fake_status = new_page;
     pr_info("initialize_fake_status initialized: sequence=%d, policyload=%d, enforcing=%d\n", new_status->sequence,
@@ -500,11 +484,7 @@ void __init ksu_selinux_hide_init()
     if (ksu_register_feature_handler(&selinux_hide_handler)) {
         pr_err("Failed to register selinux_hide feature handler\n");
     }
-    if (ksu_late_loaded) {
-        initialize_fake_status();
-    } else {
-        static_key_enable(&fake_status_initialize_key.key);
-    }
+    static_key_enable(&fake_status_initialize_key.key);
     hook_selinux_status_open();
 }
 
