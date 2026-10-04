@@ -4,8 +4,8 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-// 1: initial espinit ABI (distinct from any KernelSU installation)
-static const __u32 ESPINIT_UAPI_VERSION = 1;
+// 2: generation identity and initialization readiness
+static const __u32 ESPINIT_UAPI_VERSION = 2;
 
 /* Magic numbers for the reboot hook to install the driver fd */
 static const __u32 ESPINIT_INSTALL_MAGIC1 = 0x45535049; /* 'ESPI' */
@@ -17,12 +17,15 @@ static const __u32 EVENT_MODULE_MOUNTED = 3;
 static const __u32 EVENT_SERVICES = 4;
 
 static const __u32 KSU_GET_INFO_FLAG_LKM = (1U << 0);
+static const __u32 ESPINIT_STATE_READY = (1U << 0);
 
 struct ksu_get_info_cmd {
     __u32 version; /* Output: kernel module version */
     __u32 flags; /* Output: KSU_GET_INFO_FLAG_* bits */
     __u32 features; /* Output: max feature ID supported */
     __u32 uapi_version; /* Output: ESPINIT_UAPI_VERSION */
+    __u32 state; /* Output: ESPINIT_STATE_* bits */
+    __u8 generation[64]; /* Output: NUL-terminated ASCII build generation */
 };
 
 struct ksu_get_info_legacy_cmd {

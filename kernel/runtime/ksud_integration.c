@@ -32,6 +32,11 @@
 // clang-format off
 static const char KERNEL_SU_RC[] =
     "\n"
+    // Android init reaches post-fs before post-fs-data; keep the synchronous
+    // post-fs module run ahead of the post-fs-data event it must not report.
+    "on post-fs\n"
+    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs\n"
+    "\n"
     "on post-fs-data\n"
     "    start logd\n"
     // We should wait for the post-fs-data finish

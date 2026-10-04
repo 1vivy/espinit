@@ -8,6 +8,62 @@ use anyhow::{Context, Result};
 use log::{error, info, warn};
 use std::{path::Path, time::Instant};
 
+/// Module stages handled by espinitd when the Android dynamic runtime is available.
+/// PID-1 runs the ESP early/recovery scripts separately, before Android handoff.
+#[derive(Clone, Copy, Debug)]
+pub enum Stage {
+    Early,
+    PostFs,
+    PostFsData,
+    Service,
+    BootCompleted,
+    Recovery,
+    PostMount,
+}
+
+impl Stage {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Early => "early",
+            Self::PostFs => "post-fs",
+            Self::PostFsData => "post-fs-data",
+            Self::Service => "service",
+            Self::BootCompleted => "boot-completed",
+            Self::Recovery => "recovery",
+            Self::PostMount => "post-mount",
+        }
+    }
+}
+
+pub fn on_stage(stage: Stage) -> Result<()> {
+    match stage {
+        Stage::PostFsData => on_post_fs_data(),
+        Stage::Service => {
+            on_services();
+            Ok(())
+        }
+        Stage::BootCompleted => {
+            on_boot_completed();
+            Ok(())
+        }
+        Stage::Early | Stage::PostFs | Stage::Recovery | Stage::PostMount => {
+            if let Err(e) = ksucalls::ensure_uapi_version_matched() {
+                error!("{e:#}, skip {}", stage.name());
+                return Ok(());
+            }
+
+            // These synchronous stages share one deadline across common,
+            // metamodule and active-module scripts, just like post-fs-data.
+            run_stage(
+                stage.name(),
+                ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT),
+            );
+
+            Ok(())
+        }
+    }
+}
+
 pub fn on_post_fs_data() -> Result<()> {
     if let Err(e) = ksucalls::ensure_uapi_version_matched() {
         error!("{e:#}, skip on_post_fs_data");
@@ -40,7 +96,9 @@ pub fn on_post_fs_data() -> Result<()> {
         warn!("safe mode, skip common post-fs-data.d scripts");
     } else {
         // Then exec common post-fs-data scripts
-        if let Err(e) = crate::module::exec_common_scripts("post-fs-data.d", wait) {
+        if let Err(e) =
+            crate::module::exec_common_scripts(&format!("{}.d", Stage::PostFsData.name()), wait)
+        {
             warn!("exec common post-fs-data scripts failed: {e}");
         }
     }
@@ -90,12 +148,12 @@ pub fn on_post_fs_data() -> Result<()> {
     }
 
     // execute metamodule post-fs-data script first (priority)
-    if let Err(e) = metamodule::exec_stage_script("post-fs-data", wait) {
+    if let Err(e) = metamodule::exec_stage_script(Stage::PostFsData.name(), wait) {
         warn!("exec metamodule post-fs-data script failed: {e}");
     }
 
     // exec modules post-fs-data scripts
-    if let Err(e) = crate::module::exec_stage_script("post-fs-data", wait) {
+    if let Err(e) = crate::module::exec_stage_script(Stage::PostFsData.name(), wait) {
         warn!("exec post-fs-data scripts failed: {e}");
     }
 
@@ -109,7 +167,7 @@ pub fn on_post_fs_data() -> Result<()> {
         warn!("execute metamodule mount failed: {e}");
     }
 
-    run_stage("post-mount", wait);
+    run_stage(Stage::PostMount.name(), wait);
 
     std::env::set_current_dir("/").with_context(|| "failed to chdir to /")?;
 
@@ -163,7 +221,7 @@ pub fn on_services() {
     }
 
     info!("on_services triggered!");
-    run_stage("service", ScriptWait::NoWait);
+    run_stage(Stage::Service.name(), ScriptWait::NoWait);
 }
 
 pub fn on_boot_completed() {
@@ -175,7 +233,7 @@ pub fn on_boot_completed() {
     ksucalls::report_boot_complete();
     info!("on_boot_completed triggered!");
 
-    run_stage("boot-completed", ScriptWait::NoWait);
+    run_stage(Stage::BootCompleted.name(), ScriptWait::NoWait);
 }
 
 fn catch_bootlog(logname: &str, command: &[&str]) -> Result<()> {

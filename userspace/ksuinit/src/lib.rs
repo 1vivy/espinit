@@ -1,3 +1,14 @@
+pub mod block;
+pub mod config;
+pub mod esp;
+pub mod gpt;
+pub mod handoff;
+pub mod init;
+pub mod loader;
+pub mod receipt;
+pub mod scripts;
+pub mod selfcheck;
+
 use anyhow::{Context, Result, bail};
 use goblin::elf::{Elf, section_header, sym::Sym};
 use rustix::system::init_module;
@@ -389,79 +400,146 @@ pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
     }
 }
 
-fn detect_espinit() -> bool {
+/// UAPI version implemented by this loader. A core module reporting any other
+/// value is not ABI-compatible and can never satisfy the payload self-check.
+pub const UAPI_VERSION: u32 = 2;
+
+/// `ESPINIT_STATE_READY`: the core module finished its normal initialization.
+pub const STATE_READY: u32 = 1 << 0;
+
+const INSTALL_MAGIC1: u32 = 0x45535049; // 'ESPI'
+const INSTALL_MAGIC2: u32 = 0x4e495446; // 'NITF'
+
+/// Exact mirror of `struct ksu_get_info_cmd` from `uapi/supercall.h`. Field
+/// order, types and size are a hard ABI contract: the ioctl request number is
+/// derived from `size_of::<GetInfoCmd>()`, exactly as the C `_IOR` macro
+/// derives its size field, so this type cannot silently drift from the header.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GetInfoCmd {
+    pub version: u32,
+    pub flags: u32,
+    pub features: u32,
+    pub uapi_version: u32,
+    pub state: u32,
+    pub generation: [u8; 64],
+}
+
+impl Default for GetInfoCmd {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            flags: 0,
+            features: 0,
+            uapi_version: 0,
+            state: 0,
+            generation: [0; 64],
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<GetInfoCmd>() == 84);
+
+const fn ioc_read(nr: u32, size: u32) -> u32 {
+    (2u32 << 30) | ((size & 0x3fff) << 16) | ((b'E' as u32) << 8) | (nr & 0xff)
+}
+
+/// `KSU_IOCTL_GET_INFO` for the v2 structure (`0x80544502`). The legacy
+/// zero-size request is deliberately not probed: a core answering only the
+/// legacy layout cannot report a generation and must not pass the self-check.
+pub const IOCTL_GET_INFO: u32 = ioc_read(2, std::mem::size_of::<GetInfoCmd>() as u32);
+
+const _: () = assert!(IOCTL_GET_INFO == 0x8054_4502);
+
+impl GetInfoCmd {
+    /// The generation reported by the core, when the field is NUL-terminated
+    /// valid ASCII. `generation[63]` is always NUL, so a missing terminator
+    /// means the core is not speaking this ABI.
+    pub fn generation(&self) -> Option<String> {
+        let end = self.generation.iter().position(|byte| *byte == 0)?;
+        let bytes = &self.generation[..end];
+
+        if !bytes.is_ascii() {
+            return None;
+        }
+
+        Some(bytes.iter().map(|byte| char::from(*byte)).collect())
+    }
+
+    /// Whether the core reported `ESPINIT_STATE_READY`.
+    pub fn ready(&self) -> bool {
+        self.state & STATE_READY != 0
+    }
+}
+
+/// Install the espinit control fd into this process through the reboot hook.
+fn install_driver_fd() -> Result<i32> {
     use syscalls::{Sysno, syscall};
-    const ESPINIT_INSTALL_MAGIC1: u32 = 0x45535049; // 'ESPI'
-    const ESPINIT_INSTALL_MAGIC2: u32 = 0x4e495446; // 'NITF'
-    const ESPINIT_IOCTL_GET_INFO: u32 = 0x80104502; // _IOR('E', 2, struct ksu_get_info_cmd)
-    const ESPINIT_IOCTL_GET_INFO_LEGACY: u32 = 0x80004502; // _IOC(_IOC_READ, 'E', 2, 0)
 
-    #[repr(C)]
-    #[derive(Default)]
-    struct GetInfoCmd {
-        version: u32,
-        flags: u32,
-        features: u32,
-        uapi_version: u32,
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct GetInfoLegacyCmd {
-        version: u32,
-        flags: u32,
-        features: u32,
-    }
-
-    // Try new method: get driver fd using reboot syscall with magic numbers
     let mut fd: i32 = -1;
     unsafe {
         let _ = syscall!(
             Sysno::reboot,
-            ESPINIT_INSTALL_MAGIC1,
-            ESPINIT_INSTALL_MAGIC2,
+            INSTALL_MAGIC1,
+            INSTALL_MAGIC2,
             0,
             std::ptr::addr_of_mut!(fd)
         );
     }
 
-    let version = if fd >= 0 {
-        // New method: try to get version info via ioctl
-        let mut cmd = GetInfoCmd::default();
-        let version = unsafe {
-            let ret = syscall!(Sysno::ioctl, fd, ESPINIT_IOCTL_GET_INFO, &mut cmd as *mut _);
+    if fd < 0 {
+        bail!("espinit control fd is unavailable");
+    }
 
-            match ret {
-                Ok(_) => cmd.version,
-                Err(_) => {
-                    let mut cmd = GetInfoLegacyCmd::default();
-                    match syscall!(
-                        Sysno::ioctl,
-                        fd,
-                        ESPINIT_IOCTL_GET_INFO_LEGACY,
-                        &mut cmd as *mut _
-                    ) {
-                        Ok(_) => cmd.version,
-                        Err(_) => 0,
-                    }
-                }
-            }
-        };
-
-        unsafe {
-            let _ = syscall!(Sysno::close, fd);
-        }
-
-        version
-    } else {
-        0
-    };
-
-    log::info!("espinit version: {}", version);
-
-    version != 0
+    Ok(fd)
 }
 
+/// Query the core module identity through the v2 control interface. Fails when
+/// the driver fd cannot be installed or the ioctl is rejected; the caller is
+/// responsible for the ABI-version, generation, and readiness checks.
+pub fn query_core_info() -> Result<GetInfoCmd> {
+    use syscalls::{Sysno, syscall};
+
+    let fd = install_driver_fd()?;
+    let mut cmd = GetInfoCmd::default();
+    let result = unsafe {
+        syscall!(
+            Sysno::ioctl,
+            fd,
+            IOCTL_GET_INFO,
+            std::ptr::addr_of_mut!(cmd)
+        )
+    };
+    unsafe {
+        let _ = syscall!(Sysno::close, fd);
+    }
+
+    result
+        .map_err(|errno| anyhow::anyhow!("errno {}", errno.into_raw()))
+        .context("espinit v2 get-info ioctl failed")?;
+
+    Ok(cmd)
+}
+
+/// Whether a core module speaking the current ABI is loaded and initialized.
 pub fn has_espinit() -> bool {
-    detect_espinit()
+    match query_core_info() {
+        Ok(cmd) => {
+            log::info!(
+                "espinit uapi version: {}, state: {:#x}",
+                cmd.uapi_version,
+                cmd.state
+            );
+            cmd.uapi_version == UAPI_VERSION && cmd.ready()
+        }
+        Err(error) => {
+            log::warn!("espinit control interface unavailable: {error:#}");
+            false
+        }
+    }
+}
+
+/// Whether a core module is loaded at all, regardless of readiness.
+pub fn core_loaded() -> bool {
+    query_core_info().is_ok()
 }

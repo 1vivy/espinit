@@ -23,6 +23,11 @@ enum Commands {
         #[command(subcommand)]
         command: Module,
     },
+    /// Run `early` module scripts when the Android dynamic runtime is available
+    Early,
+
+    /// Run `post-fs` module scripts without reporting Android boot events
+    PostFs,
 
     /// Trigger `post-fs-data` event
     PostFsData,
@@ -30,8 +35,11 @@ enum Commands {
     /// Trigger `service` event
     Services,
 
-    /// Trigger `boot-complete` event
+    /// Trigger `boot-completed` event
     BootCompleted,
+
+    /// Run `recovery` module scripts without reporting Android boot events
+    Recovery,
 
     /// Emulate system reboot
     SoftReboot,
@@ -356,11 +364,11 @@ pub fn run() -> Result<()> {
     log::info!("command: {:?}", cli.command);
 
     let result = match cli.command {
-        Commands::PostFsData => init_event::on_post_fs_data(),
-        Commands::BootCompleted => {
-            init_event::on_boot_completed();
-            Ok(())
-        }
+        Commands::Early => init_event::on_stage(init_event::Stage::Early),
+        Commands::PostFs => init_event::on_stage(init_event::Stage::PostFs),
+        Commands::PostFsData => init_event::on_stage(init_event::Stage::PostFsData),
+        Commands::BootCompleted => init_event::on_stage(init_event::Stage::BootCompleted),
+        Commands::Recovery => init_event::on_stage(init_event::Stage::Recovery),
 
         Commands::SoftReboot => crate::soft_reboot::soft_reboot(),
 
@@ -481,8 +489,7 @@ pub fn run() -> Result<()> {
                 info!("espinit not available, exiting services");
                 std::process::exit(0);
             }
-            init_event::on_services();
-            Ok(())
+            init_event::on_stage(init_event::Stage::Service)
         }
         Commands::Feature { command } => match command {
             Feature::Get { id, config } => {

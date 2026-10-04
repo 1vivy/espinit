@@ -1,18 +1,47 @@
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 
-mod init;
+#[cfg(not(test))]
+use std::io::Write;
 
-use rustix::{cstr, runtime::execve};
+#[cfg(not(test))]
+use espinit::{handoff, init, receipt};
+
+/// PID-1 entry point.
+///
+/// The early managed boot runs first, and only as process 1: any other caller
+/// gets a nonzero exit status immediately, without touching the platform. As
+/// PID 1, any failure stops the handoff, persists a bounded receipt, and enters
+/// the fatal-boot stop path; the real init is never executed after an init
+/// error. On success the fixed real `/init` is executed with the original
+/// `argv`/`envp`, preserving PID 1.
+///
 /// # Safety
-/// This is the entry point of the program
-/// We cannot use the main because rust will abort if we don't have std{in/out/err}
-/// https://github.com/rust-lang/rust/blob/3071aefdb2821439e2e6f592f41a4d28e40c1e79/library/std/src/sys/unix/mod.rs#L80
-/// So we use the C main function and call rust code from there
+/// Called by the kernel as the process entry point.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(_argc: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
-    let _ = init::init();
-    unsafe {
-        execve(cstr!("/init"), argv, envp);
+    if !rustix::process::getpid().is_init() {
+        // Not the boot init: report the usage error and return instead of
+        // rebooting the machine or parking the caller. Kernel logging is not
+        // set up yet, so this goes to stderr, best-effort.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "espinit: must run as process 1; refusing to continue"
+        );
+        return 1;
     }
-    0
+
+    let mut state = receipt::ReceiptState::default();
+
+    if let Err(failure) = init::run(&mut state) {
+        receipt::record(&mut state, &failure);
+        init::stop_boot();
+    }
+
+    if let Err(failure) = unsafe { handoff::exec_real_init(argv, envp) } {
+        receipt::record(&mut state, &failure);
+        init::stop_boot();
+    }
+
+    init::stop_boot()
 }
