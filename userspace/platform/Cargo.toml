@@ -1,0 +1,17 @@
+[package]
+name = "espinit-platform"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+build = "../ksuinit/build.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+goblin = "0.10"
+libc = "0.2"
+
+[[bin]]
+name = "tiny-espsu"
+path = "src/main.rs"

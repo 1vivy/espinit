@@ -59,7 +59,11 @@ pub(crate) fn classify_boot_mode<'a>(
             })
     };
 
-    if value("androidboot.mode") == Some("recovery") || value("androidboot.recovery") == Some("1") {
+    if matches!(
+        value("androidboot.mode"),
+        Some("recovery" | "fastboot" | "fastbootd")
+    ) || value("androidboot.recovery") == Some("1")
+    {
         return BootMode::Recovery;
     }
 
@@ -80,13 +84,16 @@ pub(crate) fn classify_boot_mode<'a>(
     BootMode::Normal
 }
 
-/// Whether shared boot-mode selection chooses the recovery script.
+/// Stable selection shared by every PID1 module script and core RC handshake.
 pub fn is_recovery() -> bool {
-    classify_boot_mode(
-        &fs::read_to_string("/proc/bootconfig").unwrap_or_default(),
-        &fs::read_to_string("/proc/cmdline").unwrap_or_default(),
-        Path::new(RECOVERY_EXECUTABLE).exists(),
-    ) == BootMode::Recovery
+    static MODE: std::sync::LazyLock<BootMode> = std::sync::LazyLock::new(|| {
+        classify_boot_mode(
+            &fs::read_to_string("/proc/bootconfig").unwrap_or_default(),
+            &fs::read_to_string("/proc/cmdline").unwrap_or_default(),
+            Path::new(RECOVERY_EXECUTABLE).exists(),
+        )
+    });
+    *MODE == BootMode::Recovery
 }
 
 /// Run the module's early or recovery script when the ESP provides one.
@@ -254,6 +261,20 @@ fn kill_and_reap(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn userspace_fastboot_selects_recovery_even_with_force_normal_boot() {
+        for mode in ["fastboot", "fastbootd"] {
+            let command = format!("androidboot.mode={mode} androidboot.force_normal_boot=1");
+            assert_eq!(classify_boot_mode("", &command, false), BootMode::Recovery);
+            let boot =
+                format!("androidboot.mode = \"{mode}\"\nandroidboot.force_normal_boot = \"1\"");
+            assert_eq!(
+                classify_boot_mode(&boot, "androidboot.mode=normal", false),
+                BootMode::Recovery
+            );
+        }
+    }
 
     #[test]
     fn boot_mode_precedence() {

@@ -802,7 +802,33 @@ static bool add_typeattribute(struct policydb *db, const char *type, const char 
 // Operation on types
 bool ksu_type(struct policydb *db, const char *name, const char *attr)
 {
-    return add_type(db, name, false) && add_typeattribute(db, name, attr);
+    int i;
+    struct type_datum *type;
+    struct ebitmap_node *node;
+    unsigned int bit;
+
+    if (!add_type(db, name, false))
+        return false;
+    if (attr)
+        return add_typeattribute(db, name, attr);
+    type = symtab_search(&db->p_types, name);
+    if (!type || type->attribute)
+        return false;
+    ebitmap_for_each_positive_bit(&db->type_attr_map_array[type->value - 1], node, bit)
+    {
+        if (bit != type->value - 1)
+            return false;
+    }
+
+    /* Unattributed object types must not inherit file_type/dev_type grants.
+     * Unlike domain creation, only object_r may carry these types. */
+    for (i = 0; i < db->p_roles.nprim; ++i) {
+        bool object = !strcmp(db->sym_val_to_name[SYM_ROLES][i], "object_r");
+
+        if (ebitmap_set_bit(&db->role_val_to_struct[i]->types, type->value - 1, object))
+            return false;
+    }
+    return true;
 }
 
 bool ksu_attribute(struct policydb *db, const char *name)

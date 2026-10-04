@@ -7,6 +7,7 @@ pub mod gptctl;
 pub mod handoff;
 pub mod init;
 pub mod loader;
+pub mod platform;
 pub mod receipt;
 pub mod scripts;
 pub mod selfcheck;

@@ -1,21 +1,30 @@
-# espinit manifest (planned)
+# espinit manifest
 #
 # Deployed path: /debug_ramdisk/esp/espinit/manifest.toml
 # All relative paths are resolved from the ESP subtree /espinit, and may not
 # be absolute or traverse symlinks or `..`.
 #
-# The manifest, rom.toml, the PID-1 binary, espinitd, and every listed module
+# The manifest, selected roms/<id>.toml, PID-1 binary, espinitd, and every listed module
 # must all carry the same `generation` value.
 #
 # The ESP is normally mounted read-only. Early hard-failure receipts use ESP
 # /espinit/receipts/failure.json, never unprojected /metadata. On failure only,
 # use a bounded RW remount: temporary file + fsync + atomic rename + directory
 # fsync, then sync the ESP and remount RO. Storage errors still stop handoff.
-# /metadata/espinit holds daemon runtime receipts/logs only after handoff.
+# After projection, PID1 atomically stages Android packages on projected metadata.
 
 schema_version = 1
-generation = "esp-2026.10"
-rom = "rom.toml"
+generation = "release-1"
+# The bootconfig/cmdline androidboot.espinit.rom selects <id>.toml in this directory.
+rom = "roms"
+
+# Separate from the ordered kernel-module list below. These package manifests
+# live at modules/<id>/module.toml and must use this exact generation.
+[platform]
+metadata_filesystem = "ext4"
+packages = ["boot-hal", "tiny-espsu"]
+# Recovery keeps its own scripts/projection, but does not install the normal HAL.
+recovery_packages = []
 
 # Modules load strictly in document order. The first entry must be the core
 # module, named `espinit`. A managed ROM additionally requires `gpt` after it
@@ -37,7 +46,7 @@ name = "espinit"
 path = "modules/espinit.ko"
 params = ""
 
-# Required only when rom.toml selects `managed = true`. `params` is passed to
+# Required only when the selected ROM config sets `managed = true`. `params` is passed to
 # the kernel as module parameters and is never evaluated by a shell. Empty
 # string = no parameters. The loader applies the complete projection and
 # requires an exact QUERY match before the gpt early/recovery script runs.
