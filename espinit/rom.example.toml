@@ -44,8 +44,9 @@ managed = true
 # whole-LU devices, offsets, size slicing, and any extent/FIEMAP ABI are not
 # accepted. The ESP-file relative path is resolved from the ESP mount root,
 # e.g. esp-file:espinit/backing.img, and the attachment stays alive through the
-# projection. `read_only` explicitly selects projected access; physical
-# residual exposure is read-only regardless of this value.
+# projection. `read_only` explicitly selects projected access. A physical
+# partition with the same name is hidden and forced read-only; unrelated
+# stock partitions retain their native visibility and access mode.
 
 [[partitions]]
 name = "super"

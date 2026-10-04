@@ -373,20 +373,28 @@ fn retry_native_metadata<T>(
     )
 }
 
-/// Apply the complete projection and verify it: enumerate the physical
-/// partitions to hide except the mounted ESP (kept writable for failure
-/// receipts), build the exact APPLY payload from the resolved backends, issue
-/// APPLY, and require the QUERY reply to report this exact projection set.
+/// Apply and verify the complete projection: enumerate only physical
+/// partitions whose PARTNAME collides with a projected name, retain the
+/// mounted ESP for failure receipts and unrelated stock partitions for normal
+/// platform operation, build the exact APPLY payload from the resolved
+/// backends, issue APPLY, and require QUERY to report the exact projection.
 fn apply_projection(rom: &RomConfig, esp_device: (u32, u32)) -> Result<(), Failure> {
     let hide = retry_enumerated(
-        "physical partitions",
+        "shadowed physical partitions",
         ENUMERATION_WINDOW,
         ENUMERATION_RETRY,
         || {
-            block::hidden_partitions(crate::gpt_uapi::GptDevice {
-                major: esp_device.0,
-                minor: esp_device.1,
-            })
+            block::hidden_partitions(
+                crate::gpt_uapi::GptDevice {
+                    major: esp_device.0,
+                    minor: esp_device.1,
+                },
+                |name| {
+                    rom.partitions
+                        .iter()
+                        .any(|partition| partition.name == name)
+                },
+            )
         },
         block::is_pending,
     )

@@ -35,7 +35,7 @@ jobs:
         workspaces: . -> target
         cache-targets: false
 
-    - name: Build espinit
+    - name: Build espinit and phone LVM activator
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       run: |
@@ -43,13 +43,15 @@ jobs:
         BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
         test -f "$BUILTINS"
         export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo build --package espinit --target=aarch64-linux-android --release
+        cargo build --package espinit --package thin-activate --target=aarch64-linux-android --release
 
-    - name: Upload espinit artifact
+    - name: Upload espinit artifacts
       uses: actions/upload-artifact@v7
       with:
         name: espinit-aarch64
-        path: target/aarch64-linux-android/release/espinit
+        path: |
+          target/aarch64-linux-android/release/espinit
+          target/aarch64-linux-android/release/thin-activate
 
     - name: Build espinit x64
       env:

@@ -548,10 +548,14 @@ fn mount_is_read_only(mountpoint: &str) -> io::Result<bool> {
     Ok(parse_mounts_read_only(&mounts, mountpoint))
 }
 
-/// Enumerate physical partitions as the sorted, unique `hide` set, excluding
-/// the mounted ESP so failure receipts remain writable after APPLY. Loop,
-/// device-mapper, whole-LU, and non-partition devices are not hidden.
-pub fn hidden_partitions(exclude: GptDevice) -> io::Result<Vec<GptDevice>> {
+/// Enumerate physical partitions shadowed by projected names as the sorted,
+/// unique `hide` set. The mounted ESP is always retained so failure receipts
+/// remain writable after APPLY. Unrelated physical partitions, loop,
+/// device-mapper, whole-LU, and non-partition devices remain visible.
+pub fn hidden_partitions<F>(exclude: GptDevice, is_projected: F) -> io::Result<Vec<GptDevice>>
+where
+    F: Fn(&str) -> bool,
+{
     let mut sources = Vec::new();
 
     for entry in fs::read_dir(SYS_CLASS_BLOCK)? {
@@ -570,16 +574,29 @@ pub fn hidden_partitions(exclude: GptDevice) -> io::Result<Vec<GptDevice>> {
         sources.push((uevent, dev));
     }
 
-    collect_hidden(&sources, exclude)
+    collect_hidden(&sources, exclude, is_projected)
 }
 
-/// Pure form of [`hidden_partitions`]: keep physical partitions other than the
-/// explicitly retained ESP, sort/deduplicate, and enforce the ABI bound.
-fn collect_hidden(sources: &[(String, String)], exclude: GptDevice) -> io::Result<Vec<GptDevice>> {
+/// Pure form of [`hidden_partitions`]: hide only physical partitions whose
+/// `PARTNAME` collides with a projected name.
+fn collect_hidden<F>(
+    sources: &[(String, String)],
+    exclude: GptDevice,
+    is_projected: F,
+) -> io::Result<Vec<GptDevice>>
+where
+    F: Fn(&str) -> bool,
+{
     let mut devices = Vec::new();
 
     for (uevent, dev) in sources {
         if field(uevent, "DEVTYPE") != Some("partition") {
+            continue;
+        }
+        let Some(partname) = field(uevent, "PARTNAME") else {
+            continue;
+        };
+        if !is_projected(partname) {
             continue;
         }
 
@@ -595,7 +612,7 @@ fn collect_hidden(sources: &[(String, String)], exclude: GptDevice) -> io::Resul
 
     if devices.len() > GPT_MAX_HIDDEN {
         return Err(invalid(
-            "more physical partitions than the gpt ABI can hide",
+            "more colliding physical partitions than the gpt ABI can hide",
         ));
     }
 
@@ -863,38 +880,56 @@ tmpfs /tmp tmpfs rw,nosuid 0 0
     }
 
     #[test]
-    fn hidden_set_is_sorted_unique_and_bounded() {
+    fn hidden_set_contains_only_shadowed_names_and_is_bounded() {
         fn source(uevent: &str, dev: &str) -> (String, String) {
             (uevent.to_owned(), dev.to_owned())
         }
 
         let sources = vec![
             source(
-                "DEVTYPE=partition\nDEVNAME=sda1\nPARTNAME=system_1\n",
+                "DEVTYPE=partition\nDEVNAME=sda1\nPARTNAME=metadata\n",
                 "8:1",
             ),
             source(
-                "DEVTYPE=partition\nDEVNAME=sda2\nPARTNAME=vbmeta_1\n",
-                "8:3",
+                "DEVTYPE=partition\nDEVNAME=sda2\nPARTNAME=userdata\n",
+                "8:2",
             ),
-            source("DEVTYPE=partition\nDEVNAME=sda1\n", "8:1"),
+            source("DEVTYPE=partition\nDEVNAME=sda3\nPARTNAME=esp\n", "8:3"),
+            source("DEVTYPE=partition\nDEVNAME=sda4\nPARTNAME=vendor\n", "8:4"),
+            source(
+                "DEVTYPE=partition\nDEVNAME=sdb1\nPARTNAME=metadata\n",
+                "8:1",
+            ),
+            source("DEVTYPE=partition\nDEVNAME=sda5\n", "8:5"),
             source("DEVTYPE=disk\nDEVNAME=sda\n", "8:0"),
             source("DEVTYPE=disk\nDEVNAME=loop0\n", "7:0"),
             source("DEVTYPE=disk\nDEVNAME=dm-0\n", "253:0"),
         ];
 
+        let projected = ["metadata", "userdata", "esp"];
         assert_eq!(
-            collect_hidden(&sources, GptDevice { major: 8, minor: 3 }).unwrap(),
-            [GptDevice { major: 8, minor: 1 }]
+            collect_hidden(&sources, GptDevice { major: 8, minor: 3 }, |name| projected
+                .contains(&name),)
+            .unwrap(),
+            [
+                GptDevice { major: 8, minor: 1 },
+                GptDevice { major: 8, minor: 2 },
+            ]
         );
 
         let mut oversized = Vec::new();
-
         for minor in 0..=(GPT_MAX_HIDDEN as u32) {
-            oversized.push(source("DEVTYPE=partition\n", &format!("8:{minor}\n")));
+            oversized.push(source(
+                "DEVTYPE=partition\nPARTNAME=metadata\n",
+                &format!("8:{minor}\n"),
+            ));
         }
 
-        assert!(collect_hidden(&oversized, GptDevice { major: 1, minor: 1 }).is_err());
+        assert!(
+            collect_hidden(&oversized, GptDevice { major: 1, minor: 1 }, |name| name
+                == "metadata",)
+            .is_err()
+        );
     }
 
     #[test]

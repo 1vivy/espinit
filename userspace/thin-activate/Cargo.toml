@@ -1,0 +1,9 @@
+[package]
+name = "thin-activate"
+version = "0.1.0"
+edition.workspace = true
+license = "GPL-3.0-only"
+
+[dependencies]
+libc.workspace = true
+lvm2-meta = { path = "../lvm2-meta" }

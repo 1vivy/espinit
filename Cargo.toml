@@ -2,11 +2,15 @@
 members = [
     "userspace/ksud",
     "userspace/ksuinit",
+    "userspace/lvm2-meta",
+    "userspace/thin-activate",
     "userspace/platform",
 ]
 default-members = [
     "userspace/ksud",
     "userspace/ksuinit",
+    "userspace/lvm2-meta",
+    "userspace/thin-activate",
 ]
 resolver = "3"
 exclude = ["payloads/boot-hal"]
@@ -17,6 +21,7 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1"
 log = "0.4"
+libc = "0.2"
 
 [patch.crates-io]
 libc = { git = "https://github.com/rust-lang/libc", rev = "1a661633f11a261ff9c00b40875ef72f1cbec818" }
