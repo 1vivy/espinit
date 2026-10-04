@@ -46,10 +46,18 @@ name = "espinit"
 path = "modules/espinit.ko"
 params = ""
 
-# Required only when the selected ROM config sets `managed = true`. `params` is passed to
-# the kernel as module parameters and is never evaluated by a shell. Empty
-# string = no parameters. The loader applies the complete projection and
-# requires an exact QUERY match before the gpt early/recovery script runs.
+# Managed storage loads the private thin target, then runs
+# modules/thin/early.sh. The activator reads the single userdata PV's checked
+# LVM2 metadata and recreates the exact rom VG tables before projection.
+[[modules]]
+name = "thin"
+path = "modules/thin.ko"
+params = ""
+
+# Required only when the selected ROM config sets `managed = true`. `params`
+# is passed to the kernel as module parameters and is never evaluated by a
+# shell. The loader applies the complete projection and requires an exact
+# QUERY match before the gpt early/recovery script runs.
 [[modules]]
 name = "gpt"
 path = "modules/gpt.ko"

@@ -49,6 +49,12 @@ jobs:
             fi
           done
 
+      - name: Rename phone LVM activator
+        run: |
+          mkdir -p thin-activate
+          mv ./espinit-aarch64/thin-activate \
+            thin-activate/thin-activate-aarch64-linux-android
+
       - name: Rename lkm
         run: |
           mkdir -p lkm
@@ -71,4 +77,5 @@ jobs:
           files: |
             espinit/*
             espinitd/*
+            thin-activate/*
             lkm/lkm-*_espinit.ko
