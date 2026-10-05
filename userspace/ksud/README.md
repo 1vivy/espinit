@@ -109,26 +109,16 @@ already exist, and must have an existing parent directory.
 
 ## One packaging command
 
-CPIO and complete ESP tree only:
+The stock boot or init_boot image is required because its effective `/init` is
+preserved in the per-ROM takeover archive:
 
 ```sh
 ksud boot-patch \
   --espinit /build/espinit-static \
   --payload /build/payload \
   --rom rom1 \
+  --boot /build/stock/init_boot.img \
   --out /build/artifacts/rom1
-```
-
-For the same outputs plus a conventional-test boot/init_boot image, append one
-explicit optional input to that same command:
-
-```sh
-ksud boot-patch \
-  --espinit /build/espinit-static \
-  --payload /build/payload \
-  --rom rom1 \
-  --out /build/artifacts/rom1-test \
-  --boot /build/stock/init_boot.img
 ```
 
 The output path must be new for every invocation; the tool will not overwrite an
@@ -141,7 +131,7 @@ Errors return a nonzero exit status and do not publish a partial output tree.
 rom1/
   espinit.cpio
   receipt.json
-  patched.img                 only with --boot
+  patched.img                 unsigned emulator/test image
   esp/                        contents for later ESP provisioning
     rom/
       rom1/
@@ -156,11 +146,12 @@ rom1/
       receipts/
 ```
 
-The canonical archive has exactly one regular `espinit` entry, interpreted by
-Linux as executable `/espinit`, mode `0755`, UID/GID zero, zero timestamps and
-device fields, deterministic inode numbering, a newc trailer and zero padding to
-512 bytes. No `/init` replacement, `init.real`, embedded modules, debug properties
-or other ramdisk policy is added.
+The canonical firmware artifact is a deterministic legacy-LZ4 stream containing
+one newc overlay. It installs espinit as executable `/init` and copies the stock
+image's effective executable `/init` to the reserved `/init.espinit`, both mode
+`0755` with normalized metadata. The overlay contains no modules or debug policy.
+The packager rejects an absent/non-static/non-AArch64 stock init and any existing
+`/init.espinit` collision.
 
 The firmware archive location is **ESP `/rom/<rom-id>/espinit.cpio`**, matching the
 physical-phone `/rom/rom1/espinit.cpio` convention. The byte-identical output-root
@@ -172,13 +163,12 @@ and mounts or provisions nothing.
 `receipt.json` schema 1 binds:
 
 - tool name, package version, tool build generation, and embedded verifier SHA-256;
-- selected ROM, payload generation, archive path and minimum boot arguments;
-- SHA-256, byte size and normalized file mode for explicit binary/image sources
-  and every copied payload source;
+- selected ROM, payload generation, archive path and the bootconfig selector;
+- SHA-256, byte size and normalized mode for the explicit PID1, stock image and
+  every copied payload source;
 - SHA-256, byte size and mode for every published artifact except the receipt
   itself, plus the complete directory list (including empty receipt storage);
-- the actual successful module verifier report and whether a conventional-test
-  image was requested.
+- the successful module verifier report and the unsigned test image contract.
 
 Paths in artifact maps are output-relative; `payload/` source keys are relative
 to `--payload`. No temporary directory name, output directory name or wall-clock
@@ -195,35 +185,30 @@ removes the private staging directory. A failure of the final parent fsync may
 leave the complete published output and reports an error; it is not silently
 reported as durable success. Sources are only opened for reading.
 
-## Optional image contract and limits
+## Stock-image contract and limits
 
-`--boot` accepts Android boot/init_boot header v3/v4 regular files, including a
-kernel-free init_boot or a boot image with no existing ramdisk. It does not accept
-vendor_boot, raw ramdisks, legacy headers or device nodes. Existing ramdisk newc
-archives are bounded/framing-checked and preserved byte-for-byte after
-decompression; the canonical archive is appended, preserving stock `/init`,
-hardlink metadata and unrelated entries. The historical patcher preserves
-ramdisk compression (legacy LZ4 is used for a previously absent ramdisk) and the
-kernel bytes.
+`--boot` accepts Android boot/init_boot header v3/v4 regular files with an
+existing newc ramdisk and executable AArch64 `/init`. It does not accept
+vendor_boot, raw ramdisks, legacy headers, device nodes, or a ramdisk already
+containing the reserved `/init.espinit`. Existing ramdisk archives are
+bounded/framing-checked and preserved byte-for-byte; `patched.img` appends the
+uncompressed takeover overlay before restoring the source compression. Kernel
+bytes are preserved.
 
-The header command line retains unrelated arguments, replaces any old `rdinit`
-and ROM selector, and ends with exactly:
+The header command line retains unrelated arguments, removes stale `rdinit` and
+ROM selectors, and ends with exactly:
 
 ```text
-rdinit=/espinit androidboot.espinit.rom=rom1
+androidboot.espinit.rom=rom1
 ```
 
-No broad command-line override exists. Any separate vendor bootconfig must be
-consistent with this explicit ROM selector. Whether a particular bootloader
-consumes the init_boot header command line is outside this artifact format;
-firmware-based boot uses the receipt's same contract when assembling its command
-line. The tool does not modify vendor_boot or bootloader configuration.
+Firmware delivery uses the same selector as bootconfig and appends the
+legacy-LZ4 `espinit.cpio`; it does not generate `rdinit`. The tool does not
+modify vendor_boot or bootloader configuration.
 
 `patched.img` is **unsigned conventional-test-only**: prior GKI signatures and
-AVB tail data are deliberately omitted, because they no longer authenticate the
-changed bytes. It is not a flash-ready, locked-device or authenticated-boot
-artifact. Device-specific signing/provisioning is intentionally separate. The
-source image is never modified. CPIO/ESP-only mode does not require any boot image.
+AVB tail data are deliberately omitted because they no longer authenticate the
+changed bytes. It is not flash-ready. The source image is never modified.
 
 OTA support is intentionally absent, not an automatic next stage of this command.
 
@@ -238,8 +223,8 @@ cargo fmt --all -- --check
 ```
 
 Tests use explicit synthetic ELF/config fixtures; they run the real embedded
-module verifier, not mocked admission. They cover canonical archive metadata,
-traversal, generation/receipt/CRC mismatches, atomic failure, complete CPIO-only
-publication, reproducibility, source preservation, boot parsing, stock init and
-kernel preservation, minimal rdinit arguments and unsigned-image behavior. These
+module verifier, not mocked admission. They cover takeover metadata and
+compression, generation/receipt/CRC mismatches, atomic publication,
+reproducibility, source preservation, stock-init collision checks, boot parsing,
+kernel preservation, selector replacement and unsigned-image behavior. These
 host tests do not prove a device boot or real-module target compatibility.

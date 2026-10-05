@@ -52,6 +52,10 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     setup_kmsg();
     log::info!("espinit early managed boot starting");
     let (mounts, bootconfig, probe) = mount_minimal()?;
+    if probe == Some(ProbeStage::Handoff) {
+        log::warn!("lab handoff probe requested; skipping managed payload work");
+        return prepare_handoff(state, &mounts);
+    }
     if recovery_passthrough_requested(&bootconfig) {
         log::warn!("explicit recovery passthrough requested; skipping all managed payload work");
         return prepare_handoff(state, &mounts);
@@ -637,17 +641,16 @@ const PROBE_PANIC_DELAY: &[u8] = b"30";
 /// Fixed, bootconfig-only lab checkpoints in boot order; parsed once after proc
 /// is mounted and before sysfs/dev are mounted.
 ///
-/// A checkpoint is opted in by the exact `androidboot.espinit.probe=<stage>` pair,
-/// read from the boot configuration only (there is no kernel-command-line or
-/// vendor spelling). One exact stage name selects one checkpoint; an absent or
-/// empty value disables the probe, and an unknown, malformed or duplicated
-/// nonempty value is a bounded [`Failure`] rather than a silent skip, matching how
-/// the selected-ROM key treats the same ambiguity. The first three names are the
-/// minimal-setup boundaries `proc-mounted`, `sys-mounted` and `dev-mounted`;
-/// `minimal-mounted` stays the boundary of the whole minimal setup, after every
-/// mount and device node.
+/// A probe is opted in by the exact `androidboot.espinit.probe=<stage>` pair,
+/// read from bootconfig only. One exact stage name selects one behavior; an
+/// absent or empty value disables probes, and malformed or duplicated values
+/// fail closed. `handoff` is the one non-crashing probe: after the complete
+/// minimal mount setup it skips managed payload work and executes the saved
+/// init, allowing an emulator to prove the PID-1 takeover/handoff contract.
+/// Every other name crashes at its named checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProbeStage {
+    Handoff,
     ProcMounted,
     SysMounted,
     DevMounted,
@@ -674,6 +677,7 @@ impl ProbeStage {
         }
         match value {
             None | Some("") => Ok(None),
+            Some("handoff") => Ok(Some(Self::Handoff)),
             Some("proc-mounted") => Ok(Some(Self::ProcMounted)),
             Some("sys-mounted") => Ok(Some(Self::SysMounted)),
             Some("dev-mounted") => Ok(Some(Self::DevMounted)),
@@ -1218,6 +1222,7 @@ mod tests {
     #[test]
     fn the_probe_accepts_every_exact_checkpoint() {
         for (value, expected) in [
+            ("handoff", ProbeStage::Handoff),
             ("proc-mounted", ProbeStage::ProcMounted),
             ("sys-mounted", ProbeStage::SysMounted),
             ("dev-mounted", ProbeStage::DevMounted),

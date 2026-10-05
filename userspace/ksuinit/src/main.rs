@@ -14,8 +14,8 @@ use espinit::{handoff, init, receipt};
 /// the fatal-boot stop path; the real init is never executed after an init
 /// error. Both fatal paths record the receipt and then run the same stop, which
 /// honors the exact `androidboot.init_fatal_panic=true` opt-in by requesting a
-/// kernel panic before falling back to the reboot. On success the fixed real
-/// `/init` is executed with the original `argv`/`envp`, preserving PID 1.
+/// kernel panic before falling back to reboot. On success `/init.espinit` is
+/// executed with the original `argv`/`envp`, preserving PID 1 and `/init` argv[0].
 ///
 /// # Safety
 /// Called by the kernel as the process entry point.

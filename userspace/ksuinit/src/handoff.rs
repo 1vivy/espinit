@@ -1,17 +1,17 @@
-//! Handoff to Android's real init.
+//! Handoff to the init saved by the host boot-image patcher.
 //!
-//! The target is a single fixed path: ESP configuration can never choose an
-//! executable, and there is no `/init.real` or `/system/bin/init` fallback. The
-//! boot-image integration installs espinit as early PID 1 without taking over
-//! the raw ramdisk `/init`, so the real init is always `/init`.
+//! The target is a collision-checked fixed path: ESP configuration can never
+//! choose an executable, and there is no fallback.  The KernelSU-style overlay
+//! installs espinit as `/init` and preserves the effective prior `/init` at
+//! `/init.espinit`.
 
 use rustix::cstr;
 use rustix::runtime::execve;
 
 use crate::receipt::{Failure, Stage};
 
-/// The fixed real-init target.
-pub const REAL_INIT: &str = "/init";
+/// Fixed path holding the init that the takeover archive replaced.
+pub const REAL_INIT: &str = "/init.espinit";
 
 /// Replace this process with the real init, preserving the original `argv`,
 /// `envp`, and PID. This returns only on failure, which is a fatal handoff
@@ -24,7 +24,7 @@ pub unsafe fn exec_real_init(
     argv: *const *const u8,
     envp: *const *const u8,
 ) -> Result<(), Failure> {
-    let error = unsafe { execve(cstr!("/init"), argv, envp) };
+    let error = unsafe { execve(cstr!("/init.espinit"), argv, envp) };
 
     Err(Failure::new(
         Stage::Handoff,

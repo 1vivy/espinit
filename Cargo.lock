@@ -598,6 +598,7 @@ dependencies = [
  "jwalk",
  "libc",
  "log",
+ "lz4",
  "nom 8.0.0",
  "prop-rs-android",
  "regex-lite",
