@@ -62,17 +62,18 @@ Unregistering the disk drops an in-flight bias and waits on a completion, so
 clone callbacks cannot race backend release.
 
 Only after the complete synthetic partition table has been verified does APPLY
-clear every supplied physical partition's PARTNAME and set its per-bdev
-`BD_READ_ONLY`. No physical GPT sectors are written. Original names and RO bits
-are saved and restored on rollback/unload. The physical disk open mutex protects
-each endpoint update. Physical partitions lacking metadata are still made RO.
-Hide entries must actually be partitions; a raw LU is rejected in hide[].
+clear every supplied physical partition's PARTNAME. No physical GPT sectors are
+written. Original names are saved and restored on rollback/unload. The physical
+disk open mutex protects each endpoint update. Hide entries must actually be
+partitions; a raw LU is rejected in `hide[]`.
 
+Hidden physical partitions retain their native access mode. A projected DM/LVM
+backend can resolve through the same physical bdev, and `BD_READ_ONLY` is global
+to that bdev: setting it on the hidden PV would reject projected writes too.
 This is **not a raw-LU firewall**: parent logical units remain accessible, and
-already-open clients are not revoked. In particular, writable projections keep
-held lower whole-disk handles so physical-partition hiding does not also make
-those projections read-only. Enumeration, dependency activation and exclusion
-of competing storage users are the managed boot caller's responsibility.
+already-open clients are not revoked. Enumeration, dependency activation and
+exclusion of competing storage users are the managed boot caller's
+responsibility.
 The managed loader excludes its mounted ESP from `hide[]` so a later hard
 failure can remount it briefly for the durable receipt. That exception must
 remain protected by platform permissions; it is not a projected endpoint.

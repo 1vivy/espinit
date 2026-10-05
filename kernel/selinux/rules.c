@@ -16,6 +16,8 @@
 #include "xfrm.h"
 
 struct selinux_policy *backup_sepolicy;
+static DEFINE_MUTEX(espinit_rules_lock);
+static bool espinit_rules_applied;
 
 #define SELINUX_POLICY_INSTEAD_SELINUX_SS
 
@@ -77,6 +79,11 @@ void apply_espinit_rules()
 {
     struct selinux_policy *pol, *old_pol;
     struct policydb *db;
+    mutex_lock(&espinit_rules_lock);
+    if (espinit_rules_applied) {
+        mutex_unlock(&espinit_rules_lock);
+        return;
+    }
 
     if (!getenforce()) {
         pr_info("SELinux permissive or disabled, apply rules!\n");
@@ -197,9 +204,12 @@ void apply_espinit_rules()
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
+    espinit_rules_applied = true;
+    pr_info("espinit SELinux rules applied\n");
     reset_avc_cache();
 out_unlock:
     mutex_unlock(&selinux_state.policy_mutex);
+    mutex_unlock(&espinit_rules_lock);
 }
 
 #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)

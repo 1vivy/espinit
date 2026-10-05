@@ -4,6 +4,7 @@ use super::*;
 use std::os::unix::fs::symlink;
 
 const GENERATION: &str = "host-test-1";
+const DYNAMIC_LINKER: &[u8] = b"/system/bin/linker64\0";
 type ElfSection<'a> = (&'a str, Vec<u8>, u32, u64, u32, u64);
 
 fn put16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -16,8 +17,9 @@ fn put64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-fn elf_fixture(kind: u16, sections: Vec<ElfSection<'_>>) -> Vec<u8> {
-    let mut bytes = vec![0u8; if kind == 2 { 120 } else { 64 }];
+fn elf_fixture(kind: u16, dynamic: bool, sections: Vec<ElfSection<'_>>) -> Vec<u8> {
+    let executable_headers = if dynamic { 176 } else { 120 };
+    let mut bytes = vec![0u8; if kind == 2 { executable_headers } else { 64 }];
     bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
     put16(&mut bytes, 16, kind);
     put16(&mut bytes, 18, 183);
@@ -66,10 +68,17 @@ fn elf_fixture(kind: u16, sections: Vec<ElfSection<'_>>) -> Vec<u8> {
         put64(&mut bytes, 24, 0x400078);
         put64(&mut bytes, 32, 64);
         put16(&mut bytes, 54, 56);
-        put16(&mut bytes, 56, 1);
+        put16(&mut bytes, 56, if dynamic { 2 } else { 1 });
         put32(&mut bytes, 64, program_header::PT_LOAD);
         put32(&mut bytes, 68, 5);
         put64(&mut bytes, 80, 0x400000);
+        if dynamic {
+            put32(&mut bytes, 120, program_header::PT_INTERP);
+            put64(&mut bytes, 128, executable_headers as u64);
+            put64(&mut bytes, 152, DYNAMIC_LINKER.len() as u64);
+            put64(&mut bytes, 160, DYNAMIC_LINKER.len() as u64);
+            put64(&mut bytes, 168, 1);
+        }
         let size = bytes.len() as u64;
         put64(&mut bytes, 96, size);
         put64(&mut bytes, 104, size);
@@ -78,20 +87,25 @@ fn elf_fixture(kind: u16, sections: Vec<ElfSection<'_>>) -> Vec<u8> {
     bytes
 }
 
-fn binary_fixture(generation: &str) -> Vec<u8> {
+fn binary_fixture_kind(generation: &str, dynamic: bool) -> Vec<u8> {
     let mut note = vec![0u8; 84];
     put32(&mut note, 0, 8);
     put32(&mut note, 4, 64);
     put32(&mut note, 8, 1);
     note[12..20].copy_from_slice(b"ESPINIT\0");
     note[20..20 + generation.len()].copy_from_slice(generation.as_bytes());
-    elf_fixture(
-        2,
-        vec![
-            (".text", vec![0; 4], 1, 6, 0, 0),
-            (".note.espinit", note, 7, 2, 0, 0),
-        ],
-    )
+    let mut sections = vec![
+        (".text", vec![0; 4], 1, 6, 0, 0),
+        (".note.espinit", note, 7, 2, 0, 0),
+    ];
+    if dynamic {
+        sections.insert(0, (".interp", DYNAMIC_LINKER.to_vec(), 1, 2, 0, 0));
+    }
+    elf_fixture(2, dynamic, sections)
+}
+
+fn binary_fixture(generation: &str) -> Vec<u8> {
+    binary_fixture_kind(generation, false)
 }
 
 fn module_fixture(generation: &str) -> Vec<u8> {
@@ -115,6 +129,7 @@ fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
     put64(&mut symbols, 64, generation.len() as u64 + 1);
     elf_fixture(
         1,
+        false,
         vec![
             (".text", vec![0; 4], 1, 6, 0, 0),
             (
@@ -225,6 +240,7 @@ impl Fixture {
             output.join("vmlinux"),
             elf_fixture(
                 2,
+                false,
                 vec![
                     (".text", vec![0; 4], 1, 6, 0, 0),
                     (".strtab", b"\0known\0".to_vec(), 3, 0, 0, 0),
@@ -662,13 +678,14 @@ fn malformed_boot_and_dynamic_pid1_are_rejected() {
     put32(&mut source, 40, 2);
     assert!(patch_boot(&source, b"", "rom1").is_err());
     let fixture = Fixture::new();
-    let mut binary = binary_fixture(GENERATION);
-    // Replace the sole executable load segment with PT_INTERP: it is not a
-    // usable static PID1 regardless of its retained generation note.
-    put32(&mut binary, 64, program_header::PT_INTERP);
+    let binary = binary_fixture_kind(GENERATION, true);
     fs::write(&fixture.args.espinit, binary).unwrap();
     assert!(patch(&fixture.args).is_err());
     assert!(!fixture.args.out.exists());
+    let fixture = Fixture::new();
+    let path = fixture.args.payload.join("bin/thin-activate");
+    fs::write(path, binary_fixture_kind(GENERATION, true)).unwrap();
+    fixture.reject("statically linked");
 }
 
 #[test]

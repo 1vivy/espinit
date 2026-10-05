@@ -25,7 +25,7 @@ a boot that actually reaches the named stage before it can be read as a timing.
 - The SELinux domain/type are `espinit`/`espinit_file` (`u:r:espinit:s0`, `u:object_r:espinit_file:s0`); `espinitd` keeps `espinit_file` on its own binary. Staged package inodes start as `metadata_file`; tiny-espsu applies the dedicated HAL and bdsvars labels before use. Public module, ioctl/install magic, anonymous-inode, and socket identities are distinct from KernelSU: the anonymous inodes are `[espinit]` and `[espinit_fdwrapper]`, and the info surface reports only the LKM flag. Private `ksu_` implementation prefixes remain internal, not compatibility interfaces.
 - `gpt.ko` is a later, separate ESP module, never another name for the core module.
 
-A real KernelSU installation must not be detected as an espinit module, satisfy an espinit self-check, or share espinit state/control endpoints. Distinct identity is necessary, but simultaneous hook ownership still requires integration testing; coexistence is not promised by this baseline.
+A real KernelSU installation must not be detected as an espinit module, satisfy an espinit self-check, or share espinit state/control endpoints. SELinux policy installation does not depend on retaining syscall-table ownership: PID 1's successful policy load arms a post-exec kretprobe, and rules are published only after the second-stage exec has completed competing pre-exec hooks. The inherited exec hook remains a fallback, and rule publication is idempotent. Other simultaneous hook ownership still requires integration testing; this is not a general coexistence promise.
 
 ### Non-goals
 
@@ -198,7 +198,7 @@ and helper check its ID against `ro.boot.espinit.rom` before the HAL can start.
 | `partitions` | Nonempty ordered array of tables when `managed = true`. |
 | `partitions[].name` | Unique Android-facing projected partition name; ASCII letters/digits plus `_`, `-`, maximum 36 bytes (the `gpt` ABI label size), no path separators. |
 | `partitions[].backend` | Backend in one of four documented forms, resolved only when the payload reaches the `gpt` entry: `/dev/block/by-name/<physical-name>` matched exactly against a unique sysfs `PARTNAME`; `/dev/mapper/<name>` matched exactly against a unique `/sys/class/block/dm-*/dm/name`; an existing `/dev/loopN`; or `esp-file:<relative-path>` for a preallocated regular file on the already-mounted read-only ESP, attached read-only through the standard loop-control/loop ioctls with zero offset and no size limit. A writable `esp-file:` backend is fatal, whole-LU devices are not accepted, and there is no offset, size-slicing, or extent/FIEMAP ABI. |
-| `partitions[].read_only` | Boolean, explicitly selecting read-only (`true`) or writable (`false`) projected access. A physical partition with the same `PARTNAME` is hidden and forced read-only; unrelated physical partitions retain their native visibility and access mode. |
+| `partitions[].read_only` | Boolean, explicitly selecting read-only (`true`) or writable (`false`) projected access. A physical partition with the same `PARTNAME` is hidden but retains its native access mode so it can remain a backing PV; unrelated physical partitions retain their native visibility and access mode. |
 
 A projection spans exactly the entire backend block device; no resizing, implicit slot suffix, or offset arithmetic. Projected names must not collide with another projection. A projected name intentionally shadows every physical partition with that exact `PARTNAME`; the loader leaves all other stock partitions visible for normal platform operation. Backends must be distinct block devices, valid for the running device, and resolved without following the newly projected view. An ESP file backend is named as `esp-file:<relative-path>`, relative to the ESP mount root, and is attached by the loader itself with a fresh loop device, read-only, zero offset and no size limit, while the ESP remains read-only; a writable ESP or a writable ESP-file projection is fatal. The loop and backing-file guards are kept open until the projection has been applied, are `O_CLOEXEC`, and the loop is autoclear, so the attachment survives the APPLY close but is not inherited into Android.
 
@@ -283,15 +283,23 @@ survives the reset.
 
 The key is read exactly once, from `/proc/bootconfig`, right after `/proc` is mounted
 and before `/sys` or `/dev` are mounted or any module or ESP work starts; there is no
-kernel-command-line or OEM/vendor spelling. Twelve fixed stage names are accepted, in
-boot order: `proc-mounted`, `sys-mounted`, `dev-mounted`, `minimal-mounted`,
-`apss-loaded`, `esp-retained`, `vendor-loaded`, `esp-ready`, `manifest-read`,
-`generation-matched`, `payload-loaded`, `platform-staged`. Each names the corresponding
-boundary of `init::run`, and a checkpoint triggers only on an exact match. An absent or
-empty value leaves the probe off and the boot unchanged; a nonempty value that is not one
-of the twelve, or a duplicated key, is a bounded `InvalidProbeStage` failure, never a
-silent skip. Three names need a precise reading:
+kernel-command-line or OEM/vendor spelling. Fourteen fixed stage names are
+accepted. `handoff` and `handoff-delayed` have the special behavior below; the
+remaining twelve are, in boot order: `proc-mounted`, `sys-mounted`, `dev-mounted`,
+`minimal-mounted`, `apss-loaded`, `esp-retained`, `vendor-loaded`, `esp-ready`,
+`manifest-read`, `generation-matched`, `payload-loaded`, `platform-staged`.
+Each names the corresponding boundary of `init::run`, and a checkpoint triggers
+only on an exact match. An absent or empty value leaves the probe off and the
+boot unchanged; any other nonempty value, or a duplicated key, is a bounded
+`InvalidProbeStage` failure, never a silent skip. Four names need a precise
+reading:
 
+- `handoff` skips managed payload work after the minimal mounts and executes the
+  saved init, proving takeover mechanics only. `handoff-delayed` instead
+  completes module load, projection and platform staging, opens the sysrq crash
+  trigger, hands off to the saved init, and crashes two seconds later. Combined
+  with APSS minidump, it captures Android first-stage logs that would otherwise
+  be lost to a clean fatal reboot.
 - `proc-mounted` is the earliest runtime-selected checkpoint possible. `/proc` is mounted
   before the probe can be read at all, so reaching this checkpoint proves that `/espinit`
   really executed *and* that procfs mounted. It is followed by `sys-mounted` after sysfs,
@@ -312,15 +320,16 @@ silent skip. Three names need a precise reading:
   checkpoint; that boot keeps its load-then-wait path and can only be observed at
   `vendor-loaded` or `esp-ready`.
 
-A triggered checkpoint is terminal and does not continue boot: espinit writes
-decimal `30` to `/proc/sys/kernel/panic`, then requests the same sysrq crash as the
-fatal-panic path (`c` to `/proc/sysrq-trigger`). The profile's own `panic=5` is
-untouched, so a boot that fails naturally *before* the named checkpoint still waits
-5 seconds — a longer, ~30-second wait means the checkpoint was reached. A checkpoint
-writes no failure receipt: it is not a failure, it is a measurement. If the panic-delay
-write or the crash request fails or returns without panicking, espinit enters the
-unchanged fatal-boot stop path (sync, reboot, PID-1 park) rather than continuing to
-later boot steps, so a matched checkpoint can never be mistaken for a successful boot.
+A triggered pre-handoff checkpoint is terminal and does not continue boot:
+espinit writes decimal `30` to `/proc/sys/kernel/panic`, then requests the same
+sysrq crash as the fatal-panic path (`c` to `/proc/sysrq-trigger`). The profile's
+own `panic=5` is untouched, so a boot that fails naturally *before* the named
+checkpoint still waits 5 seconds — a longer, ~30-second wait means the checkpoint
+was reached. A checkpoint writes no failure receipt: it is not a failure, it is
+a measurement. If the panic-delay write or the crash request fails or returns
+without panicking, espinit enters the unchanged fatal-boot stop path (sync,
+reboot, PID-1 park) rather than continuing to later boot steps, so a matched
+checkpoint can never be mistaken for a successful boot.
 
 ### APSS minidump transport (opt-in)
 
@@ -354,9 +363,14 @@ before the ESP is mounted, its failure receipt can only be written when the ESP
 was already available, so the durable evidence for this path is the crash capture
 itself, matching where the failure occurs.
 
+The Android-side `espinitd` fatal path writes its complete error chain directly
+to `/dev/kmsg`. When the standard `ro.boot.init_fatal_panic=true` projection of
+the same diagnostic bootconfig opt-in is present, it then requests the same
+sysrq crash before init's `reboot_on_failure` can discard that evidence.
+
 ## `gpt.ko` limits
 
-`gpt.ko` presents an **in-memory virtual partition view**. Projected names map to selected whole block-device backends, including the standard loop devices the loader attaches for `esp-file:` backends immediately before APPLY; `gpt.ko` itself does not accept regular files or a custom extent/FIEMAP interface. The loader adds only physical partitions whose exact `PARTNAME` collides with a projected name to `hide[]` and requires an exact QUERY match after APPLY. At the normal Android partition surface (partition discovery, device nodes, and by-name aliases), those shadowed physical names are cleared and their endpoints are marked read-only. Unrelated stock physical partitions remain visible with their native access mode. The ESP remains a physical exception solely to preserve the bounded failure-receipt remount; platform permissions must protect it. Projected endpoints use the configuration's explicit read-only or writable policy.
+`gpt.ko` presents an **in-memory virtual partition view**. Projected names map to selected whole block-device backends, including the standard loop devices the loader attaches for `esp-file:` backends immediately before APPLY; `gpt.ko` itself does not accept regular files or a custom extent/FIEMAP interface. The loader adds only physical partitions whose exact `PARTNAME` collides with a projected name to `hide[]` and requires an exact QUERY match after APPLY. At the normal Android partition surface (partition discovery, device nodes, and by-name aliases), those shadowed physical names are cleared. Their native access mode is retained because a DM/LVM projection can resolve through the same physical bdev; setting `BD_READ_ONLY` there also rejects projected writes. Unrelated stock physical partitions remain visible with their native access mode. The ESP remains a physical exception solely so failure receipts survive.
 
 The module never writes disk GPT headers, entries, CRCs, or partition metadata and never changes physical partition boundaries. Writes through a writable projected partition are ordinary writes to its backend contents, not GPT updates. There is **no raw-LU bio firewall**: direct access to a whole UFS logical unit or equivalent raw block device is not filtered by this module. A sufficiently privileged process can bypass the normal partition surface. This is a boot-time naming/projection facility, not a data-loss prevention or hostile-root isolation boundary.
 
@@ -437,18 +451,22 @@ target installed:
 export ESPINIT_GENERATION=release-1
 export ESPINIT_NDK=/path/to/android-ndk-r29
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ESPINIT_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo +nightly-2026-08-08 build --locked --release \
+  --target aarch64-linux-android -p thin-activate --bin thin-activate
 cargo +nightly-2026-08-08 build --locked --release --target aarch64-linux-android \
-  -p thin-activate -p espinitd -p espinit-platform \
-  --bin thin-activate --bin espinitd --bin tiny-espsu
+  -p espinitd -p espinit-platform --bin espinitd --bin tiny-espsu
 bash payloads/boot-hal/build-android.sh
 ```
 
-Copy `thin-activate` to `bin/thin-activate`, `espinitd` to `bin/espinitd`,
-and both platform outputs to the source paths declared by
+Copy the static, interpreter-free `thin-activate` to `bin/thin-activate`,
+`espinitd` to `bin/espinitd`, and both platform outputs to the source paths
+declared by
 [`espinit/modules/boot-hal/module.toml`](espinit/modules/boot-hal/module.toml) and
 [`espinit/modules/tiny-espsu/module.toml`](espinit/modules/tiny-espsu/module.toml);
 stamp both package manifests with that exact generation. Ship the checked-in
-thin early script, RC, install script and policy mirror alongside them.
+thin early script, RC, install script and policy mirror alongside them. The
+host packager rejects a dynamically linked early activator.
 `tools/cuttlefish/assemble.py` performs this layout/stamping
 from explicit binary inputs and validates their notes. Its ROM placeholder
 must still be replaced with real projected backends; it never invents metadata,

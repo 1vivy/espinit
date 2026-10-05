@@ -135,6 +135,9 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     checkpoint(probe, ProbeStage::PayloadLoaded);
     crate::platform::stage(&payload_root, &manifest, &rom)?;
     checkpoint(probe, ProbeStage::PlatformStaged);
+    if probe == Some(ProbeStage::HandoffDelayed) {
+        arm_delayed_handoff_probe(&payload_root)?;
+    }
 
     log::info!(
         "Early managed boot checks passed; handing off to {}",
@@ -644,13 +647,15 @@ const PROBE_PANIC_DELAY: &[u8] = b"30";
 /// A probe is opted in by the exact `androidboot.espinit.probe=<stage>` pair,
 /// read from bootconfig only. One exact stage name selects one behavior; an
 /// absent or empty value disables probes, and malformed or duplicated values
-/// fail closed. `handoff` is the one non-crashing probe: after the complete
-/// minimal mount setup it skips managed payload work and executes the saved
-/// init, allowing an emulator to prove the PID-1 takeover/handoff contract.
-/// Every other name crashes at its named checkpoint.
+/// fail closed. `handoff` is a non-crashing probe that skips managed work and
+/// executes the saved init. `handoff-delayed` completes managed work, arms a
+/// bounded child that crashes two seconds after handoff, then executes the
+/// saved init so APSS minidump can capture Android first-stage evidence. Every
+/// other name crashes at its named pre-handoff checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProbeStage {
     Handoff,
+    HandoffDelayed,
     ProcMounted,
     SysMounted,
     DevMounted,
@@ -678,6 +683,7 @@ impl ProbeStage {
         match value {
             None | Some("") => Ok(None),
             Some("handoff") => Ok(Some(Self::Handoff)),
+            Some("handoff-delayed") => Ok(Some(Self::HandoffDelayed)),
             Some("proc-mounted") => Ok(Some(Self::ProcMounted)),
             Some("sys-mounted") => Ok(Some(Self::SysMounted)),
             Some("dev-mounted") => Ok(Some(Self::DevMounted)),
@@ -701,6 +707,43 @@ impl ProbeStage {
             "espinit probe requires one exact supported checkpoint",
         )
     }
+}
+
+fn arm_delayed_handoff_probe(payload_root: &Path) -> Result<(), Failure> {
+    let busybox = payload_root.join("bin/busybox");
+    let mut child = std::process::Command::new(&busybox)
+        .arg("sh")
+        .arg("-c")
+        .arg("exec 3>/proc/sysrq-trigger; ./bin/busybox sleep 2; printf c >&3")
+        .env_clear()
+        .current_dir(payload_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            Failure::new(
+                Stage::Handoff,
+                "HandoffProbeSpawn",
+                format!("cannot arm delayed post-handoff crash: {error}"),
+            )
+        })?;
+    std::thread::sleep(Duration::from_millis(100));
+    if let Some(status) = child.try_wait().map_err(|error| {
+        Failure::new(
+            Stage::Handoff,
+            "HandoffProbeWait",
+            format!("cannot inspect delayed post-handoff crash helper: {error}"),
+        )
+    })? {
+        return Err(Failure::new(
+            Stage::Handoff,
+            "HandoffProbeExited",
+            format!("delayed post-handoff crash helper exited early: {status}"),
+        ));
+    }
+    log::warn!("Armed lab post-handoff crash in two seconds");
+    Ok(())
 }
 
 /// Retain the ESP that was already available before vendor-module preload.
@@ -1223,6 +1266,7 @@ mod tests {
     fn the_probe_accepts_every_exact_checkpoint() {
         for (value, expected) in [
             ("handoff", ProbeStage::Handoff),
+            ("handoff-delayed", ProbeStage::HandoffDelayed),
             ("proc-mounted", ProbeStage::ProcMounted),
             ("sys-mounted", ProbeStage::SysMounted),
             ("dev-mounted", ProbeStage::DevMounted),
