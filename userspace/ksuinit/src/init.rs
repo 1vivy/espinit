@@ -6,11 +6,14 @@
 //! loading, ESP discovery and read-only mount, strict manifest
 //! and ROM validation, generation matching, ordered payload module loading with
 //! self-checks, the single projection boundary immediately before the `gpt`
-//! entry, and finally the real-init handoff. Any failure stops the handoff,
-//! persists a receipt, and enters the fatal-boot stop path: a reboot by
+//! entry, and finally the real-init handoff. Any managed-boot failure stops the
+//! handoff, persists a receipt, and enters the fatal-boot stop path: a reboot by
 //! default, or the AOSP sysrq crash when the exact
-//! `androidboot.init_fatal_panic=true` opt-in is active. There is no soft
-//! fallback and no stock-ROM fallback.
+//! `androidboot.init_fatal_panic=true` opt-in is active. The only fallback is the
+//! explicit recovery rescue contract: both `androidboot.mode=recovery` and
+//! `androidboot.espinit.recovery_passthrough=true` must occur exactly once in
+//! bootconfig, in which case espinit tears down its minimal mounts and hands off
+//! before touching the ESP, vendor modules, projection, or platform payload.
 //!
 //! The lab-only `androidboot.espinit.probe=<stage>` opt-in marks one boundary of
 //! this order. Because bootconfig is only reachable through procfs, the minimal
@@ -49,6 +52,11 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     setup_kmsg();
     log::info!("espinit early managed boot starting");
     let (mounts, bootconfig, probe) = mount_minimal()?;
+    if recovery_passthrough_requested(&bootconfig) {
+        log::warn!("explicit recovery passthrough requested; skipping all managed payload work");
+        return prepare_handoff(state, &mounts);
+    }
+
     // Opt-in Qualcomm APSS minidump transport: load its vendor module closure
     // before the ESP is mounted, because a boot that dies this early can only
     // leave evidence through a sink the firmware already owns. Normal boots
@@ -600,6 +608,12 @@ fn unlimit_kmsg() {
     }
 }
 
+/// Recovery-only escape hatch. Neither key alone is sufficient.
+const RECOVERY_MODE_KEY: &str = "androidboot.mode";
+const RECOVERY_MODE_VALUE: &str = "recovery";
+const RECOVERY_PASSTHROUGH_KEY: &str = "androidboot.espinit.recovery_passthrough";
+const RECOVERY_PASSTHROUGH_VALUE: &str = "true";
+
 /// Exact AOSP opt-in that turns a fatal espinit failure into a real kernel
 /// crash instead of the default reboot.
 const FATAL_PANIC_KEY: &str = "androidboot.init_fatal_panic";
@@ -832,6 +846,28 @@ fn fatal_panic_requested(bootconfig: &str, cmdline: &str) -> bool {
         == Some(FATAL_PANIC_VALUE)
 }
 
+/// Whether the explicit recovery rescue contract is active.
+///
+/// Bootconfig is authoritative and each exact key must occur exactly once.
+/// Normal boots, command-line-only requests, duplicated keys, malformed quotes,
+/// and every non-lowercase value retain the managed path.
+fn recovery_passthrough_requested(bootconfig: &str) -> bool {
+    bootconfig_has_exactly(bootconfig, RECOVERY_MODE_KEY, RECOVERY_MODE_VALUE)
+        && bootconfig_has_exactly(
+            bootconfig,
+            RECOVERY_PASSTHROUGH_KEY,
+            RECOVERY_PASSTHROUGH_VALUE,
+        )
+}
+
+fn bootconfig_has_exactly(bootconfig: &str, key: &str, expected: &str) -> bool {
+    let mut values = bootconfig.lines().filter_map(|line| {
+        let (name, value) = line.split_once('=').unwrap_or((line, ""));
+        (name.trim() == key).then(|| unquote(value.trim()))
+    });
+    values.next() == Some(expected) && values.next().is_none()
+}
+
 /// Lab-only Qualcomm transport opt-in.
 ///
 /// `androidboot.espinit.apss_minidump=true` is read exactly as the fatal-panic
@@ -885,6 +921,39 @@ pub fn stop_boot() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_passthrough_requires_two_unique_exact_bootconfig_keys() {
+        let enabled = format!(
+            "{RECOVERY_MODE_KEY}=\"{RECOVERY_MODE_VALUE}\"\n\
+             {RECOVERY_PASSTHROUGH_KEY}={RECOVERY_PASSTHROUGH_VALUE}\n"
+        );
+        assert!(recovery_passthrough_requested(&enabled));
+
+        for disabled in [
+            format!("{RECOVERY_MODE_KEY}=recovery\n"),
+            format!("{RECOVERY_PASSTHROUGH_KEY}=true\n"),
+            format!("{RECOVERY_MODE_KEY}=normal\n{RECOVERY_PASSTHROUGH_KEY}=true\n"),
+            format!("{RECOVERY_MODE_KEY}=recovery\n{RECOVERY_PASSTHROUGH_KEY}=TRUE\n"),
+            format!(
+                "{RECOVERY_MODE_KEY}=recovery\n{RECOVERY_PASSTHROUGH_KEY}=true\n\
+                 {RECOVERY_PASSTHROUGH_KEY}=true\n"
+            ),
+            format!(
+                "{RECOVERY_MODE_KEY}=recovery\n{RECOVERY_MODE_KEY}=recovery\n\
+                 {RECOVERY_PASSTHROUGH_KEY}=true\n"
+            ),
+            format!(
+                "vendor.{RECOVERY_MODE_KEY}=recovery\n\
+                 {RECOVERY_PASSTHROUGH_KEY}=true\n"
+            ),
+        ] {
+            assert!(!recovery_passthrough_requested(&disabled));
+        }
+        assert!(!recovery_passthrough_requested(&format!(
+            "{RECOVERY_MODE_KEY}=recovery\n"
+        ),));
+    }
 
     #[test]
     fn apss_opt_in_is_exact_and_bootconfig_is_authoritative() {
