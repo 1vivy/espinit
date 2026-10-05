@@ -287,7 +287,7 @@ def expected_vermagic(config: Mapping[str, str], output: Path, machine: int) -> 
     if machine == 183:
         parts.append("aarch64")
     require(config.get("CONFIG_RANDSTRUCT") != "y", "vermagic: RANDSTRUCT target needs an exact reference vermagic implementation")
-    return " ".join(parts) + " "
+    return " ".join(parts)
 
 
 def verify_module(path: PathInput, name: str, config: Mapping[str, str], output: Path, kernel_symbols: set[str] | None = None) -> ModuleReport:

@@ -22,7 +22,7 @@ CONFIG_SMP=y
 CONFIG_PREEMPT_BUILD=y
 CONFIG_MODULE_UNLOAD=y
 """
-VERMAGIC = "6.12-phone SMP preempt mod_unload modversions aarch64 "
+VERMAGIC = "6.12-phone SMP preempt mod_unload modversions aarch64"
 
 
 def elf_file(sections: Mapping[str, bytes], symbols: Iterable[tuple[str, int]], kind: int = 1) -> bytes:
