@@ -148,6 +148,26 @@ fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
     )
 }
 
+fn decode_legacy_lz4(encoded: &[u8]) -> Vec<u8> {
+    assert!(encoded.starts_with(&LZ4_LEGACY_MAGIC));
+    let mut decoded = Vec::new();
+    let mut offset = LZ4_LEGACY_MAGIC.len();
+    while offset < encoded.len() {
+        let size = u32::from_le_bytes(encoded[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let mut block = vec![0u8; LZ4_BLOCK_SIZE];
+        let written = lz4::block::decompress_to_buffer(
+            &encoded[offset..offset + size],
+            Some(LZ4_BLOCK_SIZE as i32),
+            &mut block,
+        )
+        .unwrap();
+        decoded.extend_from_slice(&block[..written]);
+        offset += size;
+    }
+    decoded
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     args: BootPatchArgs,
@@ -239,12 +259,23 @@ impl Fixture {
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
+        let mut stock = Cpio::new();
+        stock
+            .add(
+                "init",
+                CpioEntry::regular(0o755, Box::new(binary_fixture("stock-init"))),
+            )
+            .unwrap();
+        let mut ramdisk = Vec::new();
+        stock.dump(&mut ramdisk).unwrap();
+        let boot = root.path().join("init_boot.img");
+        fs::write(&boot, stock_boot(4, &ramdisk)).unwrap();
         let args = BootPatchArgs {
             espinit: pid1,
             payload,
             rom: "rom1".to_owned(),
             out: root.path().join("result"),
-            boot: None,
+            boot,
         };
         Self { root, args }
     }
@@ -341,21 +372,26 @@ fn stock_boot(version: u32, ramdisk: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn canonical_archive_has_only_executable_root_espinit_and_zero_metadata() {
+fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
     let binary = binary_fixture(GENERATION);
-    let archive = canonical_cpio(binary.clone()).unwrap();
-    assert_eq!(archive, canonical_cpio(binary.clone()).unwrap());
-    assert_eq!(archive.len() % 512, 0);
-    validate_cpio(&archive).unwrap();
-    let cpio = Cpio::load_from_data(&archive).unwrap();
-    assert_eq!(cpio.entries().len(), 1);
+    let real_init = binary_fixture("stock-init");
+    let overlay = takeover_cpio(binary.clone(), real_init.clone()).unwrap();
+    assert_eq!(legacy_lz4(&overlay).unwrap(), legacy_lz4(&overlay).unwrap());
+    assert_eq!(overlay.len() % 512, 0);
+    validate_cpio(&overlay).unwrap();
+    let cpio = Cpio::load_from_data(&overlay).unwrap();
+    assert_eq!(cpio.entries().len(), 2);
+    assert_eq!(cpio.entry_by_name("init").unwrap().data().unwrap(), binary);
     assert_eq!(
-        cpio.entry_by_name("espinit").unwrap().data().unwrap(),
-        binary
+        cpio.entry_by_name("init.espinit").unwrap().data().unwrap(),
+        real_init
     );
+    let archive = legacy_lz4(&overlay).unwrap();
+    assert!(archive.starts_with(&LZ4_LEGACY_MAGIC));
+    assert_eq!(decode_legacy_lz4(&archive), overlay);
     let field = |index: usize| {
         u32::from_str_radix(
-            std::str::from_utf8(&archive[6 + index * 8..14 + index * 8]).unwrap(),
+            std::str::from_utf8(&overlay[6 + index * 8..14 + index * 8]).unwrap(),
             16,
         )
         .unwrap()
@@ -376,7 +412,7 @@ fn cpio_traversal_truncation_and_bad_crc_fail() {
         cpio.dump(&mut bytes).unwrap();
         assert!(validate_cpio(&bytes).is_err());
     }
-    let archive = canonical_cpio(vec![1, 2, 3]).unwrap();
+    let archive = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6]).unwrap();
     for size in [1, 100, 110, 115, 119] {
         assert!(validate_cpio(&archive[..size]).is_err());
     }
@@ -386,7 +422,7 @@ fn cpio_traversal_truncation_and_bad_crc_fail() {
 }
 
 #[test]
-fn cpio_only_transaction_is_complete_deterministic_and_nonmutating() {
+fn host_transaction_is_complete_deterministic_and_nonmutating() {
     let mut fixture = Fixture::new();
     let original = fs::read(fixture.args.payload.join("modules/espinit.ko")).unwrap();
     patch(&fixture.args).unwrap();
@@ -394,11 +430,14 @@ fn cpio_only_transaction_is_complete_deterministic_and_nonmutating() {
     let receipt: serde_json::Value = serde_json::from_slice(&first_receipt).unwrap();
     assert_eq!(receipt["archive_path"], "rom/rom1/espinit.cpio");
     assert_eq!(receipt["generation"], GENERATION);
+    assert_eq!(receipt["boot_contract"], "androidboot.espinit.rom=rom1");
+    assert_eq!(receipt["boot_image"], "unsigned-conventional-test-only");
     assert_eq!(receipt["module_verification"]["status"], "accepted");
     assert_eq!(
         fs::read(fixture.args.out.join("espinit.cpio")).unwrap(),
         fs::read(fixture.args.out.join("esp/rom/rom1/espinit.cpio")).unwrap()
     );
+    assert!(fixture.args.out.join("patched.img").is_file());
     assert!(fixture.args.out.join("esp/espinit/receipts").is_dir());
     assert!(
         fixture
@@ -407,7 +446,6 @@ fn cpio_only_transaction_is_complete_deterministic_and_nonmutating() {
             .join("esp/espinit/roms/rom1.toml")
             .is_file()
     );
-    assert!(!fixture.args.out.join("patched.img").exists());
     for (path, info) in receipt["artifacts"].as_object().unwrap() {
         assert_eq!(
             digest(&fs::read(fixture.args.out.join(path)).unwrap()),
@@ -428,13 +466,14 @@ fn cpio_only_transaction_is_complete_deterministic_and_nonmutating() {
 }
 
 #[test]
-fn optional_boot_path_preserves_source_kernel_and_init_with_minimal_contract() {
+fn required_boot_path_preserves_source_kernel_and_saved_init() {
     let mut fixture = Fixture::new();
     let mut stock = Cpio::new();
+    let saved_init = binary_fixture("saved-stock-init");
     stock
         .add(
             "init",
-            CpioEntry::regular(0o755, Box::new(b"stock init".to_vec())),
+            CpioEntry::regular(0o755, Box::new(saved_init.clone())),
         )
         .unwrap();
     stock
@@ -448,7 +487,7 @@ fn optional_boot_path_preserves_source_kernel_and_init_with_minimal_contract() {
     let source = stock_boot(4, &ramdisk);
     let boot_path = fixture.root.path().join("init_boot.img");
     fs::write(&boot_path, &source).unwrap();
-    fixture.args.boot = Some(boot_path.clone());
+    fixture.args.boot = boot_path.clone();
     patch(&fixture.args).unwrap();
     assert_eq!(fs::read(boot_path).unwrap(), source);
     let image = fs::read(fixture.args.out.join("patched.img")).unwrap();
@@ -461,10 +500,7 @@ fn optional_boot_path_preserves_source_kernel_and_init_with_minimal_contract() {
     let cmdline =
         std::str::from_utf8(&cmdline[..cmdline.iter().position(|byte| *byte == 0).unwrap()])
             .unwrap();
-    assert_eq!(
-        cmdline,
-        "console=ttyS0 quiet rdinit=/espinit androidboot.espinit.rom=rom1"
-    );
+    assert_eq!(cmdline, "console=ttyS0 quiet androidboot.espinit.rom=rom1");
     let mut rebuilt = Vec::new();
     parsed
         .get_blocks()
@@ -476,19 +512,18 @@ fn optional_boot_path_preserves_source_kernel_and_init_with_minimal_contract() {
     let cpio = Cpio::load_from_data(&rebuilt).unwrap();
     assert_eq!(
         cpio.entry_by_name("init").unwrap().data().unwrap(),
-        b"stock init"
-    );
-    assert_eq!(
-        cpio.entry_by_name("espinit").unwrap().data().unwrap(),
         fs::read(&fixture.args.espinit).unwrap()
     );
-    assert!(!cpio.exists("init.real"));
+    assert_eq!(
+        cpio.entry_by_name("init.espinit").unwrap().data().unwrap(),
+        saved_init
+    );
     assert!(!cpio.exists("kernelsu.ko"));
     assert_eq!(
         patch_boot(
             &source,
-            &fs::read(fixture.args.out.join("espinit.cpio")).unwrap(),
-            "rom1"
+            &decode_legacy_lz4(&fs::read(fixture.args.out.join("espinit.cpio")).unwrap()),
+            "rom1",
         )
         .unwrap(),
         image
@@ -506,7 +541,8 @@ fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted()
             source.extend(vec![0x55; 4096]);
         }
         source.extend(b"untrusted AVB tail");
-        let patched = patch_boot(&source, &canonical_cpio(vec![1, 2, 3]).unwrap(), "rom1").unwrap();
+        let overlay = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6]).unwrap();
+        let patched = patch_boot(&source, &overlay, "rom1").unwrap();
         let image = BootImage::parse(&patched).unwrap();
         assert!(image.get_blocks().get_kernel().is_none());
         if version == 4 {
@@ -519,7 +555,9 @@ fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted()
             .unwrap()
             .dump(&mut archive, false)
             .unwrap();
-        assert!(Cpio::load_from_data(&archive).unwrap().exists("espinit"));
+        let cpio = Cpio::load_from_data(&archive).unwrap();
+        assert!(cpio.exists("init"));
+        assert!(cpio.exists("init.espinit"));
     }
 }
 
@@ -697,7 +735,7 @@ fn commandline_preserves_quoted_arguments_and_has_one_explicit_contract() {
     let command = br#"console=ttyS0 label="one  two" "rdinit=/old" androidboot.espinit.rom=old rdinit=/another"#;
     assert_eq!(
         boot_cmdline(command, "rom1").unwrap(),
-        "console=ttyS0 label=\"one  two\" rdinit=/espinit androidboot.espinit.rom=rom1"
+        "console=ttyS0 label=\"one  two\" androidboot.espinit.rom=rom1"
     );
     assert!(boot_cmdline(b"label=\"unterminated", "rom1").is_err());
     assert!(boot_cmdline(&[b'x'; 1536], "rom1").is_err());

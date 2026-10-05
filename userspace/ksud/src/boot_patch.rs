@@ -23,6 +23,9 @@ const VERIFIER: &[u8] = include_bytes!("../../../scripts/phone_modules.py");
 const MAX_BINARY: u64 = 64 * 1024 * 1024;
 const MAX_BOOT: u64 = 512 * 1024 * 1024;
 
+const LZ4_LEGACY_MAGIC: [u8; 4] = 0x184C_2102u32.to_le_bytes();
+const LZ4_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+
 #[derive(clap::Args, Debug)]
 pub struct BootPatchArgs {
     /// Static ELF PID-1 binary, built for the payload generation (never executed)
@@ -37,9 +40,9 @@ pub struct BootPatchArgs {
     /// New output directory; must not exist, and its parent must already exist
     #[arg(long)]
     pub out: PathBuf,
-    /// Optional regular boot/init_boot v3/v4 image; writes unsigned patched.img
+    /// Stock boot/init_boot v3/v4 image whose effective /init is preserved
     #[arg(long)]
-    pub boot: Option<PathBuf>,
+    pub boot: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -596,15 +599,54 @@ fn verify_modules(
     Ok(report)
 }
 
-fn canonical_cpio(binary: Vec<u8>) -> Result<Vec<u8>> {
+fn takeover_cpio(binary: Vec<u8>, real_init: Vec<u8>) -> Result<Vec<u8>> {
     let mut cpio = Cpio::new();
-    cpio.add("espinit", CpioEntry::regular(0o755, Box::new(binary)))?;
+    cpio.add("init", CpioEntry::regular(0o755, Box::new(binary)))?;
+    cpio.add(
+        "init.espinit",
+        CpioEntry::regular(0o755, Box::new(real_init)),
+    )?;
     let mut bytes = Vec::new();
     cpio.dump(&mut bytes)?;
-    // Linux accepts unpadded archives; canonical output also follows the usual
-    // 512-byte cpio block convention. All metadata is synthesized deterministically.
     bytes.resize(bytes.len().next_multiple_of(512), 0);
     Ok(bytes)
+}
+
+fn legacy_lz4(data: &[u8]) -> Result<Vec<u8>> {
+    let mut encoded = Vec::with_capacity(data.len());
+    encoded.extend_from_slice(&LZ4_LEGACY_MAGIC);
+    for chunk in data.chunks(LZ4_BLOCK_SIZE) {
+        let block = lz4::block::compress(
+            chunk,
+            Some(lz4::block::CompressionMode::HIGHCOMPRESSION(12)),
+            false,
+        )?;
+        encoded.extend_from_slice(&u32::try_from(block.len())?.to_le_bytes());
+        encoded.extend_from_slice(&block);
+    }
+    Ok(encoded)
+}
+
+fn stock_init(source: &[u8], machine: u16) -> Result<Vec<u8>> {
+    let boot = BootImage::parse(source).context("parse stock boot image")?;
+    let mut ramdisk = Vec::new();
+    boot.get_blocks()
+        .get_ramdisk()
+        .context("stock boot image has no ramdisk")?
+        .dump(&mut ramdisk, false)?;
+    validate_cpio(&ramdisk)?;
+    let cpio = Cpio::load_from_data(&ramdisk)?;
+    ensure!(
+        !cpio.exists("init.espinit"),
+        "stock ramdisk already contains reserved init.espinit"
+    );
+    let init = cpio
+        .entry_by_name("init")
+        .and_then(CpioEntry::data)
+        .context("stock ramdisk /init is absent or empty")?
+        .to_vec();
+    let _ = executable(&init, Some(machine), false).context("stock ramdisk /init")?;
+    Ok(init)
 }
 
 /// Validate framing before preserving stock archives verbatim. Re-serializing
@@ -682,7 +724,7 @@ fn boot_cmdline(original: &[u8], rom: &str) -> Result<String> {
         .position(|byte| *byte == 0)
         .unwrap_or(original.len());
     let original = std::str::from_utf8(&original[..end])?;
-    let mut result = String::with_capacity(original.len() + rom.len() + 40);
+    let mut result = String::with_capacity(original.len() + rom.len() + 32);
     let mut quoted = false;
     let mut start = None;
     for (offset, ch) in original
@@ -711,7 +753,7 @@ fn boot_cmdline(original: &[u8], rom: &str) -> Result<String> {
     if !result.is_empty() {
         result.push(' ');
     }
-    result.push_str("rdinit=/espinit androidboot.espinit.rom=");
+    result.push_str("androidboot.espinit.rom=");
     result.push_str(rom);
     ensure!(
         result.len() < 1536,
@@ -720,7 +762,7 @@ fn boot_cmdline(original: &[u8], rom: &str) -> Result<String> {
     Ok(result)
 }
 
-fn patch_boot(source: &[u8], archive: &[u8], rom: &str) -> Result<Vec<u8>> {
+fn patch_boot(source: &[u8], overlay: &[u8], rom: &str) -> Result<Vec<u8>> {
     // Guard the upstream parser's fixed header slicing and avoid carrying invalid
     // signatures into a test image. Only Android boot/init_boot v3/v4 is supported.
     ensure!(
@@ -758,7 +800,7 @@ fn patch_boot(source: &[u8], archive: &[u8], rom: &str) -> Result<Vec<u8>> {
     }
     validate_cpio(&ramdisk)?;
     ramdisk.resize(ramdisk.len().next_multiple_of(4), 0);
-    ramdisk.extend_from_slice(archive);
+    ramdisk.extend_from_slice(overlay);
     let mut patcher = BootImagePatchOption::new(&boot);
     patcher.override_cmdline(cmdline.as_bytes());
     // Preserve the original compression using the historical patcher, including
@@ -878,7 +920,18 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         .map(|(path, item)| (format!("esp/espinit/{path}"), item))
         .collect();
     artifacts.insert("esp/espinit/bin/espinit".to_owned(), binary_artifact);
-    let archive = canonical_cpio(binary)?;
+    let source = read_bounded(input_file(&args.boot)?, MAX_BOOT)?;
+    sources.insert(
+        "boot".to_owned(),
+        Artifact {
+            sha256: digest(&source),
+            size: source.len() as u64,
+            mode: 0o644,
+        },
+    );
+    let real_init = stock_init(&source, machine)?;
+    let overlay = takeover_cpio(binary, real_init)?;
+    let archive = legacy_lz4(&overlay)?;
     artifacts.insert(
         "espinit.cpio".to_owned(),
         write_file(&staged.join("espinit.cpio"), &archive, 0o644)?,
@@ -896,22 +949,11 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         format!("esp/{archive_path}"),
         write_file(&staged.join("esp").join(&archive_path), &archive, 0o644)?,
     );
-    if let Some(path) = &args.boot {
-        let source = read_bounded(input_file(path)?, MAX_BOOT)?;
-        sources.insert(
-            "boot".to_owned(),
-            Artifact {
-                sha256: digest(&source),
-                size: source.len() as u64,
-                mode: 0o644,
-            },
-        );
-        let patched = patch_boot(&source, &archive, &args.rom)?;
-        artifacts.insert(
-            "patched.img".to_owned(),
-            write_file(&staged.join("patched.img"), &patched, 0o644)?,
-        );
-    }
+    let patched = patch_boot(&source, &overlay, &args.rom)?;
+    artifacts.insert(
+        "patched.img".to_owned(),
+        write_file(&staged.join("patched.img"), &patched, 0o644)?,
+    );
     let mut directories = Vec::new();
     sync_tree(&staged, "", &mut directories)?;
     let receipt = Receipt {
@@ -923,12 +965,8 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         rom: args.rom.clone(),
         generation: manifest.generation,
         archive_path,
-        boot_contract: format!("rdinit=/espinit androidboot.espinit.rom={}", args.rom),
-        boot_image: if args.boot.is_some() {
-            "unsigned-conventional-test-only"
-        } else {
-            "not-requested"
-        },
+        boot_contract: format!("androidboot.espinit.rom={}", args.rom),
+        boot_image: "unsigned-conventional-test-only",
         sources,
         artifacts,
         directories,
