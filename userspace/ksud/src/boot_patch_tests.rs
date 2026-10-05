@@ -119,7 +119,7 @@ fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
             (".text", vec![0; 4], 1, 6, 0, 0),
             (
                 ".modinfo",
-                format!("name={name}\0vermagic=6.12-test modversions aarch64 \0").into_bytes(),
+                format!("name={name}\0vermagic=6.12-test modversions aarch64\0").into_bytes(),
                 1,
                 2,
                 0,
