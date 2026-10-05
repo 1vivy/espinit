@@ -29,6 +29,7 @@ espinit-objs += runtime/boot_event.o
 espinit-objs += runtime/ksud_integration.o
 
 espinit-objs += selinux/selinux.o
+espinit-objs += selinux/policy_transaction.o
 espinit-objs += selinux/rules.o
 espinit-objs += selinux/sepolicy.o
 

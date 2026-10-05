@@ -29,7 +29,7 @@ bool is_zygote(const struct cred *cred);
 
 bool is_init(const struct cred *cred);
 
-void apply_espinit_rules();
+int apply_espinit_rules(void);
 
 int handle_sepolicy(void __user *user_data, u64 data_len);
 

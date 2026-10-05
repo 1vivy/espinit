@@ -67,8 +67,9 @@ pub fn on_stage(stage: Stage) -> Result<()> {
                     &mut binary,
                     espinit_platform::generation::generation(),
                 )?;
+                let _core_fd = ksucalls::duplicate_driver_fd_for_child()
+                    .context("prepare inherited espinit control descriptor")?;
                 let status = std::process::Command::new(helper)
-                    .env("ESPINIT_PLATFORM_BOOT_MODE", "1")
                     .status()
                     .context("start tiny-espsu")?;
                 anyhow::ensure!(status.success(), "tiny-espsu failed: {status}");

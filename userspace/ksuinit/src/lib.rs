@@ -8,6 +8,7 @@ pub mod handoff;
 pub mod init;
 pub mod loader;
 pub mod platform;
+pub mod probe;
 pub mod receipt;
 pub mod scripts;
 pub mod selfcheck;

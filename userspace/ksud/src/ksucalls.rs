@@ -5,7 +5,7 @@ use crate::ksu_uapi;
 use std::cell::Cell;
 use std::fs;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::LazyLock;
 
 // sigsys handler
@@ -134,6 +134,24 @@ fn init_driver_fd() -> Option<RawFd> {
     } else {
         fd
     }
+}
+
+/// Duplicate the validated control descriptor without `O_CLOEXEC` for one
+/// tightly scoped helper process. The caller keeps this owned duplicate alive
+/// through `Command::status`; the original cached descriptor remains private.
+pub fn duplicate_driver_fd_for_child() -> Result<OwnedFd> {
+    let fd = *DRIVER_FD;
+    if fd < 0 {
+        bail!("could not retrieve espinit driver fd");
+    }
+    // SAFETY: `fd` is the process-owned cached descriptor. `F_DUPFD` returns a
+    // new descriptor without FD_CLOEXEC, owned by the returned `OwnedFd`.
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD, 3) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `duplicate` is a fresh descriptor returned by `fcntl`.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
 
 // ioctl wrapper using libc

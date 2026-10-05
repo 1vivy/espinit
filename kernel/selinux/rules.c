@@ -11,38 +11,16 @@
 #include "klog.h" // IWYU pragma: keep
 #include "selinux.h"
 #include "sepolicy.h"
+#include "policy_transaction.h"
 #include "ss/services.h"
 #include "linux/lsm_audit.h" // IWYU pragma: keep
 #include "xfrm.h"
 
-struct selinux_policy *backup_sepolicy;
-static DEFINE_MUTEX(espinit_rules_lock);
-static bool espinit_rules_applied;
 
 #define SELINUX_POLICY_INSTEAD_SELINUX_SS
 
 #define ALL NULL
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
-extern int avc_ss_reset(u32 seqno);
-#else
-extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
-#endif
-// reset avc cache table, otherwise the new rules will not take effect if already denied
-static void reset_avc_cache()
-{
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
-    avc_ss_reset(0);
-    selnl_notify_policyload(0);
-    selinux_status_update_policyload(0);
-#else
-    struct selinux_avc *avc = selinux_state.avc;
-    avc_ss_reset(avc, 0);
-    selnl_notify_policyload(0);
-    selinux_status_update_policyload(&selinux_state, 0);
-#endif
-    selinux_xfrm_notify_policyload();
-}
 
 /* Applied at init second_stage, not at post-fs-data (early_hal is earlier).
  * These two object types deliberately have no file_type/dev_type attributes. */
@@ -75,141 +53,55 @@ static bool apply_boot_hal_rules(struct policydb *db)
            ksu_type_transition(db, "init", "gblbds_hal_exec", "process", "hal_bootctl_default", NULL);
 }
 
-void apply_espinit_rules()
+static bool apply_daemon_identity_rules(struct policydb *db)
 {
-    struct selinux_policy *pol, *old_pol;
-    struct policydb *db;
-    mutex_lock(&espinit_rules_lock);
-    if (espinit_rules_applied) {
-        mutex_unlock(&espinit_rules_lock);
-        return;
+    static const char *const file_perms[] = {
+        "getattr", "open", "read", "execute", "map",
+    };
+    static const char *const process_perms[] = {
+        "transition", "dyntransition", "noatsecure", "siginh", "rlimitinh",
+    };
+    size_t i;
+
+    if (!ksu_type(db, KERNEL_SU_DOMAIN, "domain") ||
+        !ksu_permissive(db, KERNEL_SU_DOMAIN) ||
+        !ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject") ||
+        !ksu_type(db, KERNEL_SU_FILE, "file_type") ||
+        !ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject"))
+        return false;
+
+    for (i = 0; i < ARRAY_SIZE(file_perms); ++i) {
+        if (!ksu_allow(db, "init", KERNEL_SU_FILE, "file", file_perms[i]) ||
+            !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", file_perms[i]))
+            return false;
     }
-
-    if (!getenforce()) {
-        pr_info("SELinux permissive or disabled, apply rules!\n");
+    if (!ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "entrypoint"))
+        return false;
+    for (i = 0; i < ARRAY_SIZE(process_perms); ++i) {
+        if (!ksu_allow(db, "init", KERNEL_SU_DOMAIN, "process", process_perms[i]))
+            return false;
     }
+    return ksu_allow(db, "init", KERNEL_SU_DOMAIN, "process2", "nosuid_transition");
+}
 
-    mutex_lock(&selinux_state.policy_mutex);
-
-    old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
-    backup_sepolicy = ksu_dup_sepolicy(old_pol);
-    if (IS_ERR(backup_sepolicy)) {
-        pr_err("failed to create backup sepolicy: %ld\n", PTR_ERR(backup_sepolicy));
-        backup_sepolicy = NULL;
-    } else {
-        backup_sepolicy->sidtab = kzalloc(sizeof(*backup_sepolicy->sidtab), GFP_KERNEL);
-        if (!backup_sepolicy->sidtab) {
-            pr_err("failed to alloc backup sidtab\n");
-            ksu_destroy_sepolicy(backup_sepolicy);
-            backup_sepolicy = NULL;
-        } else {
-            int ret = policydb_load_isids(&backup_sepolicy->policydb, backup_sepolicy->sidtab);
-            if (ret) {
-                pr_err("failed to load isids for backup sepolicy: %d!\n", ret);
-                kfree(backup_sepolicy->sidtab);
-                ksu_destroy_sepolicy(backup_sepolicy);
-                backup_sepolicy = NULL;
-            } else {
-                pr_info("backup sepolicy success! latest_granting=%d\n", backup_sepolicy->latest_granting);
-            }
-        }
+static int mutate_espinit_policy(struct policydb *db)
+{
+    if (!apply_daemon_identity_rules(db)) {
+        pr_err("required espinit daemon identity rules failed\n");
+        return -EINVAL;
     }
-    pol = ksu_dup_sepolicy(old_pol);
-    if (IS_ERR(pol)) {
-        pr_err("failed to dup selinux_policy: %ld\n", PTR_ERR(pol));
-        goto out_unlock;
-    }
-
-    db = &pol->policydb;
-
-    ksu_type(db, KERNEL_SU_DOMAIN, "domain");
-    ksu_permissive(db, KERNEL_SU_DOMAIN);
-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
-
-    // Create unconstrained file type
-    ksu_type(db, KERNEL_SU_FILE, "file_type");
-    ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
-    ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
-
-    // allow all!
-    ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
-
-    // allow us do any ioctl
-    if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
-    }
-
-    // our ksud triggered by init
-    ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
-
-    // copied from Magisk rules
-    // suRights
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "read");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "open");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "read");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "process", "sigchld");
-
-    // allowLog
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "dir", "search");
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "read");
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "open");
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "getattr");
-
-    // dumpsys, send fd
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fd", "use");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "write");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "read");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "open");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "getattr");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
-
-    // use memfd created by su domain
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "execute");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "getattr");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "map");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "read");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "write");
-
-    // bootctl
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "open");
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
-
-    // Allow all binder transactions
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "binder", ALL);
-
-    // Allow system server kill su process
-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
-
     if (!apply_boot_hal_rules(db)) {
         pr_err("required boot HAL policy installation failed\n");
-        ksu_destroy_sepolicy(pol);
-        goto out_unlock;
+        return -EINVAL;
     }
+    return 0;
+}
 
-    rcu_assign_pointer(selinux_state.policy, pol);
-    synchronize_rcu();
-    ksu_destroy_sepolicy(old_pol);
-
-    espinit_rules_applied = true;
-    pr_info("espinit SELinux rules applied\n");
-    reset_avc_cache();
-out_unlock:
-    mutex_unlock(&selinux_state.policy_mutex);
-    mutex_unlock(&espinit_rules_lock);
+int apply_espinit_rules(void)
+{
+    if (!getenforce())
+        pr_info("SELinux permissive or disabled, applying rules\n");
+    return espinit_policy_apply_once(mutate_espinit_policy);
 }
 
 #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)
@@ -566,7 +458,7 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
-    reset_avc_cache();
+    espinit_policy_reset_avc();
     ret = success_cmd_count;
     goto out_unlock;
 
