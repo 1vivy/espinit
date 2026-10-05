@@ -8,16 +8,11 @@ use std::path::Path;
 /// Publish the PID1-classified mode after the core passes its generation check.
 /// The core accepts this only from global PID1 and cannot switch modes later.
 pub(crate) fn select_core_boot_mode() -> Result<(), Failure> {
-    let path = "/sys/module/espinit/parameters/platform_boot_mode";
-    let mode = if crate::scripts::is_recovery() {
-        "2"
-    } else {
-        "1"
-    };
+    let mode = if crate::scripts::is_recovery() { 2 } else { 1 };
     let result = (|| -> Result<()> {
-        fs::write(path, mode)?;
+        crate::set_core_boot_mode(mode)?;
         ensure!(
-            fs::read_to_string(path)?.trim() == mode,
+            crate::query_core_info()?.boot_mode == mode,
             "core boot mode readback mismatch"
         );
         Ok(())

@@ -19,7 +19,6 @@
 #include <linux/workqueue.h>
 #include <linux/uio.h>
 #include <linux/stat.h>
-#include <linux/moduleparam.h>
 
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
@@ -70,17 +69,12 @@ static const char KERNEL_SU_RC[] =
 static int platform_boot_mode;
 static size_t ksu_rc_len;
 
-static int set_platform_boot_mode(const char *value, const struct kernel_param *kp)
+int espinit_set_platform_boot_mode(int mode)
 {
-    int mode;
     int previous;
-    int error;
 
     if (task_pid_nr(current) != 1)
         return -EPERM;
-    error = kstrtoint(value, 10, &mode);
-    if (error)
-        return error;
     if (mode != ESPINIT_PLATFORM_ANDROID && mode != ESPINIT_PLATFORM_RECOVERY)
         return -EINVAL;
     previous = READ_ONCE(platform_boot_mode);
@@ -91,12 +85,10 @@ static int set_platform_boot_mode(const char *value, const struct kernel_param *
     return 0;
 }
 
-static const struct kernel_param_ops platform_boot_mode_ops = {
-    .set = set_platform_boot_mode,
-    .get = param_get_int,
-};
-module_param_cb(platform_boot_mode, &platform_boot_mode_ops, &platform_boot_mode, 0600);
-MODULE_PARM_DESC(platform_boot_mode, "PID1-only boot selection: 1 Android, 2 recovery/fastbootd");
+int espinit_get_platform_boot_mode(void)
+{
+    return READ_ONCE(platform_boot_mode);
+}
 
 static void stop_init_rc_hook();
 static void stop_execve_hook();

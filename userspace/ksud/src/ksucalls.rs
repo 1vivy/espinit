@@ -86,13 +86,12 @@ const DRIVER_FD_NAME: &str = "anon_inode:[espinit]";
 static DRIVER_FD: LazyLock<RawFd> = LazyLock::new(|| init_driver_fd().unwrap_or(-1));
 static INFO_CACHE: LazyLock<ksu_uapi::ksu_get_info_cmd> = LazyLock::new(query_info);
 
-/// The daemon and the core module exchange exactly the v2 `ksu_get_info_cmd`
-/// from `uapi/supercall.h`. A drift in either the field layout (84 bytes) or
-/// the encoded ioctl number (`0x80544502`) must fail this build instead of
-/// silently reading a different structure, so both are checked here at compile
-/// time, mirroring the checks in the PID-1 stage.
-const _: () = assert!(std::mem::size_of::<ksu_uapi::ksu_get_info_cmd>() == 84);
-const _: () = assert!(ksu_uapi::KSU_IOCTL_GET_INFO == 0x8054_4502);
+/// The daemon and the core module exchange exactly the v3 `ksu_get_info_cmd`
+/// from `uapi/supercall.h`. Drift in either the 88-byte field layout or the
+/// encoded ioctl number (`0x80584502`) fails this build instead of silently
+/// reading a different structure, mirroring the PID-1 checks.
+const _: () = assert!(std::mem::size_of::<ksu_uapi::ksu_get_info_cmd>() == 88);
+const _: () = assert!(ksu_uapi::KSU_IOCTL_GET_INFO == 0x8058_4502);
 
 fn scan_driver_fd() -> io::Result<Option<RawFd>> {
     let fd_dir = fs::read_dir("/proc/self/fd")?;
@@ -254,7 +253,7 @@ pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
     let Some(kernel_generation) = kernel_generation() else {
         bail!(
             "espinit core reported an invalid build generation: the get-info field is not \
-             NUL-terminated ASCII. Build and load a core module that implements UAPI v2."
+             NUL-terminated ASCII. Build and load a core module that implements UAPI v3."
         );
     };
     if kernel_generation.is_empty() {

@@ -405,7 +405,7 @@ pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
 
 /// UAPI version implemented by this loader. A core module reporting any other
 /// value is not ABI-compatible and can never satisfy the payload self-check.
-pub const UAPI_VERSION: u32 = 2;
+pub const UAPI_VERSION: u32 = 3;
 
 /// `ESPINIT_STATE_READY`: the core module finished its normal initialization.
 pub const STATE_READY: u32 = 1 << 0;
@@ -426,6 +426,7 @@ pub struct GetInfoCmd {
     pub uapi_version: u32,
     pub state: u32,
     pub generation: [u8; 64],
+    pub boot_mode: u32,
 }
 
 impl Default for GetInfoCmd {
@@ -437,22 +438,27 @@ impl Default for GetInfoCmd {
             uapi_version: 0,
             state: 0,
             generation: [0; 64],
+            boot_mode: 0,
         }
     }
 }
 
-const _: () = assert!(std::mem::size_of::<GetInfoCmd>() == 84);
+const _: () = assert!(std::mem::size_of::<GetInfoCmd>() == 88);
 
 const fn ioc_read(nr: u32, size: u32) -> u32 {
     (2u32 << 30) | ((size & 0x3fff) << 16) | ((b'E' as u32) << 8) | (nr & 0xff)
 }
 
-/// `KSU_IOCTL_GET_INFO` for the v2 structure (`0x80544502`). The legacy
-/// zero-size request is deliberately not probed: a core answering only the
-/// legacy layout cannot report a generation and must not pass the self-check.
-pub const IOCTL_GET_INFO: u32 = ioc_read(2, std::mem::size_of::<GetInfoCmd>() as u32);
+const fn ioc_write(nr: u32, size: u32) -> u32 {
+    (1u32 << 30) | ((size & 0x3fff) << 16) | ((b'E' as u32) << 8) | (nr & 0xff)
+}
 
-const _: () = assert!(IOCTL_GET_INFO == 0x8054_4502);
+/// `KSU_IOCTL_GET_INFO` for the v3 structure (`0x80584502`).
+pub const IOCTL_GET_INFO: u32 = ioc_read(2, std::mem::size_of::<GetInfoCmd>() as u32);
+pub const IOCTL_SET_BOOT_MODE: u32 = ioc_write(20, std::mem::size_of::<u32>() as u32);
+
+const _: () = assert!(IOCTL_GET_INFO == 0x8058_4502);
+const _: () = assert!(IOCTL_SET_BOOT_MODE == 0x4004_4514);
 
 impl GetInfoCmd {
     /// The generation reported by the core, when the field is NUL-terminated
@@ -497,9 +503,9 @@ fn install_driver_fd() -> Result<i32> {
     Ok(fd)
 }
 
-/// Query the core module identity through the v2 control interface. Fails when
+/// Query the core module identity through the v3 control interface. Fails when
 /// the driver fd cannot be installed or the ioctl is rejected; the caller is
-/// responsible for the ABI-version, generation, and readiness checks.
+/// responsible for ABI-version, generation, readiness, and boot-mode checks.
 pub fn query_core_info() -> Result<GetInfoCmd> {
     use syscalls::{Sysno, syscall};
 
@@ -522,6 +528,29 @@ pub fn query_core_info() -> Result<GetInfoCmd> {
         .context("espinit v2 get-info ioctl failed")?;
 
     Ok(cmd)
+}
+
+/// Set the validated PID1 boot mode through the espinit control interface.
+pub fn set_core_boot_mode(mode: u32) -> Result<()> {
+    use syscalls::{Sysno, syscall};
+
+    let fd = install_driver_fd()?;
+    let result = unsafe {
+        syscall!(
+            Sysno::ioctl,
+            fd,
+            IOCTL_SET_BOOT_MODE,
+            std::ptr::addr_of!(mode)
+        )
+    };
+    unsafe {
+        let _ = syscall!(Sysno::close, fd);
+    }
+
+    result
+        .map_err(|errno| anyhow::anyhow!("errno {}", errno.into_raw()))
+        .context("espinit set-boot-mode ioctl failed")?;
+    Ok(())
 }
 
 /// Whether a core module speaking the current ABI is loaded and initialized.

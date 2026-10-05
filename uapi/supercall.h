@@ -4,8 +4,8 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-// 2: generation identity and initialization readiness
-static const __u32 ESPINIT_UAPI_VERSION = 2;
+// 3: PID1 boot-mode selection and readback
+static const __u32 ESPINIT_UAPI_VERSION = 3;
 
 /* Magic numbers for the reboot hook to install the driver fd */
 static const __u32 ESPINIT_INSTALL_MAGIC1 = 0x45535049; /* 'ESPI' */
@@ -26,6 +26,7 @@ struct ksu_get_info_cmd {
     __u32 uapi_version; /* Output: ESPINIT_UAPI_VERSION */
     __u32 state; /* Output: ESPINIT_STATE_* bits */
     __u8 generation[64]; /* Output: NUL-terminated ASCII build generation */
+    __u32 boot_mode; /* Output: enum espinit_platform_boot_mode */
 };
 
 struct ksu_get_info_legacy_cmd {
@@ -107,6 +108,7 @@ static const __u8 KSU_UMOUNT_DEL = 2; /* delete entry, strcmp */
 /* IOCTL command definitions. The 'E' type keeps espinit distinct from
  * any existing KernelSU installation using type 'K'. */
 static const __u32 KSU_IOCTL_GET_INFO = _IOR('E', 2, struct ksu_get_info_cmd);
+static const __u32 ESPINIT_IOCTL_SET_BOOT_MODE = _IOW('E', 20, __u32);
 /* deprecated */
 static const __u32 KSU_IOCTL_GET_INFO_LEGACY = _IOC(_IOC_READ, 'E', 2, 0);
 static const __u32 KSU_IOCTL_REPORT_EVENT = _IOC(_IOC_WRITE, 'E', 3, 0);
