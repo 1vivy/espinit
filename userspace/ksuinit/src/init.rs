@@ -5,7 +5,9 @@
 //! and ROM validation, generation matching, ordered payload module loading with
 //! self-checks, the single projection boundary immediately before the `gpt`
 //! entry, and finally the real-init handoff. Any failure stops the handoff,
-//! persists a receipt, and enters the fatal-boot stop path. There is no soft
+//! persists a receipt, and enters the fatal-boot stop path: a reboot by
+//! default, or the AOSP sysrq crash when the exact
+//! `androidboot.init_fatal_panic=true` opt-in is active. There is no soft
 //! fallback and no stock-ROM fallback.
 
 use std::fs;
@@ -536,6 +538,121 @@ fn unlimit_kmsg() {
     }
 }
 
+/// Exact AOSP opt-in that turns a fatal espinit failure into a real kernel
+/// crash instead of the default reboot.
+const FATAL_PANIC_KEY: &str = "androidboot.init_fatal_panic";
+
+/// The only value that enables the opt-in; AOSP compares it literally.
+const FATAL_PANIC_VALUE: &str = "true";
+
+/// AOSP's sysrq crash request. Writing this byte to `/proc/sysrq-trigger`
+/// panics the kernel, so the failure can be captured through pstore/minidump
+/// instead of only rebooting.
+const SYSRQ_TRIGGER: &str = "/proc/sysrq-trigger";
+const SYSRQ_CRASH: &[u8] = b"c";
+
+/// Which fatal-boot stop applies to the current boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FatalStop {
+    /// The exact AOSP opt-in is active: request a kernel panic.
+    Panic,
+    /// No opt-in: sync, reboot, and park PID 1, unchanged.
+    Reboot,
+}
+
+/// Enter the fatal-boot stop path for a failure the caller classified.
+///
+/// The `record` closure persists the bounded ESP failure receipt first, so the
+/// evidence survives the crash capture. A kernel panic is requested only for
+/// the exact opt-in and never returns; every other outcome continues into
+/// [`stop_boot`], the unchanged reboot-and-park path, so a failing opt-in can
+/// never strand PID 1.
+pub fn fatal_boot(record: impl FnOnce()) -> ! {
+    let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let stop = if fatal_panic_requested(&bootconfig, &cmdline) {
+        FatalStop::Panic
+    } else {
+        FatalStop::Reboot
+    };
+
+    stop_with(stop, record, crash_kernel, || stop_boot());
+
+    unreachable!("the fatal-boot stop fallback never returns")
+}
+
+/// Run the fatal-boot stop with injectable side effects.
+///
+/// The receipt is recorded before any panic request, and the fallback is the
+/// only observable outcome of a stop that did not panic the kernel.
+fn stop_with(
+    stop: FatalStop,
+    record: impl FnOnce(),
+    panic: impl FnOnce(),
+    fallback: impl FnOnce(),
+) {
+    record();
+
+    if stop == FatalStop::Panic {
+        log::error!("{FATAL_PANIC_KEY}={FATAL_PANIC_VALUE}: requesting a sysrq crash");
+        panic();
+        log::error!("sysrq crash request returned without panicking the kernel");
+    }
+
+    fallback();
+}
+
+/// Request the AOSP sysrq crash. Returns only when the kernel did not panic.
+fn crash_kernel() {
+    match fs::File::options().write(true).open(SYSRQ_TRIGGER) {
+        Ok(mut trigger) => {
+            if let Err(error) = trigger.write_all(SYSRQ_CRASH) {
+                log::error!("cannot write {SYSRQ_TRIGGER}: {error}");
+            }
+        }
+        Err(error) => {
+            log::error!("cannot open {SYSRQ_TRIGGER}: {error}");
+        }
+    }
+}
+
+/// Whether the exact AOSP fatal-panic opt-in is active for this boot.
+///
+/// The key is read from the boot configuration, falling back to the kernel
+/// command line only when the boot configuration is silent for it, matching how
+/// espinit resolves its other boot inputs. Only the exact key with the exact
+/// value `true` opts in: case variants, key prefixes, malformed quote pairs and
+/// every other value stay non-opt-in, and there is no OEM- or vendor-specific
+/// spelling.
+fn fatal_panic_requested(bootconfig: &str, cmdline: &str) -> bool {
+    bootconfig_value(bootconfig).or_else(|| cmdline_value(cmdline)) == Some(FATAL_PANIC_VALUE)
+}
+
+/// Value the boot configuration attributes to the fatal-panic key, if any.
+fn bootconfig_value(bootconfig: &str) -> Option<&str> {
+    bootconfig.lines().find_map(|line| {
+        let (name, value) = line.split_once('=').unwrap_or((line, ""));
+        (name.trim() == FATAL_PANIC_KEY).then(|| unquote(value.trim()))
+    })
+}
+
+/// Value the kernel command line attributes to the fatal-panic key, if any.
+fn cmdline_value(cmdline: &str) -> Option<&str> {
+    cmdline.split_whitespace().find_map(|token| {
+        let (name, value) = token.split_once('=')?;
+        (name == FATAL_PANIC_KEY).then(|| unquote(value))
+    })
+}
+
+/// Strip exactly one surrounding pair of quotes. A lone quote is malformed and
+/// is left in place, so it cannot compare equal to an accepted value.
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
+}
+
 /// Enter the fatal-boot stop path: sync, reboot, and never continue normal
 /// boot when the reboot itself does not take effect.
 pub fn stop_boot() -> ! {
@@ -658,5 +775,122 @@ mod tests {
         // A second resolution reuses the published set instead of re-resolving.
         config::validate_backends(&rom, esp::ESP_MOUNT_POINT).unwrap();
         assert!(rom.resolved_backends().is_empty());
+    }
+
+    #[test]
+    fn only_the_exact_bootconfig_key_and_value_opt_in() {
+        let cases = [
+            ("androidboot.init_fatal_panic=true\n", true),
+            ("androidboot.init_fatal_panic = true", true),
+            ("androidboot.init_fatal_panic=\"true\"\n", true),
+            (
+                "androidboot.force_normal_boot=0\nandroidboot.init_fatal_panic=true\n",
+                true,
+            ),
+            ("", false),
+            ("androidboot.init_fatal_panic=false\n", false),
+            ("androidboot.init_fatal_panic=TRUE\n", false),
+            ("androidboot.init_fatal_panic=True\n", false),
+            ("androidboot.init_fatal_panic=1\n", false),
+            ("androidboot.init_fatal_panic\n", false),
+            ("androidboot.init_fatal_panic=\n", false),
+            ("androidboot.init_fatal_panic=\"true\n", false),
+            ("androidboot.init_fatal_panic=true\"\n", false),
+            ("ANDROIDBOOT.INIT_FATAL_PANIC=true\n", false),
+            ("androidboot.init_fatal_panicked=true\n", false),
+            ("androidboot.init_fatal_panic_extra=true\n", false),
+            ("vendor.androidboot.init_fatal_panic=true\n", false),
+            ("androidboot.init_fatal_panic=true x\n", false),
+        ];
+
+        for (bootconfig, expected) in cases {
+            assert_eq!(fatal_panic_requested(bootconfig, ""), expected);
+        }
+    }
+
+    #[test]
+    fn the_command_line_only_opts_in_when_the_bootconfig_is_silent() {
+        let cases = [
+            ("", "androidboot.init_fatal_panic=true", true),
+            (
+                "other=1\n",
+                "loglevel=7 androidboot.init_fatal_panic=true",
+                true,
+            ),
+            ("other=1\n", "androidboot.init_fatal_panic=\"true\"", true),
+            ("", "androidboot.init_fatal_panic=false", false),
+            ("", "androidboot.init_fatal_panicked=true", false),
+            ("", "androidboot.init_fatal_panic", false),
+            ("", "androidboot.init_fatal_panic=truex", false),
+            (
+                "androidboot.init_fatal_panic=false\n",
+                "androidboot.init_fatal_panic=true",
+                false,
+            ),
+        ];
+
+        for (bootconfig, cmdline, expected) in cases {
+            assert_eq!(fatal_panic_requested(bootconfig, cmdline), expected);
+        }
+    }
+
+    #[test]
+    fn the_failure_receipt_is_recorded_before_the_panic_request() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stop_with(
+                FatalStop::Panic,
+                || events.borrow_mut().push("receipt"),
+                || {
+                    events.borrow_mut().push("sysrq");
+                    panic!("kernel panicked");
+                },
+                || events.borrow_mut().push("fallback"),
+            );
+        }));
+
+        let payload = outcome.expect_err("a requested kernel panic never returns");
+        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "kernel panicked");
+        assert_eq!(*events.borrow(), ["receipt", "sysrq"]);
+    }
+
+    #[test]
+    fn a_panic_request_that_returns_falls_back_to_the_reboot_stop() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stop_with(
+                FatalStop::Panic,
+                || events.borrow_mut().push("receipt"),
+                || events.borrow_mut().push("sysrq"),
+                || {
+                    events.borrow_mut().push("fallback");
+                    panic!("reboot stop");
+                },
+            );
+        }));
+
+        let payload = outcome.expect_err("the reboot stop parks PID 1");
+        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "reboot stop");
+        assert_eq!(*events.borrow(), ["receipt", "sysrq", "fallback"]);
+    }
+
+    #[test]
+    fn without_the_opt_in_the_stop_never_touches_sysrq() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stop_with(
+                FatalStop::Reboot,
+                || events.borrow_mut().push("receipt"),
+                || panic!("sysrq must not be requested without the opt-in"),
+                || {
+                    events.borrow_mut().push("fallback");
+                    panic!("reboot stop");
+                },
+            );
+        }));
+
+        let payload = outcome.expect_err("the reboot stop parks PID 1");
+        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "reboot stop");
+        assert_eq!(*events.borrow(), ["receipt", "fallback"]);
     }
 }

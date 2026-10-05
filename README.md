@@ -6,6 +6,10 @@ espinit is an early-boot substrate forked from [KernelSU](https://github.com/tia
 
 The Platform modules phase is implemented in source as described below; its
 new host tests, Android artifacts, policy and boot ordering await verification.
+The `androidboot.init_fatal_panic=true` opt-in is implemented against the AOSP
+init control but is not device-proven: on a kernel with no usable
+`/proc/sysrq-trigger` or pstore/minidump capture, a fatal espinit failure still
+degrades to the existing ESP receipt and reboot.
 
 ## Architecture and identity
 
@@ -193,7 +197,24 @@ Before entering the platform's fatal-boot stop path, persist ESP `/espinit/recei
 - `error`: stable machine-readable error identifier;
 - `detail`: bounded diagnostic string, with no credentials or sensitive contents.
 
-Keep the ESP read-only during normal boot. On failure only, use one bounded read-write remount window to replace the receipt: write a temporary file in the same directory, `fsync` the file, atomically rename it to `failure.json`, and `fsync` the directory; then sync the ESP and remount it read-only before the fatal-boot stop. Keep the previous receipt until replacement succeeds; a successful boot does not erase failure evidence. Do not require wall-clock time or a custom receipt database. If the remount, receipt write/sync, or read-only restoration fails, emit the original failure and receipt-storage failure to the early kernel log, still attempt sync and read-only restoration when the writable window was opened, and remain in the fatal-boot stop path without unbounded retries. Logging is not a durable-receipt substitute and never authorizes handoff. The platform stop mechanism must be selected during device integration; it must not restart into Android with the same failed projection unchecked.
+Keep the ESP read-only during normal boot. On failure only, use one bounded read-write remount window to replace the receipt: write a temporary file in the same directory, `fsync` the file, atomically rename it to `failure.json`, and `fsync` the directory; then sync the ESP and remount it read-only before the fatal-boot stop. Keep the previous receipt until replacement succeeds; a successful boot does not erase failure evidence. Do not require wall-clock time or a custom receipt database. If the remount, receipt write/sync, or read-only restoration fails, emit the original failure and receipt-storage failure to the early kernel log, still attempt sync and read-only restoration when the writable window was opened, and remain in the fatal-boot stop path without unbounded retries. Logging is not a durable-receipt substitute and never authorizes handoff. The stop itself is fixed: sync, then the optional AOSP sysrq crash below, then the reboot-and-park fallback; it must never restart into Android with the same failed projection unchecked. Device integration still selects the platform-specific restart semantics.
+
+### Fatal panic capture
+
+The fatal-boot stop is a reboot by default. When the boot configuration carries
+the exact AOSP opt-in `androidboot.init_fatal_panic=true`, espinit writes the
+failure receipt first and then requests the same sysrq crash AOSP init uses, by
+writing `c` to `/proc/sysrq-trigger`, so the failure can be captured through
+pstore/minidump instead of only rebooting. Only the exact key with the exact
+value `true` opts in, read from `/proc/bootconfig` and falling back to the
+kernel command line only when the boot configuration is silent for that key:
+case variants, key prefixes, malformed quote pairs and every other value stay
+non-opt-in, and there is no OEM- or vendor-specific spelling. If the trigger is
+unavailable, the write fails, or the write returns without panicking the
+kernel, espinit falls back to the unchanged sync/reboot/park path, so a failing
+opt-in can never strand PID 1. The opt-in covers only espinit's own failures
+before the real `/init` starts; it does not extend to a later boot failure and
+records nothing when the kernel does not panic.
 
 ## `gpt.ko` limits
 
