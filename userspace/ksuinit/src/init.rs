@@ -39,13 +39,34 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     let mounts = mount_minimal()?;
     unlimit_kmsg();
 
+    // UFS and VFAT are built in on the phone, so the payload ESP can already be
+    // available before vendor module preload. Retain that mount when possible:
+    // a preload failure can then persist its normal bounded failure receipt.
+    // Devices that need modular storage keep the original load-then-wait path.
+    state.esp_mount = match esp::mount_esp() {
+        Ok(mount) => {
+            log::info!("ESP was available before vendor module preload");
+            Some(mount)
+        }
+        Err(failure) if esp_enumeration_pending(&failure) => None,
+        Err(failure) => return Err(failure),
+    };
+
     loader::load_vendor_modules()?;
 
-    let mount = wait_for_esp()?;
+    if state.esp_mount.is_none() {
+        state.esp_mount = Some(wait_for_esp()?);
+    }
+    let mount = state.esp_mount.as_ref().ok_or_else(|| {
+        Failure::new(
+            Stage::Storage,
+            "EspMountUnavailable",
+            "ESP discovery succeeded without retaining its mount",
+        )
+    })?;
     let esp_mount = mount.path().to_owned();
     let esp_device = mount.device();
     let payload_root = esp::payload_root(mount.path());
-    state.esp_mount = Some(mount);
 
     let manifest = read_manifest(&payload_root)?;
     let rom = read_rom(&payload_root, &manifest)?;
@@ -317,6 +338,13 @@ fn retry_enumerated<T, E>(
     }
 }
 
+fn esp_enumeration_pending(failure: &Failure) -> bool {
+    matches!(
+        failure.error,
+        "EspNotFound" | "EspPayloadNotFound" | "EspSysfsUnavailable" | "EspPartitionMissing"
+    )
+}
+
 /// Discover and mount the ESP, retrying within the bounded enumeration window.
 /// Block devices and their sysfs entries appear asynchronously after the vendor
 /// storage modules load, so a single probe can lose a race that is not a real
@@ -327,15 +355,7 @@ fn wait_for_esp() -> Result<esp::Mount, Failure> {
         ENUMERATION_WINDOW,
         ENUMERATION_RETRY,
         esp::mount_esp,
-        |failure| {
-            matches!(
-                failure.error,
-                "EspNotFound"
-                    | "EspPayloadNotFound"
-                    | "EspSysfsUnavailable"
-                    | "EspPartitionMissing"
-            )
-        },
+        esp_enumeration_pending,
     )
 }
 
