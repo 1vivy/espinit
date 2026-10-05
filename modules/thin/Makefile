@@ -7,10 +7,10 @@
 # tree, so the kernel sources and their build output directory are provided by
 # the caller:
 #
-#   make -C modules/thin KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out
+#   make -C modules/thin KERNEL_SRC=<source> KERNEL_OUT=<output> KERNEL_CONFIG=<capture>
 #
 # modules/thin/build.sh wraps the same invocation for scripted use. JOBS
-# defaults to 13 and is capped at 13; ARCH defaults to the phone's arm64.
+# defaults to 13 and is capped at 13; architecture follows the target config.
 
 # Build generation identity
 #
@@ -90,40 +90,15 @@ ccflags-y += -DESPINIT_GENERATION=\"$(ESPINIT_GENERATION_VALUE)\"
 
 else
 
-KERNEL_SRC ?=
-KERNEL_OUT ?=
-ARCH ?= arm64
-JOBS ?= 13
-
-JOBS_VALID := $(shell jobs='$(subst ','"'"',$(JOBS))'; invalid=`printf '%s' "$$jobs" | tr -d '0-9'`; if [ -n "$$jobs" ] && [ -z "$$invalid" ] && [ "$$jobs" -ge 1 ] && [ "$$jobs" -le 13 ]; then echo yes; else echo no; fi)
-ifneq ($(JOBS_VALID),yes)
-$(error espinit thin: invalid JOBS='$(JOBS)': expected an integer between 1 and 13)
-endif
-
-# The vendored 6.12 sources predate warning options that newer clang releases
-# promote to errors under CONFIG_WERROR; these suppressions are the ones the
-# proven build used and never change generated code.
-THIN_HOSTCFLAGS := -Wno-unknown-warning-option -Wno-error=incompatible-pointer-types-discards-qualifiers
-THIN_KCFLAGS := -Wno-unknown-warning-option -Wno-error=default-const-init-var-unsafe -Wno-error=default-const-init-field-unsafe -Wno-error=unterminated-string-initialization -Wno-error=uninitialized
-
-define thin_require_output_tree
-	@test -n "$(KERNEL_SRC)" || { echo "espinit thin: set KERNEL_SRC to the configured kernel tree" >&2; exit 2; }
-	@test -n "$(KERNEL_OUT)" || { echo "espinit thin: set KERNEL_OUT to the kernel build output directory" >&2; exit 2; }
-endef
+.DEFAULT_GOAL := modules
+PHONE_MODULE := thin
+include ../../scripts/phone-module.mk
 
 .PHONY: all modules clean
-
-all: modules
-
-modules:
-	$(thin_require_output_tree)
-	$(MAKE) -C "$(KERNEL_SRC)" O="$(KERNEL_OUT)" M="$(CURDIR)" \
-		ARCH="$(ARCH)" LLVM=1 KBUILD_GENDWARFKSYMS_STABLE=1 \
-		HOSTCFLAGS="$(THIN_HOSTCFLAGS)" KCFLAGS="$(THIN_KCFLAGS)" \
-		modules -j$(JOBS)
+all modules: phone
 
 clean:
-	$(thin_require_output_tree)
+	@test -n "$(KERNEL_SRC)" && test -n "$(KERNEL_OUT)"
 	$(MAKE) -C "$(KERNEL_SRC)" O="$(KERNEL_OUT)" M="$(CURDIR)" clean
 
 endif

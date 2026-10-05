@@ -21,9 +21,6 @@
 #include "infra/symbol_resolver.h"
 #include "supercall/supercall.h"
 
-#ifndef CONFIG_MODVERSIONS
-asm(".section \"__versions\",\"a\"\n\t.previous");
-#endif
 #if defined(__x86_64__) && !defined(CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER)
 #include <asm/cpufeature.h>
 #include <linux/version.h>

@@ -7,3 +7,4 @@ AGENTS.md
 .cargo/config.toml
 __pycache__
 /dist
+*.ko.compat.json

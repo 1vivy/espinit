@@ -34,6 +34,7 @@ Required inputs, all explicit paths (`--flag` above each file):
 | `--busybox` | static interpreter for ESP scripts, `espinit/bin/busybox` |
 | `--thin-activate` | output of `build-thin-activate.sh`, `espinit/bin/thin-activate` |
 | `--core-module`, `--thin-module`, `--gpt-module` | `espinit.ko`, `thin.ko`, `gpt.ko` built for the session kernel |
+| `--kernel-src`, `--kernel-out`, `--kernel-config` | exact source/output and independent target config; shared LKM admission requires MODVERSIONS, matching imports/export CRCs, vermagic/BTF, and build receipts |
 | `--generation` | one identifier, `[A-Za-z0-9._-]{1,63}`, written into every generation-bearing artifact |
 | `--rom-id` | required catalogue ID matching `androidboot.espinit.rom`; generates `espinit/roms/<id>.toml` with matching `id`, not a global/default ROM config |
 | `--output-dir` | target directory; must be empty (or hold only previous artifacts with `--overwrite`) |
@@ -55,11 +56,20 @@ tools/cuttlefish/assemble.py \
     --core-module      <espinit.ko> \
     --thin-module      <thin.ko> \
     --gpt-module       <gpt.ko> \
+    --kernel-src       <exact kernel source> \
+    --kernel-out       <complete exact kernel output> \
+    --kernel-config    <independent target config> \
     --generation       <generation> \
     --rom-id           <catalogue ROM ID> \
     --esp-size-mib     <pinned custom partition size> \
     --output-dir       <empty directory>
 ```
+
+The assembler runs the repository's shared `scripts/phone_modules.py verify`
+before creating or replacing any payload image. Each module needs its matching
+`<name>.ko.compat.json` beside it. The same gate applies to phone and lab
+payloads: unversioned modules, stale receipts and config mismatches are not
+accepted as a Cuttlefish exception. See [build notes](../../README.md#build-notes).
 
 Host tools used, each through a checked subprocess argument list (never a
 shell): the supplied `avbtool`, plus `unpack_bootimg`, `mkbootimg`, `cpio`,

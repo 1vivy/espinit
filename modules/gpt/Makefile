@@ -26,15 +26,12 @@ endif
 $(info -- gpt generation: $(ESPINIT_GENERATION_VALUE) (from $(ESPINIT_GENERATION_SOURCE)))
 ccflags-y += -DESPINIT_GENERATION=\"$(ESPINIT_GENERATION_VALUE)\"
 else
-KDIR ?= /lib/modules/$(shell uname -r)/build
-JOBS ?= 13
-JOBS_VALID := $(shell jobs='$(subst ','"'"',$(JOBS))'; invalid=`printf '%s' "$$jobs" | tr -d '0-9'`; if [ -n "$$jobs" ] && [ -z "$$invalid" ] && [ "$$jobs" -ge 1 ] && [ "$$jobs" -le 13 ]; then echo yes; else echo no; fi)
-ifneq ($(JOBS_VALID),yes)
-$(error gpt: invalid JOBS='$(JOBS)': expected an integer between 1 and 13)
-endif
-.PHONY: all clean
-all:
-	$(MAKE) -C "$(KDIR)" M="$(CURDIR)" LLVM=1 modules -j$(JOBS)
+.DEFAULT_GOAL := all
+PHONE_MODULE := gpt
+include ../../scripts/phone-module.mk
+.PHONY: all modules clean
+all modules: phone
 clean:
-	$(MAKE) -C "$(KDIR)" M="$(CURDIR)" clean
+	@test -n "$(KERNEL_SRC)" && test -n "$(KERNEL_OUT)"
+	$(MAKE) -C "$(KERNEL_SRC)" O="$(KERNEL_OUT)" M="$(CURDIR)" clean
 endif

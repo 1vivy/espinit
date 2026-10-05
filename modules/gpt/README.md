@@ -4,8 +4,8 @@ This GPL-2.0-only external module targets Linux 6.12. Build against the exact
 kernel output and exported-symbol metadata used by the payload:
 
 ```sh
-make -C modules/gpt KDIR=/path/to/kernel/output ARCH=arm64 \
-    ESPINIT_GENERATION=payload-generation
+make -C modules/gpt KERNEL_SRC=/path/to/exact/source KERNEL_OUT=/path/to/exact/output \
+    KERNEL_CONFIG=/path/to/captured-phone.config ESPINIT_GENERATION=payload-generation
 ```
 
 Load `gpt.ko` without a generation override. `/dev/gptctl` is a root-only misc
@@ -103,12 +103,16 @@ blk_crypto_intersect_capabilities
 blk_crypto_profile_destroy
 ```
 
-Build that target with `KBUILD_MODPOST_WARN=1`, then compile and run
-`kernel/tools/check_symbol.c` against the resulting `gpt.ko` and the exact
-phone `vmlinux`. The checker requires every undefined import to be defined in
-that image and rejects a nonempty `__versions` section. This is the deliberate
-input format for espinit's existing kallsyms relocation loader, not permission
-to accept an unknown import or a module built against a different image.
+The shared phone recipe enables `KBUILD_MODPOST_WARN=1` for these deliberate
+non-KMI imports and then runs `scripts/phone_modules.py` against the exact
+configured output and `vmlinux`. It requires genuine nonempty import versions,
+including `module_layout`, checks every available import CRC against the target
+`Module.symvers`, and proves every undefined import is defined in that image.
+Gpt exports nothing and therefore needs no `__kcrctab`. This exemption never
+applies to import versions. The existing kallsyms relocation loader handles the
+non-KMI imports; it cannot repair ABI/config or missing export CRCs. See the
+repository [build contract](../../README.md#build-notes), including the required
+`.ko.compat.json` receipt that must accompany this module during packaging.
 
 Repository validation proves host manifest/config/UAPI behavior; exact
 Cuttlefish- and phone-kernel builds; every phone unresolved import against the
