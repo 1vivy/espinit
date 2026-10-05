@@ -38,7 +38,7 @@ struct hidden_part {
 	struct file *file;
 	struct block_device *bdev;
 	u8 volname[PARTITION_META_INFO_VOLNAMELTH];
-	bool ro, changed;
+	bool changed;
 };
 struct gpt_view {
 	struct gendisk *disk;
@@ -328,7 +328,7 @@ static void destroy_view(struct gpt_view *v)
 	unsigned int i;
 	if (!v)
 		return;
-	/* Restore physical endpoints before withdrawing their replacement. */
+	/* Restore physical PARTNAME endpoints before withdrawing replacements. */
 	for (i = v->hide_count; i > 0; i--) {
 		struct hidden_part *h = &v->hidden[i - 1];
 		if (h->changed) {
@@ -336,10 +336,6 @@ static void destroy_view(struct gpt_view *v)
 			if (h->bdev->bd_meta_info)
 				memcpy(h->bdev->bd_meta_info->volname,
 				       h->volname, sizeof(h->volname));
-			if (h->ro)
-				bdev_set_flag(h->bdev, BD_READ_ONLY);
-			else
-				bdev_clear_flag(h->bdev, BD_READ_ONLY);
 			mutex_unlock(&h->bdev->bd_disk->open_mutex);
 		}
 	}
@@ -572,20 +568,19 @@ static int apply_view(const struct gpt_apply *a)
 	mutex_unlock(&v->disk->open_mutex);
 	if (err)
 		goto fail;
-	/* This hides physical PARTNAME endpoints, NOT raw parent logical units.
-	 * It is not a storage firewall. Keep existing lower writable handles:
-	 * mapped writes bypass the physical partition's newly set RO policy. */
+	/* Hide physical PARTNAME endpoints, not raw parent logical units. Hidden
+	 * partitions remain writable because a projected DM/LVM backend can resolve
+	 * through one of them; BD_READ_ONLY would reject projected writes too. This
+	 * is namespace isolation, not a storage firewall. */
 	for (i = 0; i < v->hide_count; i++) {
 		struct hidden_part *h = &v->hidden[i];
 		mutex_lock(&h->bdev->bd_disk->open_mutex);
-		h->ro = bdev_test_flag(h->bdev, BD_READ_ONLY);
 		if (h->bdev->bd_meta_info) {
 			memcpy(h->volname, h->bdev->bd_meta_info->volname,
 			       sizeof(h->volname));
 			memset(h->bdev->bd_meta_info->volname, 0,
 			       sizeof(h->volname));
 		}
-		bdev_set_flag(h->bdev, BD_READ_ONLY);
 		h->changed = true;
 		mutex_unlock(&h->bdev->bd_disk->open_mutex);
 	}

@@ -4,6 +4,7 @@ espinit-objs += feature/kernel_umount.o
 espinit-objs += feature/selinux_hide.o
 
 espinit-objs += hook/lsm_hook.o
+espinit-objs += hook/selinux_policy_hook.o
 espinit-objs += hook/setuid_hook.o
 espinit-objs += hook/syscall_event_bridge.o
 espinit-objs += hook/syscall_hook_manager.o

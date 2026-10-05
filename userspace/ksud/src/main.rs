@@ -46,11 +46,27 @@ mod utils;
 #[allow(nonstandard_style, unused, unsafe_op_in_unsafe_fn)]
 mod ksu_uapi;
 
+#[cfg(target_os = "android")]
+fn report_fatal(error: &anyhow::Error) {
+    use std::io::Write;
+
+    if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+        let _ = writeln!(kmsg, "<3>espinitd fatal: {error:#}");
+    }
+    if utils::getprop("ro.boot.init_fatal_panic").is_some_and(|value| value == "true") {
+        let _ = std::fs::write("/proc/sysrq-trigger", b"c");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let _ = espinit_platform::generation::generation();
     #[cfg(target_os = "android")]
     {
-        cli::run()
+        let result = cli::run();
+        if let Err(error) = &result {
+            report_fatal(error);
+        }
+        result
     }
     #[cfg(not(target_os = "android"))]
     {

@@ -12,6 +12,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/lsm_hook.h"
+#include "hook/selinux_policy_hook.h"
 #include "runtime/ksud.h"
 #include "runtime/ksud_boot.h"
 #include "selinux/selinux.h"
@@ -71,6 +72,7 @@ module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
 int __init espinit_init(void)
 {
+    int error;
 #if defined(__x86_64__) && !defined(CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
@@ -116,6 +118,11 @@ int __init espinit_init(void)
     }
 
     ksu_init_symbol_resolver();
+    error = ksu_selinux_policy_hook_init();
+    if (error) {
+        put_cred(ksu_cred);
+        return error;
+    }
     ksu_syscall_hook_init();
 
     ksu_feature_init();
@@ -141,6 +148,7 @@ int __init espinit_init(void)
 void __exit espinit_exit(void)
 {
     // Phase 1: Stop all hooks first to prevent new callbacks
+    ksu_selinux_policy_hook_exit();
     ksu_syscall_hook_manager_exit();
 
     ksu_supercalls_exit();

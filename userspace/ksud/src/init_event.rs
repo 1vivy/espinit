@@ -43,9 +43,7 @@ pub fn on_stage(stage: Stage) -> Result<()> {
             // reboot_on_failure service, never become a warning and continue.
             ksucalls::ensure_uapi_version_matched()?;
             anyhow::ensure!(
-                std::fs::read_to_string("/sys/module/espinit/parameters/platform_boot_mode")?
-                    .trim()
-                    == "1",
+                ksucalls::get_info().boot_mode == 1,
                 "early platform stage requires PID1's Android boot selection"
             );
             let root = espinit_platform::open_root(Path::new(espinit_platform::ROOT))?;
@@ -70,6 +68,7 @@ pub fn on_stage(stage: Stage) -> Result<()> {
                     espinit_platform::generation::generation(),
                 )?;
                 let status = std::process::Command::new(helper)
+                    .env("ESPINIT_PLATFORM_BOOT_MODE", "1")
                     .status()
                     .context("start tiny-espsu")?;
                 anyhow::ensure!(status.success(), "tiny-espsu failed: {status}");

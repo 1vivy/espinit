@@ -292,18 +292,18 @@ fn executable(data: &[u8], machine: Option<u16>, static_only: bool) -> Result<u1
     if static_only {
         ensure!(
             elf.interpreter.is_none() && elf.libraries.is_empty(),
-            "PID-1/interpreter must be statically linked"
+            "early executable must be statically linked"
         );
     }
     Ok(elf.header.e_machine)
 }
 
-fn check_binary(path: &Path, generation: &str, machine: u16) -> Result<()> {
+fn check_binary(path: &Path, generation: &str, machine: u16, static_only: bool) -> Result<()> {
     platform::check_artifact(&mut input_file(path)?, generation)?;
     executable(
         &read_bounded(input_file(path)?, MAX_BINARY)?,
         Some(machine),
-        false,
+        static_only,
     )?;
     Ok(())
 }
@@ -427,7 +427,12 @@ fn validate_payload(
         rom_path,
         BootMode::Recovery,
     )?;
-    check_binary(&payload.join("bin/espinitd"), &manifest.generation, machine)?;
+    check_binary(
+        &payload.join("bin/espinitd"),
+        &manifest.generation,
+        machine,
+        false,
+    )?;
     let busybox = read_bounded(platform::open_file(&root, "bin/busybox")?, MAX_BINARY)?;
     executable(&busybox, Some(machine), true)?;
     for path in ["bin/espinitd", "bin/busybox"] {
@@ -451,7 +456,7 @@ fn validate_payload(
             let file = platform::open_file(&root, &path)?;
             ensure!(file.metadata()?.len() > 0, "empty package source: {path}");
             if entry.kind == platform::Kind::Binary {
-                check_binary(&payload.join(path), &manifest.generation, machine)?;
+                check_binary(&payload.join(path), &manifest.generation, machine, false)?;
             }
         }
     }
@@ -465,7 +470,12 @@ fn validate_payload(
     }) {
         let bytes = read_bounded(platform::open_file(&root, path)?, MAX_BINARY)?;
         if bytes.starts_with(b"\x7fELF") {
-            check_binary(&payload.join(path), &manifest.generation, machine)?;
+            check_binary(
+                &payload.join(path),
+                &manifest.generation,
+                machine,
+                path == "bin/thin-activate",
+            )?;
         }
     }
     // A complete copied ROM directory must not hide a stale generation.
