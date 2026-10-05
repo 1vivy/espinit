@@ -208,6 +208,13 @@ class PhoneModuleCompatibility(unittest.TestCase):
         with self.assertRaisesRegex(compat.CompatibilityError, "modules_prepare is insufficient"):
             _ = compat.check_config(self.source, self.output, self.target)
 
+    def test_host_link_probes_do_not_change_kernel_or_module_abi(self) -> None:
+        target = CONFIG + "CONFIG_CC_CAN_LINK=y\nCONFIG_CC_CAN_LINK_STATIC=y\n"
+        _ = self.target.write_text(target)
+        checked = compat.check_config(self.source, self.output, self.target)
+        self.assertNotIn("CONFIG_CC_CAN_LINK", checked)
+        self.assertNotIn("CONFIG_CC_CAN_LINK_STATIC", checked)
+
     def test_receipt_binds_packaged_bytes_and_exact_kernel_inputs(self) -> None:
         _ = self.module.write_bytes(module_file())
         with self.assertRaisesRegex(compat.CompatibilityError, "provenance: missing"):
