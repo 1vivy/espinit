@@ -25,7 +25,7 @@ a boot that actually reaches the named stage before it can be read as a timing.
 - The SELinux domain/type are `espinit`/`espinit_file` (`u:r:espinit:s0`, `u:object_r:espinit_file:s0`); `espinitd` keeps `espinit_file` on its own binary. Staged package inodes start as `metadata_file`; tiny-espsu applies the dedicated HAL and bdsvars labels before use. Public module, ioctl/install magic, anonymous-inode, and socket identities are distinct from KernelSU: the anonymous inodes are `[espinit]` and `[espinit_fdwrapper]`, and the info surface reports only the LKM flag. Private `ksu_` implementation prefixes remain internal, not compatibility interfaces.
 - `gpt.ko` is a later, separate ESP module, never another name for the core module.
 
-A real KernelSU installation must not be detected as an espinit module, satisfy an espinit self-check, or share espinit state/control endpoints. SELinux policy installation does not depend on retaining syscall-table ownership: PID 1's successful policy load arms a post-exec kretprobe, and rules are published only after the second-stage exec has completed competing pre-exec hooks. The inherited exec hook remains a fallback, and rule publication is idempotent. Other simultaneous hook ownership still requires integration testing; this is not a general coexistence promise.
+A real KernelSU installation must not be detected as an espinit module, satisfy an espinit self-check, or share espinit state/control endpoints. SELinux policy installation does not depend on retaining syscall-table ownership: PID 1's successful policy load arms an explicit post-exec state machine, and rules are published only after the second-stage exec has completed competing pre-exec hooks. Policy construction returns errors, publication is transactional and idempotent, and a failed post-exec application rearms rather than consuming its trigger. The inherited exec hook remains a fallback. Other simultaneous hook ownership still requires integration testing; this is not a general coexistence promise.
 
 ### Non-goals
 
@@ -416,9 +416,17 @@ are documented in [the port](payloads/boot-hal/README.md).
 tiny-espsu accepts **no arguments** and only labels the held HAL source inode
 and actual projected bdsvars block inode, then binds the HAL over the fixed
 vendor executable. It refuses non-root, wrong namespace, missing properties,
-unmatched generation, non-projected bdsvars or symlinked package paths. It has
-no shell/su/manager/profile/app API or arbitrary policy/execute/bind interface.
-Core's built-in policy creates only `gblbds_hal_exec` and
+unmatched generation, non-projected bdsvars or symlinked package paths. Before
+changing labels or mounts it directly queries the kernel boot mode through the
+single control descriptor espinitd duplicates for this child; an environment
+variable is not boot-mode authority. It has no shell/su/manager/profile/app API
+or arbitrary policy/execute/bind interface.
+
+Core policy publication is a separate clone/mutate/publish transaction. The
+espinit daemon identity receives only the init-to-daemon file and process
+transition rules needed to enter its dedicated permissive domain; inherited
+KernelSU all-domain, binder, ioctl, memfd, networking and root-product grants
+are not installed. Boot integration creates `gblbds_hal_exec` and
 `gblbds_bdsvars_block_device` without broad attributes, the init/bootctl file
 allows, bootctl block permissions and init type transition. Integration adds
 `blk_file lock` for preserved flock transactions, `filesystem associate` for the

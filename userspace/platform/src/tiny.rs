@@ -50,8 +50,7 @@ pub fn run() -> Result<()> {
     ensure!(selected.len() <= 59, "ROM ID exceeds 59 bytes");
     crate::identifier(&selected)?;
     ensure!(
-        std::env::var_os("ESPINIT_PLATFORM_BOOT_MODE").as_deref()
-            == Some(std::ffi::OsStr::new("1")),
+        crate::core::query_inherited_core_info()?.boot_mode == 1,
         "normal HAL requires PID1's Android boot selection"
     );
     ensure!(

@@ -248,7 +248,13 @@ fn snapshot(
     Ok(())
 }
 
-fn executable(data: &[u8], machine: Option<u16>, static_only: bool) -> Result<u16> {
+#[derive(Clone, Copy)]
+enum Linkage {
+    DynamicAllowed,
+    StaticRequired,
+}
+
+fn executable(data: &[u8], machine: Option<u16>, linkage: Linkage) -> Result<u16> {
     let elf = Elf::parse(data).context("executable ELF")?;
     ensure!(
         elf.is_64 && elf.little_endian && matches!(elf.header.e_machine, 62 | 183),
@@ -289,7 +295,7 @@ fn executable(data: &[u8], machine: Option<u16>, static_only: bool) -> Result<u1
             "payload architecture mismatch"
         );
     }
-    if static_only {
+    if matches!(linkage, Linkage::StaticRequired) {
         ensure!(
             elf.interpreter.is_none() && elf.libraries.is_empty(),
             "early executable must be statically linked"
@@ -298,12 +304,12 @@ fn executable(data: &[u8], machine: Option<u16>, static_only: bool) -> Result<u1
     Ok(elf.header.e_machine)
 }
 
-fn check_binary(path: &Path, generation: &str, machine: u16, static_only: bool) -> Result<()> {
+fn check_binary(path: &Path, generation: &str, machine: u16, linkage: Linkage) -> Result<()> {
     platform::check_artifact(&mut input_file(path)?, generation)?;
     executable(
         &read_bounded(input_file(path)?, MAX_BINARY)?,
         Some(machine),
-        static_only,
+        linkage,
     )?;
     Ok(())
 }
@@ -431,10 +437,10 @@ fn validate_payload(
         &payload.join("bin/espinitd"),
         &manifest.generation,
         machine,
-        false,
+        Linkage::DynamicAllowed,
     )?;
     let busybox = read_bounded(platform::open_file(&root, "bin/busybox")?, MAX_BINARY)?;
-    executable(&busybox, Some(machine), true)?;
+    executable(&busybox, Some(machine), Linkage::StaticRequired)?;
     for path in ["bin/espinitd", "bin/busybox"] {
         ensure!(
             files.get(path).is_some_and(|file| file.mode == 0o755),
@@ -456,7 +462,12 @@ fn validate_payload(
             let file = platform::open_file(&root, &path)?;
             ensure!(file.metadata()?.len() > 0, "empty package source: {path}");
             if entry.kind == platform::Kind::Binary {
-                check_binary(&payload.join(path), &manifest.generation, machine, false)?;
+                check_binary(
+                    &payload.join(path),
+                    &manifest.generation,
+                    machine,
+                    Linkage::DynamicAllowed,
+                )?;
             }
         }
     }
@@ -474,7 +485,11 @@ fn validate_payload(
                 &payload.join(path),
                 &manifest.generation,
                 machine,
-                path == "bin/thin-activate",
+                if path == "bin/thin-activate" {
+                    Linkage::StaticRequired
+                } else {
+                    Linkage::DynamicAllowed
+                },
             )?;
         }
     }
@@ -655,7 +670,8 @@ fn stock_init(source: &[u8], machine: u16) -> Result<Vec<u8>> {
         .and_then(CpioEntry::data)
         .context("stock ramdisk /init is absent or empty")?
         .to_vec();
-    let _ = executable(&init, Some(machine), false).context("stock ramdisk /init")?;
+    let _ =
+        executable(&init, Some(machine), Linkage::DynamicAllowed).context("stock ramdisk /init")?;
     Ok(init)
 }
 
@@ -901,7 +917,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
     reserve_name(&payload, "receipts")?;
     let (manifest, rom, rom_path) = configs(&payload, &args.rom)?;
     let binary = read_bounded(input_file(&args.espinit)?, MAX_BINARY)?;
-    let machine = executable(&binary, None, true)?;
+    let machine = executable(&binary, None, Linkage::StaticRequired)?;
     // Validate exactly the captured bytes, not a reopened mutable source.
     make_dir(&payload.join("bin"))?;
     reserve_name(&payload.join("bin"), "espinit")?;

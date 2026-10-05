@@ -9,27 +9,44 @@
 #include "selinux/selinux.h"
 #include "hook/selinux_policy_hook.h"
 
+enum policy_hook_state {
+    POLICY_WAITING_LOAD,
+    POLICY_ARMED,
+    POLICY_APPLYING,
+    POLICY_APPLIED,
+};
+
+static atomic_t policy_state = ATOMIC_INIT(POLICY_WAITING_LOAD);
+
 static void apply_rules_work(struct work_struct *work)
 {
-    apply_espinit_rules();
+    int error = apply_espinit_rules();
+
+    if (error) {
+        pr_err("post-exec SELinux rule application failed: %d\n", error);
+        atomic_set(&policy_state, POLICY_ARMED);
+    } else {
+        atomic_set(&policy_state, POLICY_APPLIED);
+    }
 }
 
 static DECLARE_WORK(rules_work, apply_rules_work);
-static atomic_t policy_loaded = ATOMIC_INIT(0);
 
 static int policy_load_return(struct kretprobe_instance *instance,
                               struct pt_regs *regs)
 {
     if (current->pid == 1 && regs_return_value(regs) > 0)
-        atomic_set(&policy_loaded, 1);
+        atomic_cmpxchg(&policy_state, POLICY_WAITING_LOAD, POLICY_ARMED);
     return 0;
 }
 
 static int exec_return(struct kretprobe_instance *instance, struct pt_regs *regs)
 {
     if (current->pid == 1 && regs_return_value(regs) == 0 &&
-        atomic_cmpxchg(&policy_loaded, 1, 0) == 1)
-        schedule_work(&rules_work);
+        atomic_cmpxchg(&policy_state, POLICY_ARMED, POLICY_APPLYING) ==
+            POLICY_ARMED &&
+        !schedule_work(&rules_work))
+        atomic_set(&policy_state, POLICY_ARMED);
     return 0;
 }
 

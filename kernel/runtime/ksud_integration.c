@@ -202,7 +202,10 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
         if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
             pr_info("/system/bin/init second_stage executed\n");
             ksu_selinux_hide_handle_second_stage();
-            apply_espinit_rules();
+            if (apply_espinit_rules()) {
+                pr_err("failed to apply espinit SELinux rules before second stage\n");
+                return;
+            }
             cache_sid();
             setup_ksu_cred();
             init_second_stage_executed = true;
