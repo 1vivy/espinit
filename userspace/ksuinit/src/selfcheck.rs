@@ -1,6 +1,6 @@
 //! Payload self-checks.
 //!
-//! The core module is checked through the espinit control interface (UAPI v2):
+//! The core module is checked through the espinit control interface (UAPI v3):
 //! ABI compatibility, exact generation equality, and completed initialization.
 //! Every later module self-reports through its read-only sysfs parameters
 //! `generation` and `ready`, so a successful load alone is never treated as
@@ -13,7 +13,7 @@ use crate::config::PartitionModes;
 use crate::loader;
 use crate::receipt::{Failure, Stage};
 
-/// Verify the core module through the v2 control interface.
+/// Verify the core module through the v3 control interface.
 ///
 /// The readiness bit is derived from the kernel's own module state, so it is
 /// already set once `finit_module`/`init_module` returns success: a single

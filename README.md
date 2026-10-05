@@ -227,13 +227,13 @@ thin IDs, accept arguments, or guess another PV/VG.
 
 The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; `ESPINIT_GENERATION` selects it explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
 
-Before loading dependent modules, PID 1 queries the espinit-specific UAPI v2 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose matching `generation` and `ready` parameters before the next entry proceeds. For `gpt`, generation is checked before APPLY can publish or hide anything; readiness is checked afterwards in the projection failure stage and diagnostics include the validated requested partition/mode counts.
+Before loading dependent modules, PID 1 queries the espinit-specific UAPI v3 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose matching `generation` and `ready` parameters before the next entry proceeds. For `gpt`, generation is checked before APPLY can publish or hide anything; readiness is checked afterwards in the projection failure stage and diagnostics include the validated requested partition/mode counts.
 
-After core validation PID1 writes its stable boot classification to the core's
-PID1-only, write-once `/sys/module/espinit/parameters/platform_boot_mode` parameter
-(`1` Android, `2` recovery/fastbootd), then requires matching readback. Unset or
-recovery mode selects zero built-in/custom init RC bytes. This is a fixed boot
-handshake, not an app-facing control or a property-based fallback.
+After core validation PID1 sets its stable boot classification through the
+PID1-only, write-once control ioctl (`1` Android, `2` recovery/fastbootd), then
+requires matching readback from get-info. Unset or recovery mode selects zero
+built-in/custom init RC bytes. This is a fixed boot handshake, not an
+app-facing control or a property-based fallback.
 
 ## Boot ordering and hard-failure receipt
 
