@@ -13,10 +13,12 @@
 //! fallback and no stock-ROM fallback.
 //!
 //! The lab-only `androidboot.espinit.probe=<stage>` opt-in marks one boundary of
-//! this order: espinit reads it once from the boot configuration, and a boot that
-//! reaches the named checkpoint sets a 30-second panic delay and requests the same
-//! sysrq crash instead of continuing, so the reset timing names the stage. Normal
-//! boots never carry the key and are unchanged.
+//! this order. Because bootconfig is only reachable through procfs, the minimal
+//! setup mounts `/proc` first, then reads and parses the probe once, then mounts
+//! `/sys` and `/dev` and creates the device nodes. A boot that reaches the named
+//! checkpoint sets a 30-second panic delay and requests the same sysrq crash
+//! instead of continuing, so the reset timing names the stage. Normal boots never
+//! carry the key and are unchanged.
 
 use std::fs;
 use std::io::Write;
@@ -46,16 +48,12 @@ pub const BINARY_GENERATION: &str = env!("ESPINIT_GENERATION");
 pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     setup_kmsg();
     log::info!("espinit early managed boot starting");
-    let mounts = mount_minimal()?;
-    unlimit_kmsg();
+    let (mounts, bootconfig, probe) = mount_minimal()?;
     // Opt-in Qualcomm APSS minidump transport: load its vendor module closure
     // before the ESP is mounted, because a boot that dies this early can only
     // leave evidence through a sink the firmware already owns. Normal boots
     // skip this entirely.
-    let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    let probe = ProbeStage::parse(&bootconfig)?;
-    checkpoint(probe, ProbeStage::MinimalMounted);
     if apss_minidump_requested(&bootconfig, &cmdline) {
         loader::preload_apss_minidump()?;
     }
@@ -453,39 +451,84 @@ fn apply_projection(rom: &RomConfig, esp_device: (u32, u32)) -> Result<(), Failu
     gptctl::project(&rom.partitions, rom.resolved_backends(), &hide)
 }
 
-/// Prepare the minimum early mounts, retaining only the mounts created here.
-fn mount_minimal() -> Result<Vec<&'static str>, Failure> {
-    let mut owned = Vec::with_capacity(3);
+/// Prepare the minimum early mounts, read the probe once, and retain only the
+/// mounts created here.
+///
+/// `/proc` has to be mounted before the boot configuration can be read at all, so
+/// it is ensured first and the probe is parsed from the procfs the same call
+/// mounted. The returned boot configuration is that single read, reused for the
+/// APSS opt-in instead of reading the file twice.
+fn mount_minimal() -> Result<(Vec<&'static str>, String, Option<ProbeStage>), Failure> {
+    mount_minimal_with(
+        || fs::read_to_string("/proc/bootconfig").unwrap_or_default(),
+        ensure_minimal_mount,
+        || {
+            create_minimal_nodes()?;
+            unlimit_kmsg();
+            Ok(())
+        },
+        checkpoint,
+    )
+}
 
-    for (filesystem, mountpoint, error) in [
-        ("proc", "/proc", "ProcMountFailed"),
-        ("sysfs", "/sys", "SysMountFailed"),
+/// Keep mount/probe ordering shared by production and side-effect-free tests.
+fn mount_minimal_with(
+    read_bootconfig: impl FnOnce() -> String,
+    mut ensure_mount: impl FnMut(&'static str) -> Result<bool, Failure>,
+    finish_minimal: impl FnOnce() -> Result<(), Failure>,
+    mut reached: impl FnMut(Option<ProbeStage>, ProbeStage),
+) -> Result<(Vec<&'static str>, String, Option<ProbeStage>), Failure> {
+    let mut owned = Vec::with_capacity(3);
+    if ensure_mount("/proc")? {
+        owned.push("/proc");
+    }
+    let bootconfig = read_bootconfig();
+    let probe = ProbeStage::parse(&bootconfig)?;
+    reached(probe, ProbeStage::ProcMounted);
+    for (mountpoint, stage) in [
+        ("/sys", ProbeStage::SysMounted),
+        ("/dev", ProbeStage::DevMounted),
     ] {
-        if !esp::is_mounted(mountpoint)
-            .map_err(|detail| Failure::new(Stage::Storage, error, detail))?
-        {
-            esp::mount_kernel_fs(filesystem, mountpoint)
-                .map_err(|detail| Failure::new(Stage::Storage, error, detail))?;
+        if ensure_mount(mountpoint)? {
             owned.push(mountpoint);
         }
+        reached(probe, stage);
     }
+    finish_minimal()?;
+    reached(probe, ProbeStage::MinimalMounted);
+    Ok((owned, bootconfig, probe))
+}
 
-    if !esp::is_mounted("/dev")
-        .map_err(|detail| Failure::new(Stage::Storage, "DevMountFailed", detail))?
-    {
-        if let Err(devtmpfs_error) = esp::mount_kernel_fs("devtmpfs", "/dev") {
-            esp::mount_kernel_fs("tmpfs", "/dev").map_err(|tmpfs_error| {
-                Failure::new(
-                    Stage::Storage,
-                    "DevMountFailed",
-                    format!("cannot mount devtmpfs ({devtmpfs_error}) or tmpfs ({tmpfs_error})"),
-                )
-            })?;
-            log::warn!("devtmpfs is unavailable; using an empty tmpfs and explicit device nodes");
+/// Return whether espinit created this mount; existing mounts stay unowned.
+fn ensure_minimal_mount(mountpoint: &'static str) -> Result<bool, Failure> {
+    let (filesystem, error) = match mountpoint {
+        "/proc" => ("proc", "ProcMountFailed"),
+        "/sys" => ("sysfs", "SysMountFailed"),
+        "/dev" => ("devtmpfs", "DevMountFailed"),
+        _ => unreachable!("only the three minimal mounts are requested"),
+    };
+    if esp::is_mounted(mountpoint).map_err(|detail| Failure::new(Stage::Storage, error, detail))? {
+        return Ok(false);
+    }
+    if let Err(detail) = esp::mount_kernel_fs(filesystem, mountpoint) {
+        if mountpoint != "/dev" {
+            return Err(Failure::new(Stage::Storage, error, detail));
         }
-        owned.push("/dev");
+        esp::mount_kernel_fs("tmpfs", "/dev").map_err(|tmpfs_error| {
+            Failure::new(
+                Stage::Storage,
+                error,
+                format!("cannot mount devtmpfs ({detail}) or tmpfs ({tmpfs_error})"),
+            )
+        })?;
+        log::warn!("devtmpfs is unavailable; using an empty tmpfs and explicit device nodes");
     }
+    Ok(true)
+}
 
+/// Create the two device nodes the minimal mounts must carry; an existing node
+/// is left exactly as found.
+fn create_minimal_nodes() -> Result<(), Failure> {
     for (path, major, minor) in [("/dev/kmsg", 1, 11), ("/dev/null", 1, 3)] {
         if rustix::fs::access(path, rustix::fs::Access::EXISTS).is_ok() {
             continue;
@@ -506,7 +549,7 @@ fn mount_minimal() -> Result<Vec<&'static str>, Failure> {
         })?;
     }
 
-    Ok(owned)
+    Ok(())
 }
 
 /// Remove espinit's own early mounts immediately before the real init runs, so
@@ -577,16 +620,23 @@ const PANIC_TIMEOUT: &str = "/proc/sys/kernel/panic";
 /// profile).
 const PROBE_PANIC_DELAY: &[u8] = b"30";
 
-/// Fixed, bootconfig-only lab checkpoints; parsed once after mounting proc.
+/// Fixed, bootconfig-only lab checkpoints in boot order; parsed once after proc
+/// is mounted and before sysfs/dev are mounted.
 ///
 /// A checkpoint is opted in by the exact `androidboot.espinit.probe=<stage>` pair,
 /// read from the boot configuration only (there is no kernel-command-line or
 /// vendor spelling). One exact stage name selects one checkpoint; an absent or
 /// empty value disables the probe, and an unknown, malformed or duplicated
 /// nonempty value is a bounded [`Failure`] rather than a silent skip, matching how
-/// the selected-ROM key treats the same ambiguity.
+/// the selected-ROM key treats the same ambiguity. The first three names are the
+/// minimal-setup boundaries `proc-mounted`, `sys-mounted` and `dev-mounted`;
+/// `minimal-mounted` stays the boundary of the whole minimal setup, after every
+/// mount and device node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProbeStage {
+    ProcMounted,
+    SysMounted,
+    DevMounted,
     MinimalMounted,
     ApssLoaded,
     EspRetained,
@@ -610,6 +660,9 @@ impl ProbeStage {
         }
         match value {
             None | Some("") => Ok(None),
+            Some("proc-mounted") => Ok(Some(Self::ProcMounted)),
+            Some("sys-mounted") => Ok(Some(Self::SysMounted)),
+            Some("dev-mounted") => Ok(Some(Self::DevMounted)),
             Some("minimal-mounted") => Ok(Some(Self::MinimalMounted)),
             Some("apss-loaded") => Ok(Some(Self::ApssLoaded)),
             Some("esp-retained") => Ok(Some(Self::EspRetained)),
@@ -1096,6 +1149,9 @@ mod tests {
     #[test]
     fn the_probe_accepts_every_exact_checkpoint() {
         for (value, expected) in [
+            ("proc-mounted", ProbeStage::ProcMounted),
+            ("sys-mounted", ProbeStage::SysMounted),
+            ("dev-mounted", ProbeStage::DevMounted),
             ("minimal-mounted", ProbeStage::MinimalMounted),
             ("apss-loaded", ProbeStage::ApssLoaded),
             ("esp-retained", ProbeStage::EspRetained),
@@ -1121,6 +1177,109 @@ mod tests {
                 "a quoted {value} still names the checkpoint"
             );
         }
+    }
+
+    #[test]
+    fn the_minimal_setup_mounts_proc_before_it_reads_the_probe_and_names_each_stage() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let (owned, bootconfig, probe) = mount_minimal_with(
+            || {
+                events.borrow_mut().push(String::from("read-bootconfig"));
+                format!("{PROBE_KEY}=dev-mounted\n")
+            },
+            |mountpoint| {
+                events.borrow_mut().push(format!("mount {mountpoint}"));
+                Ok(true)
+            },
+            || {
+                events
+                    .borrow_mut()
+                    .push(String::from("create /dev/kmsg and /dev/null"));
+                Ok(())
+            },
+            |_, stage| events.borrow_mut().push(format!("checkpoint {stage:?}")),
+        )
+        .expect("the minimal setup succeeds");
+
+        assert_eq!(owned, ["/proc", "/sys", "/dev"]);
+        assert_eq!(bootconfig, format!("{PROBE_KEY}=dev-mounted\n"));
+        assert_eq!(probe, Some(ProbeStage::DevMounted));
+        assert_eq!(
+            *events.borrow(),
+            [
+                "mount /proc",
+                "read-bootconfig",
+                "checkpoint ProcMounted",
+                "mount /sys",
+                "checkpoint SysMounted",
+                "mount /dev",
+                "checkpoint DevMounted",
+                "create /dev/kmsg and /dev/null",
+                "checkpoint MinimalMounted",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_mount_is_not_owned_and_does_not_skip_the_probe() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let (owned, _, probe) = mount_minimal_with(
+            String::new,
+            |mountpoint| {
+                events.borrow_mut().push(format!("mount {mountpoint}"));
+                Ok(mountpoint == "/dev")
+            },
+            || Ok(()),
+            |_, _| {},
+        )
+        .expect("the minimal setup succeeds");
+
+        assert_eq!(owned, ["/dev"]);
+        assert_eq!(probe, None);
+        assert_eq!(
+            *events.borrow(),
+            ["mount /proc", "mount /sys", "mount /dev"]
+        );
+    }
+
+    #[test]
+    fn a_failed_proc_mount_stops_before_the_probe_is_read() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let failure = mount_minimal_with(
+            || {
+                events.borrow_mut().push(String::from("read-bootconfig"));
+                String::new()
+            },
+            |mountpoint| {
+                events.borrow_mut().push(format!("mount {mountpoint}"));
+                Err(Failure::new(Stage::Storage, "ProcMountFailed", "no proc"))
+            },
+            || Ok(()),
+            |_, _| events.borrow_mut().push(String::from("checkpoint")),
+        )
+        .expect_err("a failed proc mount stops the minimal setup");
+
+        assert_eq!(failure.error, "ProcMountFailed");
+        assert_eq!(*events.borrow(), ["mount /proc"]);
+    }
+
+    #[test]
+    fn an_invalid_probe_fails_after_proc_and_before_sysfs() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let failure = mount_minimal_with(
+            || format!("{PROBE_KEY}=not-a-stage"),
+            |mountpoint| {
+                events.borrow_mut().push(format!("mount {mountpoint}"));
+                Ok(true)
+            },
+            || Ok(()),
+            |_, _| events.borrow_mut().push(String::from("checkpoint")),
+        )
+        .expect_err("an invalid probe value is a bounded failure");
+
+        assert_eq!(failure.stage, Stage::Configuration);
+        assert_eq!(failure.error, "InvalidProbeStage");
+        assert_eq!(*events.borrow(), ["mount /proc"]);
     }
 
     #[test]
