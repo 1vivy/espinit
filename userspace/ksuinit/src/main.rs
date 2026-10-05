@@ -15,14 +15,14 @@ use espinit::{handoff, init, receipt};
 /// error. Both fatal paths record the receipt and then run the same stop, which
 /// honors the exact `androidboot.init_fatal_panic=true` opt-in by requesting a
 /// kernel panic before falling back to the reboot. On success `/init` is
-/// executed with the proven `["/init", "first_stage"]` vector and the original
-/// environment, preserving PID 1.
+/// executed with `argv[0]` rewritten from the rdinit path to `/init`, while the
+/// remaining arguments and `envp` are preserved with PID 1.
 ///
 /// # Safety
 /// Called by the kernel as the process entry point.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8, envp: *const *const u8) -> i32 {
+pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
     if !rustix::process::getpid().is_init() {
         // Not the boot init: report the usage error and return instead of
         // rebooting the machine or parking the caller. Kernel logging is not
@@ -40,7 +40,7 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8, envp: *const 
         init::fatal_boot(|| receipt::record(&mut state, &failure));
     }
 
-    if let Err(failure) = unsafe { handoff::exec_real_init(envp) } {
+    if let Err(failure) = unsafe { handoff::exec_real_init(argc, argv, envp) } {
         init::fatal_boot(|| receipt::record(&mut state, &failure));
     }
 
