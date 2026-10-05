@@ -181,6 +181,14 @@ def config_values(path: PathInput) -> Config:
     require(values, f"config: no configuration in {path}")
     return values
 
+# Kconfig computes these by linking a tiny hosted C program. Android's hermetic
+# kernel build supplies a userspace sysroot, while an otherwise identical
+# standalone module build does not need one. They describe the build
+# environment, not kernel code or module ABI, so they are excluded from the
+# captured target/config equivalence check. The output still has to agree with
+# its own generated auto.conf and autoconf.h below.
+HOST_LINK_PROBES = frozenset({"CONFIG_CC_CAN_LINK", "CONFIG_CC_CAN_LINK_STATIC"})
+
 
 def check_config(source: PathInput | None, output: PathInput | None, target: PathInput | None, stable: str = "1") -> Config:
     if source is None or output is None or target is None or not all(str(path) for path in (source, output, target)):
@@ -194,7 +202,11 @@ def check_config(source: PathInput | None, output: PathInput | None, target: Pat
     for key in ("CONFIG_MODVERSIONS", "CONFIG_GENDWARFKSYMS", "CONFIG_MODULES", "CONFIG_ARM64"):
         if expected.get(key) == "y":
             require(actual.get(key) == "y", f"config: required {key}=y")
-    different = sorted(key for key in expected.keys() | actual.keys() if expected.get(key, "n") != actual.get(key, "n"))
+    different = sorted(
+        key
+        for key in (expected.keys() | actual.keys()) - HOST_LINK_PROBES
+        if expected.get(key, "n") != actual.get(key, "n")
+    )
     require(not different, "config: output differs from target: " + ", ".join(different[:12]))
     require(actual.get("CONFIG_MODULES") == "y", "config: CONFIG_MODULES=y required")
     auto = config_values(output / "include/config/auto.conf")
