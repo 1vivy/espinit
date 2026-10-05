@@ -64,9 +64,6 @@ static bool ready;
 #ifndef ESPINIT_GENERATION
 #error "ESPINIT_GENERATION must be defined by modules/gpt/Makefile"
 #endif
-#ifndef CONFIG_MODVERSIONS
-asm(".section \"__versions\",\"a\"\n\t.previous");
-#endif
 static char generation[] = ESPINIT_GENERATION;
 static_assert(sizeof(generation) >= 2);
 static_assert(sizeof(generation) <= 64);

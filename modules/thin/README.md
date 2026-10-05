@@ -52,33 +52,35 @@ init order and every failure-unwind branch are unchanged.
 
 Prerequisites:
 
-- a kernel tree configured for the target device, with a populated build output
-  directory (`make defconfig`, then `make modules_prepare`). The phone kernel
-  uses `CONFIG_MODVERSIONS=y`, `CONFIG_GENDWARFKSYMS=y` and
-  `CONFIG_TRIM_UNUSED_KSYMS=y`.
+- the exact target source, complete build output (`vmlinux`, `Module.symvers`,
+  generated headers), and an independently captured full phone config.
+  `modules_prepare` alone is insufficient. The phone uses `CONFIG_MODVERSIONS=y`,
+  `CONFIG_GENDWARFKSYMS=y` and `CONFIG_TRIM_UNUSED_KSYMS=y`.
 - a clang/LLVM toolchain matching that kernel (`LLVM=1` is always used).
 
 ```sh
-KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out modules/thin/build.sh
+KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out \
+    KERNEL_CONFIG=/path/to/captured-phone.config modules/thin/build.sh
 ```
 
 or directly:
 
 ```sh
 make -C modules/thin KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out \
-	[JOBS=1..13] [ARCH=arm64]
+    KERNEL_CONFIG=/path/to/captured-phone.config [JOBS=1..13]
 ```
 
-- `KERNEL_SRC` and `KERNEL_OUT` are required; the module is always built out of
-  tree and never inside the kernel sources.
-- `JOBS` defaults to 13 and is capped at 13.
-- `ARCH` defaults to the phone's `arm64`; the vendored sources are
-  architecture-independent.
-- `KBUILD_GENDWARFKSYMS_STABLE=1` is always passed so ACK kernels built with
-  `CONFIG_GENDWARFKSYMS` derive CRC-stable versions matching the released
-  module ABI; it is inert for kernels without that option.
-- Unresolved symbols are never tolerated: the build must pass modpost without
-  `KBUILD_MODPOST_WARN`.
+- All three modules use the [shared phone contract](../../README.md#build-notes).
+  `KERNEL_SRC`, `KERNEL_OUT` and `KERNEL_CONFIG` are required; mismatched full
+  configuration or stale generated configuration fails before compilation.
+- `JOBS` defaults to 13 and is capped at 13; phone builds use `ARCH=arm64`.
+- `KBUILD_GENDWARFKSYMS_STABLE=1` is always passed and old module objects are
+  cleaned first. Disabling MODVERSIONS or inserting empty versions is forbidden.
+- Unresolved symbols are never tolerated for thin: modpost must pass without
+  `KBUILD_MODPOST_WARN`. Real import CRCs including `module_layout`, export CRCs,
+  exact vermagic and target BTF settings are verified after build.
+- Keep the generated `thin.ko.compat.json` beside `thin.ko` when copying it to a
+  payload. The assembler checks the receipt and module again before packaging.
 
 ### Build generation
 

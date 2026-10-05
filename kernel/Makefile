@@ -1,5 +1,9 @@
+.DEFAULT_GOAL := all
+PHONE_MODULE := espinit
+
 KDIR := $(KDIR)
 MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+include ../scripts/phone-module.mk
 ODIR := $(MDIR)
 KMI := $(notdir $(patsubst %/,%,$(KDIR)))
 
@@ -17,9 +21,14 @@ $(info -- KBUILD_ARGS: $(KBUILD_ARGS))
 
 .PHONY: all compdb clean format check-format
 
+# KDIR remains the non-phone DDK lane; phone builds never infer a host kernel.
+ifneq ($(strip $(KERNEL_SRC)$(KERNEL_OUT)$(KERNEL_CONFIG)),)
+all: phone
+else
 all: check_symbol
-	$(MAKE) -C $(KDIR) $(KBUILD_ARGS) modules compile_commands.json -j$(shell nproc)
+	$(MAKE) -C $(KDIR) $(KBUILD_ARGS) KBUILD_GENDWARFKSYMS_STABLE=1 modules compile_commands.json -j$(shell nproc)
 	./check_symbol $(ODIR)/espinit.ko $(KDIR)/vmlinux
+endif
 
 compdb:
 	python3 $(MDIR)/.vscode/generate_compdb.py -O $(ODIR) $(MDIR)

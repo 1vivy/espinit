@@ -23,9 +23,6 @@
 #error "ESPINIT_GENERATION must be defined by modules/thin/Makefile"
 #endif
 
-#ifndef CONFIG_MODVERSIONS
-asm(".section \"__versions\",\"a\"\n\t.previous");
-#endif
 
 static char generation[] = ESPINIT_GENERATION;
 

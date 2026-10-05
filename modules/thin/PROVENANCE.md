@@ -158,15 +158,16 @@ Only the build and metadata surface changed; the vendored `.c`/`.h` files and
   load-time generation override, and exposes the two read-only parameters the
   espinit self-check reads: `generation` (the compiled build generation) and
   `ready` (`Y` only after all subsystems and both targets initialized, `N` again
-  as soon as unload teardown starts). For non-modversions target outputs it
-  emits an empty `__versions` section required by the checked kallsyms relocation
-  input format. The proven subsystem init order and every failure-unwind branch
-  are unchanged.
+  as soon as unload teardown starts). Empty `__versions` scaffolding has been
+  removed: phone builds require genuine import/export CRCs from the exact
+  MODVERSIONS-enabled target output and the shared compatibility verifier.
+  The proven subsystem init order and every failure-unwind branch are unchanged.
 - `Makefile` is new: it keeps the proven object list, include paths
   (`-I$(srctree)/drivers/md`, `-I$(src)/src`,
   `-I$(src)/src/persistent-data`, `-include $(src)/private-rename.h`), performs
   the build-time generation validation/injection, builds only out of tree from
-  caller-provided `KERNEL_SRC`/`KERNEL_OUT` with `JOBS` capped at 13, and carries
+  caller-provided `KERNEL_SRC`/`KERNEL_OUT` and independent `KERNEL_CONFIG`,
+  with `JOBS` capped at 13, and carries
   only warning-compatibility flags accepted or harmless across the pinned Clang
   versions.
 - `build.sh`, `README.md`, `PROVENANCE.md`, `LICENSE` and `evidence/` are new.

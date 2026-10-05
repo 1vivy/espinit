@@ -392,6 +392,16 @@ def assemble(arguments: argparse.Namespace) -> None:
         if not source.is_file() or source.stat().st_size == 0:
             raise ValueError(f"--{name.replace('_', '-')}: input must be a nonempty regular file")
 
+    # Use the same exact-kernel admission gate as every phone module recipe.
+    # Run before creating/replacing any payload image.
+    run([
+        sys.executable, REPOSITORY / "scripts/phone_modules.py", "verify",
+        "--kernel-src", arguments.kernel_src,
+        "--kernel-out", arguments.kernel_out,
+        "--kernel-config", arguments.kernel_config,
+        *(item for key, name in MODULES for item in (f"--{name}", sources[key])),
+    ])
+
     output = Path(arguments.output_dir).absolute()
     if output.is_symlink():
         raise ValueError("the output directory must not be a symbolic link")
@@ -443,6 +453,8 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in PATHS:
         parser.add_argument(f"--{name.replace('_', '-')}", required=True, metavar="FILE")
+    for name in ("kernel-src", "kernel-out", "kernel-config"):
+        parser.add_argument(f"--{name}", required=True, metavar="PATH")
     parser.add_argument("--metadata-filesystem", required=True, choices=("ext4", "f2fs"))
     parser.add_argument("--generation", required=True, metavar="ID")
     parser.add_argument("--rom-id", required=True, metavar="ID")
