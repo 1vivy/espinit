@@ -210,7 +210,11 @@ def check_config(source: PathInput | None, output: PathInput | None, target: Pat
     require(not different, "config: output differs from target: " + ", ".join(different[:12]))
     require(actual.get("CONFIG_MODULES") == "y", "config: CONFIG_MODULES=y required")
     auto = config_values(output / "include/config/auto.conf")
-    different = sorted(key for key in actual.keys() | auto.keys() if actual.get(key, "n") != auto.get(key, "n"))
+    make_values = {
+        key: value[1:-1] if len(value) >= 2 and value.startswith('"') and value.endswith('"') else value
+        for key, value in actual.items()
+    }
+    different = sorted(key for key in make_values.keys() | auto.keys() if make_values.get(key, "n") != auto.get(key, "n"))
     require(not different, "config: stale auto.conf: " + ", ".join(different[:12]))
     require((output / "include/generated/autoconf.h").is_file(), "config: missing generated autoconf.h")
     generated: Config = dict(re.findall(r"^#define (CONFIG_\w+) (.+)$", (output / "include/generated/autoconf.h").read_text(), re.MULTILINE))

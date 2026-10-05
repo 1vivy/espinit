@@ -215,6 +215,18 @@ class PhoneModuleCompatibility(unittest.TestCase):
         self.assertNotIn("CONFIG_CC_CAN_LINK", checked)
         self.assertNotIn("CONFIG_CC_CAN_LINK_STATIC", checked)
 
+    def test_generated_make_config_unquotes_string_values(self) -> None:
+        configured = CONFIG + 'CONFIG_DEFAULT_HOSTNAME="phone"\n'
+        for path in (self.target, self.output / ".config"):
+            _ = path.write_text(configured)
+        _ = (self.output / "include/config/auto.conf").write_text(CONFIG + "CONFIG_DEFAULT_HOSTNAME=phone\n")
+        header = (self.output / "include/generated/autoconf.h").read_text()
+        _ = (self.output / "include/generated/autoconf.h").write_text(
+            header + '#define CONFIG_DEFAULT_HOSTNAME "phone"\n'
+        )
+        checked = compat.check_config(self.source, self.output, self.target)
+        self.assertEqual(checked["CONFIG_DEFAULT_HOSTNAME"], '"phone"')
+
     def test_receipt_binds_packaged_bytes_and_exact_kernel_inputs(self) -> None:
         _ = self.module.write_bytes(module_file())
         with self.assertRaisesRegex(compat.CompatibilityError, "provenance: missing"):
