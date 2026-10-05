@@ -155,9 +155,9 @@ fn ksuctl<T>(request: u32, arg: *mut T) -> Result<i32> {
 
 // API implementations
 
-/// Query the core module once through the v2 get-info ioctl. The buffer starts
-/// fully zeroed so a legacy reply can never leave the v2-only fields
-/// (`uapi_version`, `state`, `generation`) uninitialized.
+/// Query the core module once through the v3 get-info ioctl. The buffer starts
+/// fully zeroed so a legacy reply can never leave newer fields
+/// (`uapi_version`, `state`, `generation`, `boot_mode`) uninitialized.
 fn query_info() -> ksu_uapi::ksu_get_info_cmd {
     let mut cmd = ksu_uapi::ksu_get_info_cmd {
         version: 0,
@@ -166,6 +166,7 @@ fn query_info() -> ksu_uapi::ksu_get_info_cmd {
         uapi_version: 0,
         state: 0,
         generation: [0; 64],
+        boot_mode: 0,
     };
     if ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO, &raw mut cmd).is_err() {
         // A core predating UAPI v2 answers only the zero-size request, and its
