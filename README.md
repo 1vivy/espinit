@@ -147,6 +147,15 @@ Kernel `.ko` loading remains exclusively controlled by `manifest.modules` in doc
 
 The boot-image integration must place the matching static binary at ramdisk `/espinit` and select it with `rdinit=/espinit`; the ESP payload is discovered and mounted by that binary before manifest processing. Integration must preserve the real-init handoff target independently of ESP configuration; a manifest may not choose an arbitrary init executable. No `current` symlink, generation fallback directory, or implicit module discovery is part of this contract. `espinitd` starts through Android init only after successful handoff; it cannot repair an unsuccessful early-boot check.
 
+Recovery has one explicit rescue path that is separate from normal managed
+recovery. When bootconfig contains exactly one `androidboot.mode=recovery` and
+exactly one `androidboot.espinit.recovery_passthrough=true`, PID 1 tears down
+only the minimal mounts it created and executes the real recovery init before
+ESP discovery, vendor or payload module loading, projection, scripts, or
+platform staging. Either key alone, command-line-only requests, duplicate keys,
+case variants, and normal mode do not enable it. Normal recovery omits the
+opt-in and retains the managed projected storage view.
+
 ## Manifest
 
 See [`espinit/manifest.example.toml`](espinit/manifest.example.toml). TOML is used directly; no templating or executable configuration.
