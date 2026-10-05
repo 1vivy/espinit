@@ -12,8 +12,10 @@ use espinit::{handoff, init, receipt};
 /// gets a nonzero exit status immediately, without touching the platform. As
 /// PID 1, any failure stops the handoff, persists a bounded receipt, and enters
 /// the fatal-boot stop path; the real init is never executed after an init
-/// error. On success the fixed real `/init` is executed with the original
-/// `argv`/`envp`, preserving PID 1.
+/// error. Both fatal paths record the receipt and then run the same stop, which
+/// honors the exact `androidboot.init_fatal_panic=true` opt-in by requesting a
+/// kernel panic before falling back to the reboot. On success the fixed real
+/// `/init` is executed with the original `argv`/`envp`, preserving PID 1.
 ///
 /// # Safety
 /// Called by the kernel as the process entry point.
@@ -34,13 +36,11 @@ pub unsafe extern "C" fn main(_argc: i32, argv: *const *const u8, envp: *const *
     let mut state = receipt::ReceiptState::default();
 
     if let Err(failure) = init::run(&mut state) {
-        receipt::record(&mut state, &failure);
-        init::stop_boot();
+        init::fatal_boot(|| receipt::record(&mut state, &failure));
     }
 
     if let Err(failure) = unsafe { handoff::exec_real_init(argv, envp) } {
-        receipt::record(&mut state, &failure);
-        init::stop_boot();
+        init::fatal_boot(|| receipt::record(&mut state, &failure));
     }
 
     init::stop_boot()
