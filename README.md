@@ -9,7 +9,12 @@ new host tests, Android artifacts, policy and boot ordering await verification.
 The `androidboot.init_fatal_panic=true` opt-in is implemented against the AOSP
 init control but is not device-proven: on a kernel with no usable
 `/proc/sysrq-trigger` or pstore/minidump capture, a fatal espinit failure still
-degrades to the existing ESP receipt and reboot.
+degrades to the existing ESP receipt and reboot. The companion
+`androidboot.espinit.apss_minidump=true` opt-in is implemented in source too — it
+preloads the vendor `qcom-dload-mode.ko` dependency closure before the ESP mount —
+and is likewise not device-proven. The lab-only `androidboot.espinit.probe=<stage>`
+checkpoint opt-in below is implemented in source and also not device-proven: it needs
+a boot that actually reaches the named stage before it can be read as a timing.
 
 ## Architecture and identity
 
@@ -37,15 +42,58 @@ These are dependency stages, not claims of device compatibility. Cuttlefish and 
 
 ## Build notes
 
-Every relocatable espinit kernel module must carry a present but **empty** `__versions` section before the module checker runs; `kernel/Makefile` invokes `check_symbol <module.ko> <vmlinux>` from [`kernel/tools/check_symbol.c`](kernel/tools/check_symbol.c). Missing `__versions`, or a section with nonzero size, is a hard failure, while an empty section proceeds to the undefined-symbol validation against `vmlinux`. A build with MODVERSIONS disabled may not emit `__versions` at all, so create the empty section explicitly before running `check_symbol`, for example by adding it from an empty file:
+Every shipped phone LKM (`espinit.ko`, `thin.ko`, `gpt.ko`) uses one contract:
+[`scripts/phone_modules.py`](scripts/phone_modules.py), shared by the three
+Makefiles and the payload assembler. Supply **the exact source and complete
+output tree**, plus an independently captured full phone config. A defconfig,
+`modules_prepare` alone, a nearby GKI/KMI release or a vermagic rewrite is not
+an ABI match.
 
 ```sh
-: > /tmp/__versions.empty
-llvm-objcopy --add-section __versions=/tmp/__versions.empty \
-    --set-section-flags __versions=noload,readonly espinit.ko
+export KERNEL_SRC=/path/to/exact/kernel/source
+export KERNEL_OUT=/path/to/exact/kernel/output
+export KERNEL_CONFIG=/path/to/captured-phone.config
+export ESPINIT_GENERATION=<coordinated-payload-generation>
+make -C kernel phone JOBS=13
+make -C modules/thin JOBS=13
+make -C modules/gpt JOBS=13
+python3 scripts/phone_modules.py verify \
+    --espinit kernel/espinit.ko --thin modules/thin/thin.ko --gpt modules/gpt/gpt.ko
 ```
 
-`check_symbol` never adds, rewrites, or relaxes the section itself; a module lacking the empty section, or one carrying a populated `__versions`, is rejected rather than repaired.
+The recipes fail closed before compiling unless `.config` matches the capture,
+generated configuration is current, `CONFIG_MODVERSIONS=y`, and the target's
+`CONFIG_GENDWARFKSYMS` setting is preserved. They clean old module objects and
+build with `KBUILD_GENDWARFKSYMS_STABLE=1`. Complete `Module.symvers` and `vmlinux`
+from that output are mandatory. All imported exported symbols, including
+`module_layout`, need real matching version records. Modules with exports
+(notably thin, and any core variant with exports) need corresponding export
+CRC tables; gpt's no-export shape does not. Target vermagic and BTF settings
+must match too. Never insert an empty `__versions`, synthesize CRCs or disable
+kernel checks to make a module pass.
+
+GKI release naming, exported KMI and kallsyms availability are distinct.
+`thin` must use exported KMI. Core and gpt may use the existing relocation
+loader for non-KMI imports only when those imports are defined in the exact
+`vmlinux`; their other import versions and all export CRCs remain mandatory.
+The older `check_symbol` tool is now only a DDK import diagnostic, not phone
+artifact admission.
+
+Each successful phone build writes `<module>.ko.compat.json`, binding its
+SHA-256 to the exact source/output paths, config, generated headers, symvers,
+vmlinux and stable-build setting. Keep the receipt beside the module when
+copying it for packaging; stripping or modifying the module invalidates it.
+`verify` emits JSON on success and exits nonzero with a named reason on failure.
+Provisioners must run that command before opening a write window. The
+external GBL provisioner is not maintained in this repository.
+
+The historical `.work/thinpool-proof/.work/phone-espinit-out` is **not** a valid
+rebuild input: it disables MODVERSIONS/Rust and lacks vmlinux. The independent
+capture is `.work/thinpool-proof/.work/phone-live.config`; `phone-common` and
+`phone-stable-out` in that same parent are candidates only after their complete
+config/toolchain/release provenance matches that capture. Do not silently
+substitute them. Host regression tests: `python3 -m unittest
+scripts.test_phone_modules tools.cuttlefish.test_assemble`.
 
 The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--espinit-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. The assembler re-signs the modified `init_boot` with the explicitly supplied key after proving that key verifies the pinned stock image. That lane is packaging and boot plumbing only; it proves no boot by itself.
 
@@ -180,7 +228,7 @@ handshake, not an app-facing control or a property-based fallback.
 
 ## Boot ordering and hard-failure receipt
 
-1. Prepare the minimum early mounts/logging and opportunistically retain an already-enumerated payload ESP read-only so vendor-module preload failures can still leave a receipt. Preload the applicable vendor modules with their dependencies/options, then wait up to ten seconds for storage enumeration when the ESP was not available before preload. Enumerate every GPT ESP candidate, probe each read-only, and require exactly one to contain a regular `/espinit/manifest.toml`; other firmware ESPs are allowed. Keep the selected payload ESP mounted read-only and validate its manifest plus explicitly selected per-ROM TOML without changing the partition view. No step here requires projected `/metadata`.
+1. Prepare the minimum early mounts/logging. When the exact opt-in `androidboot.espinit.apss_minidump=true` is active, first load the dependency closure rooted at the vendor `qcom-dload-mode.ko` through that same module directory, `modules.dep`, ordering and `finit_module` machinery, so a Qualcomm APSS minidump sink can capture a failure that happens before the ESP exists; then opportunistically retain an already-enumerated payload ESP read-only so vendor-module preload failures can still leave a receipt. Preload the applicable vendor modules with their dependencies/options, then wait up to ten seconds for storage enumeration when the ESP was not available before preload. Enumerate every GPT ESP candidate, probe each read-only, and require exactly one to contain a regular `/espinit/manifest.toml`; other firmware ESPs are allowed. Keep the selected payload ESP mounted read-only and validate its manifest plus explicitly selected per-ROM TOML without changing the partition view. No step here requires projected `/metadata`.
 2. Check payload generations, module ordering, backend configuration, and the ESP receipt directory `/espinit/receipts` (runtime `/debug_ramdisk/esp/espinit/receipts`) structurally without opening a write window. For managed boot, unavailable receipt storage is itself a hard failure; do not mount or depend on `/metadata` for this check.
 3. Load or validate `espinit.ko`, then load the remaining modules in manifest order, perform each self-check, and run each module's optional `early.sh` or `recovery.sh` through the ESP busybox with a 35-second deadline. Immediately before the `gpt` entry, and only after every earlier module and script has run, resolve each backend — by-name partition, exact `/dev/mapper/<name>`, existing `/dev/loopN`, or a read-only `esp-file:` attached to a fresh loop device on the already-mounted read-only ESP. Load `gpt`, verify its generation, enumerate physical `DEVTYPE=partition` device numbers other than the mounted ESP into `hide[]`, then issue one atomic APPLY. The ESP stays outside `hide[]` so any later hard failure can remount it for its receipt. Exact QUERY (ABI, active view, count) and readiness checks complete before the `gpt` stage script.
 4. After kernel-stage scripts and projection, validate selected packages/source inodes and executable generation notes. Privately mount writable metadata; install the daemon, selected ROM and package set; fsync files/directories; publish with rename/exchange; retire the old snapshot under a distinct cleanup name before parent fsync/removal; then unmount. Managed boot uses projected metadata and requires writable projected bdsvars/misc for the normal HAL. Unmanaged boot resolves exactly the native metadata PARTNAME with the same bounded 10-second/100-ms enumeration retry, without projection or the HAL pair. Permanent resolution errors fail immediately; unavailable/unwritable metadata stops handoff.
@@ -215,6 +263,87 @@ kernel, espinit falls back to the unchanged sync/reboot/park path, so a failing
 opt-in can never strand PID 1. The opt-in covers only espinit's own failures
 before the real `/init` starts; it does not extend to a later boot failure and
 records nothing when the kernel does not panic.
+
+### Stage checkpoint probe (lab-only)
+
+When there is no working durable sink, the only remaining question about a very early
+failure is *how far the boot got*. `androidboot.espinit.probe=<stage>` is a
+bootconfig-only, lab-only checkpoint opt-in that answers it with time instead of text:
+the kernel's own panic delay is visible in the reset timing even when nothing
+survives the reset.
+
+The key is read exactly once, from `/proc/bootconfig`, right after `/proc` is mounted
+and before `/sys` or `/dev` are mounted or any module or ESP work starts; there is no
+kernel-command-line or OEM/vendor spelling. Twelve fixed stage names are accepted, in
+boot order: `proc-mounted`, `sys-mounted`, `dev-mounted`, `minimal-mounted`,
+`apss-loaded`, `esp-retained`, `vendor-loaded`, `esp-ready`, `manifest-read`,
+`generation-matched`, `payload-loaded`, `platform-staged`. Each names the corresponding
+boundary of `init::run`, and a checkpoint triggers only on an exact match. An absent or
+empty value leaves the probe off and the boot unchanged; a nonempty value that is not one
+of the twelve, or a duplicated key, is a bounded `InvalidProbeStage` failure, never a
+silent skip. Three names need a precise reading:
+
+- `proc-mounted` is the earliest runtime-selected checkpoint possible. `/proc` is mounted
+  before the probe can be read at all, so reaching this checkpoint proves that `/espinit`
+  really executed *and* that procfs mounted. It is followed by `sys-mounted` after sysfs,
+  `dev-mounted` after devtmpfs (or its tmpfs fallback), and `minimal-mounted` after the
+  device nodes — the boundary the whole minimal setup kept before. A boot that returns to
+  the bootloader almost immediately instead of waiting ~30 seconds at a `proc-mounted`
+  probe proves neither: either `/espinit` never executed, or it could not mount proc.
+  A 30-second delay proves both. This is the discriminator when a `minimal-mounted` probe
+  resets immediately and the two halves of minimal setup cannot otherwise be told apart.
+- `apss-loaded` is the boundary *after* the optional APSS minidump preload step of the
+  same boot. Without `androidboot.espinit.apss_minidump=true` that step is skipped, so
+  the checkpoint is reached as soon as the decision is made; a profile that means to
+  bisect the APSS preload must carry the APSS opt-in itself, and the neutral
+  `espinit-stage-minimal.txt` profile does not.
+- `esp-retained` proves a mount that was actually **retained** before vendor-module
+  preload. An enumeration-pending miss (`EspNotFound`, `EspPayloadNotFound`,
+  `EspSysfsUnavailable`, `EspPartitionMissing`) retains nothing and reaches no
+  checkpoint; that boot keeps its load-then-wait path and can only be observed at
+  `vendor-loaded` or `esp-ready`.
+
+A triggered checkpoint is terminal and does not continue boot: espinit writes
+decimal `30` to `/proc/sys/kernel/panic`, then requests the same sysrq crash as the
+fatal-panic path (`c` to `/proc/sysrq-trigger`). The profile's own `panic=5` is
+untouched, so a boot that fails naturally *before* the named checkpoint still waits
+5 seconds — a longer, ~30-second wait means the checkpoint was reached. A checkpoint
+writes no failure receipt: it is not a failure, it is a measurement. If the panic-delay
+write or the crash request fails or returns without panicking, espinit enters the
+unchanged fatal-boot stop path (sync, reboot, PID-1 park) rather than continuing to
+later boot steps, so a matched checkpoint can never be mistaken for a successful boot.
+
+### APSS minidump transport (opt-in)
+
+The fatal-panic stop above makes a panic happen, but a panic is only durable if
+something consumes it before the reset. The ramoops backend on this phone does not
+survive the observed `HARD_RESET` cold-boot class, so the smallest early capture
+path is the Qualcomm APSS minidump. When the exact opt-in
+`androidboot.espinit.apss_minidump=true` is active — the same bootconfig-first,
+command-line-fallback, exact-lowercase-`true` rule as the fatal-panic opt-in, with
+no OEM- or vendor-specific spelling — espinit loads the dependency closure rooted
+at the vendor `/lib/modules/qcom-dload-mode.ko` immediately after its minimal
+mounts and unlimited kmsg, and **before** it mounts the ESP.
+
+The closure comes from the selected vendor `modules.dep`, exactly as the full
+vendor preload resolves its own, so the `minidump`, DMA-heap/`mem_buf_dev`,
+`qcom-scm`, `debug_symbol`, `smem` and Gunyah/memory dependencies are read from
+the module database instead of a hand-maintained list. Loading `minidump` alone is
+neither the target nor enough. A target that `modules.dep` does not declare, a
+malformed dependency database, a missing dependency path or a failed insert is a
+bounded preload failure, not a partial load. An already-loaded module is success,
+so the later full vendor preload continues over the inserted modules instead of
+failing on them. `modules.softdep` stays advisory, exactly as Android's
+libmodprobe treats it: a softdep line that cannot be parsed is warned about and
+skipped rather than failing the load, so one malformed unrelated vendor line
+cannot abort the preload on a device whose stock init loads through it anyway.
+
+Without the exact opt-in this path does not run at all: a normal boot never
+touches the module loader early and is unchanged. A preload failure is an ordinary
+bounded espinit failure and enters the same fatal-boot stop; because it happens
+before the ESP is mounted, its failure receipt can only be written when the ESP
+was already available, so the durable evidence for this path is the crash capture
+itself, matching where the failure occurs.
 
 ## `gpt.ko` limits
 
