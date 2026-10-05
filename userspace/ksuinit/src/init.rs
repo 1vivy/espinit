@@ -1,7 +1,9 @@
 //! espinit PID-1 early managed boot.
 //!
-//! The order is fixed by the boot contract: minimal mounts and logging, normal
-//! vendor module loading, ESP discovery and read-only mount, strict manifest
+//! The order is fixed by the boot contract: minimal mounts and logging, the
+//! opt-in APSS minidump transport preload when
+//! `androidboot.espinit.apss_minidump=true` is active, normal vendor module
+//! loading, ESP discovery and read-only mount, strict manifest
 //! and ROM validation, generation matching, ordered payload module loading with
 //! self-checks, the single projection boundary immediately before the `gpt`
 //! entry, and finally the real-init handoff. Any failure stops the handoff,
@@ -40,6 +42,15 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     log::info!("espinit early managed boot starting");
     let mounts = mount_minimal()?;
     unlimit_kmsg();
+    // Opt-in Qualcomm APSS minidump transport: load its vendor module closure
+    // before the ESP is mounted, because a boot that dies this early can only
+    // leave evidence through a sink the firmware already owns. Normal boots
+    // skip this entirely.
+    let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if apss_minidump_requested(&bootconfig, &cmdline) {
+        loader::preload_apss_minidump()?;
+    }
 
     // UFS and VFAT are built in on the phone, so the payload ESP can already be
     // available before vendor module preload. Retain that mount when possible:
@@ -625,22 +636,35 @@ fn crash_kernel() {
 /// every other value stay non-opt-in, and there is no OEM- or vendor-specific
 /// spelling.
 fn fatal_panic_requested(bootconfig: &str, cmdline: &str) -> bool {
-    bootconfig_value(bootconfig).or_else(|| cmdline_value(cmdline)) == Some(FATAL_PANIC_VALUE)
+    bootconfig_value(bootconfig, FATAL_PANIC_KEY)
+        .or_else(|| cmdline_value(cmdline, FATAL_PANIC_KEY))
+        == Some(FATAL_PANIC_VALUE)
 }
 
-/// Value the boot configuration attributes to the fatal-panic key, if any.
-fn bootconfig_value(bootconfig: &str) -> Option<&str> {
+/// Lab-only Qualcomm transport opt-in.
+///
+/// `androidboot.espinit.apss_minidump=true` is read exactly as the fatal-panic
+/// opt-in is: the boot configuration wins, the kernel command line is only a
+/// fallback while the boot configuration is silent for the key, and only the
+/// exact key with the exact lowercase value `true` opts in.
+fn apss_minidump_requested(bootconfig: &str, cmdline: &str) -> bool {
+    const KEY: &str = "androidboot.espinit.apss_minidump";
+    bootconfig_value(bootconfig, KEY).or_else(|| cmdline_value(cmdline, KEY)) == Some("true")
+}
+
+/// Value the boot configuration attributes to an exact key, if any.
+fn bootconfig_value<'a>(bootconfig: &'a str, key: &str) -> Option<&'a str> {
     bootconfig.lines().find_map(|line| {
         let (name, value) = line.split_once('=').unwrap_or((line, ""));
-        (name.trim() == FATAL_PANIC_KEY).then(|| unquote(value.trim()))
+        (name.trim() == key).then(|| unquote(value.trim()))
     })
 }
 
-/// Value the kernel command line attributes to the fatal-panic key, if any.
-fn cmdline_value(cmdline: &str) -> Option<&str> {
+/// Value the kernel command line attributes to an exact key, if any.
+fn cmdline_value<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
     cmdline.split_whitespace().find_map(|token| {
         let (name, value) = token.split_once('=')?;
-        (name == FATAL_PANIC_KEY).then(|| unquote(value))
+        (name == key).then(|| unquote(value))
     })
 }
 
@@ -670,6 +694,43 @@ pub fn stop_boot() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apss_opt_in_is_exact_and_bootconfig_is_authoritative() {
+        const KEY: &str = "androidboot.espinit.apss_minidump";
+        for value in ["true", "\"true\""] {
+            assert!(apss_minidump_requested(&format!("{KEY} = {value}\n"), ""));
+            assert!(apss_minidump_requested("", &format!("{KEY}={value}")));
+        }
+        for value in [
+            "", "false", "TRUE", "True", "1", "\"true", "true\"", "truex",
+        ] {
+            assert!(!apss_minidump_requested(&format!("{KEY} = {value}\n"), ""));
+            assert!(!apss_minidump_requested("", &format!("{KEY}={value}")));
+            assert!(!apss_minidump_requested(
+                &format!("{KEY} = {value}\n"),
+                &format!("{KEY}=true"),
+            ));
+        }
+        for key in [
+            "androidboot.espinit.apss_minidump_extra",
+            "vendor.androidboot.espinit.apss_minidump",
+            "ANDROIDBOOT.ESPINIT.APSS_MINIDUMP",
+        ] {
+            assert!(!apss_minidump_requested(&format!("{key}=true"), ""));
+            assert!(!apss_minidump_requested("", &format!("{key}=true")));
+        }
+        assert!(!apss_minidump_requested("", ""));
+        assert!(!apss_minidump_requested(KEY, &format!("{KEY}=true")));
+        assert!(apss_minidump_requested(
+            "other = false\n",
+            &format!("{KEY}=true")
+        ));
+        assert!(apss_minidump_requested(
+            &format!("{KEY}=true"),
+            &format!("{KEY}=false")
+        ));
+    }
 
     #[test]
     fn native_metadata_waits_only_for_enumeration() {

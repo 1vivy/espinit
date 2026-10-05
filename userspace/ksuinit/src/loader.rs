@@ -5,9 +5,11 @@
 //! the versioned module directory matching the running kernel comes first, the
 //! mode-specific `modules.load` list (recovery/charger) comes before the plain
 //! list, and hard dependencies from `modules.dep` plus pre-softdeps from
-//! `modules.softdep` are loaded first. Module options come from
-//! `modules.options` and the kernel command line; nothing is evaluated by a
-//! shell. Payload modules from the ESP keep using the existing kallsyms
+//! `modules.softdep` are loaded first; a softdep line that cannot be parsed is
+//! warned about and skipped, the way Android's libmodprobe treats that advisory
+//! file, so one malformed vendor line cannot abort the load. Module options
+//! come from `modules.options` and the kernel command line; nothing is
+//! evaluated by a shell. Payload modules from the ESP keep using the existing kallsyms
 //! relocation loader, which the kernel module lifecycle has always relied on.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -243,6 +245,13 @@ impl VendorModules {
         Ok(())
     }
 
+    /// Whether `modules.dep` declares this module, and therefore its path and
+    /// its hard dependencies. A targeted preload requires this, so a spelling
+    /// that resolves to nothing cannot silently load an empty closure.
+    fn declared_by_dep(&self, name: &str) -> bool {
+        self.dependencies.contains_key(name)
+    }
+
     fn parse(
         list: &str,
         dep: &str,
@@ -300,18 +309,32 @@ impl VendorModules {
                 return Err(vendor_error("module load list is too long"));
             }
         }
-        for line in softdep.lines() {
-            let mut words = line.split('#').next().unwrap_or("").split_whitespace();
-            let Some(kind) = words.next() else { continue };
-            if kind != "softdep" {
-                return Err(vendor_error("invalid modules.softdep directive"));
-            }
-            let name = words
+        // `modules.softdep` is advisory, exactly as Android's libmodprobe treats
+        // it: a line it cannot parse is warned about and skipped, and the boot
+        // keeps going. Vendor sets ship malformed lines such as a glued
+        // `pre:<dep>` marker, which is three tokens where Android wants at
+        // least four; failing here would abort a load Android itself completes.
+        for (number, line) in softdep.lines().enumerate() {
+            let words: Vec<&str> = line
+                .split('#')
                 .next()
-                .ok_or_else(|| vendor_error("missing softdep module"))?;
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            if words.is_empty() {
+                continue;
+            }
+            if words.len() < 4 || words[0] != "softdep" {
+                log::warn!(
+                    "Ignoring malformed softdep line {} in modules.softdep: softdep lines must have at least 4 entries",
+                    number + 1
+                );
+                continue;
+            }
+            let name = words[1];
             let mut pre = false;
-            for word in words {
-                match word {
+            for word in &words[2..] {
+                match *word {
                     "pre:" => pre = true,
                     "post:" => pre = false,
                     _ if pre => modules
@@ -430,6 +453,106 @@ impl VendorModules {
     }
 }
 
+/// The vendor module whose dependency closure carries the Qualcomm APSS
+/// minidump transport. Loading it alone is not enough: its closure is what
+/// registers the minidump, DMA-heap, SCM, SMEM and Gunyah pieces.
+const APSS_MINIDUMP_MODULE: &str = "qcom-dload-mode.ko";
+
+/// Read one metadata file inside the selected module directory.
+fn read_vendor_metadata(base: &Path, name: &str, optional: bool) -> Result<String, Failure> {
+    let path = base.join(name);
+
+    match fs::symlink_metadata(&path) {
+        Err(error) if optional && error.kind() == ErrorKind::NotFound => {
+            return Ok(String::new());
+        }
+        Err(error) => return Err(vendor_error(format!("cannot stat {name}: {error}"))),
+        Ok(_) => {}
+    }
+
+    let path = confined_file(base, name)?;
+
+    Ok(read_metadata(&path, false)?.unwrap_or_default())
+}
+
+/// The vendor module directory and load-list file name selected for this boot.
+fn vendor_module_source(
+    release: &str,
+    mode: BootMode,
+) -> Result<Option<(PathBuf, String)>, Failure> {
+    let Some(list) = select_vendor_list(release, mode)? else {
+        return Ok(None);
+    };
+
+    let directory = list
+        .parent()
+        .ok_or_else(|| vendor_error("module list has no directory"))?;
+    let base = fs::canonicalize(directory).map_err(|error| {
+        vendor_error(format!("cannot resolve {}: {error}", directory.display()))
+    })?;
+
+    let list_name = list
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| vendor_error("invalid module list name"))?
+        .to_owned();
+
+    Ok(Some((base, list_name)))
+}
+
+/// What one `finit_module` result means for the load sequence.
+///
+/// A module the kernel already has is success, not a duplicate-load failure,
+/// so the targeted APSS preload and the later full vendor load compose.
+fn finit_outcome(result: Result<(), Errno>) -> Result<bool, Errno> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(Errno::EXIST) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Insert one vendor module with `finit_module`.
+fn load_vendor_module(
+    base: &Path,
+    name: &str,
+    module_path: &str,
+    params: &str,
+) -> Result<(), Failure> {
+    let path = confined_file(base, module_path)?;
+    let file = File::open(&path).map_err(|error| {
+        Failure::at(
+            Stage::ModuleLoad,
+            Some(name),
+            "VendorModuleUnreadable",
+            format!("cannot open {}: {error}", path.display()),
+        )
+    })?;
+    let params = CString::new(params).map_err(|_| {
+        Failure::at(
+            Stage::ModuleLoad,
+            Some(name),
+            "VendorParamsInvalid",
+            "vendor module parameters contain NUL",
+        )
+    })?;
+
+    match finit_outcome(finit_module(&file, &params, 0)) {
+        Ok(true) => log::info!("Loaded vendor module {name}"),
+        Ok(false) => log::info!("Vendor module {name} is already loaded"),
+        Err(error) => {
+            return Err(Failure::at(
+                Stage::ModuleLoad,
+                Some(name),
+                "VendorModuleLoad",
+                format!("finit_module {} failed: {error}", path.display()),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Load vendor modules in Android list/dependency order, without shell parsing.
 pub fn load_vendor_modules() -> Result<(), Failure> {
     let cmdline = read_metadata(Path::new("/proc/cmdline"), false)?.unwrap_or_default();
@@ -442,83 +565,66 @@ pub fn load_vendor_modules() -> Result<(), Failure> {
     let release =
         read_metadata(Path::new("/proc/sys/kernel/osrelease"), false)?.unwrap_or_default();
 
-    let Some(list) = select_vendor_list(&release, mode)? else {
+    let Some((base, list_name)) = vendor_module_source(&release, mode)? else {
         log::warn!("No vendor modules.load found; PID 1 has no vendor modules to load early");
         return Ok(());
     };
 
-    let directory = list
-        .parent()
-        .ok_or_else(|| vendor_error("module list has no directory"))?;
-    let base = fs::canonicalize(directory).map_err(|error| {
-        vendor_error(format!("cannot resolve {}: {error}", directory.display()))
-    })?;
-
-    let read = |name: &str, optional| -> Result<String, Failure> {
-        let path = base.join(name);
-
-        match fs::symlink_metadata(&path) {
-            Err(error) if optional && error.kind() == ErrorKind::NotFound => {
-                return Ok(String::new());
-            }
-            Err(error) => return Err(vendor_error(format!("cannot stat {name}: {error}"))),
-            Ok(_) => {}
-        }
-
-        let path = confined_file(&base, name)?;
-
-        Ok(read_metadata(&path, false)?.unwrap_or_default())
-    };
-
-    let list_name = list
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| vendor_error("invalid module list name"))?;
-
     let modules = VendorModules::parse(
-        &read(list_name, false)?,
-        &read("modules.dep", true)?,
-        &read("modules.softdep", true)?,
-        &read("modules.options", true)?,
+        &read_vendor_metadata(&base, &list_name, false)?,
+        &read_vendor_metadata(&base, "modules.dep", true)?,
+        &read_vendor_metadata(&base, "modules.softdep", true)?,
+        &read_vendor_metadata(&base, "modules.options", true)?,
         &cmdline,
     )?;
 
-    modules.load(|name, module_path, params| {
-        let path = confined_file(&base, module_path)?;
-        let file = File::open(&path).map_err(|error| {
-            Failure::at(
-                Stage::ModuleLoad,
-                Some(name),
-                "VendorModuleUnreadable",
-                format!("cannot open {}: {error}", path.display()),
-            )
-        })?;
-        let params = CString::new(params).map_err(|_| {
-            Failure::at(
-                Stage::ModuleLoad,
-                Some(name),
-                "VendorParamsInvalid",
-                "vendor module parameters contain NUL",
-            )
-        })?;
+    modules.load(|name, module_path, params| load_vendor_module(&base, name, module_path, params))
+}
 
-        match finit_module(&file, &params, 0) {
-            Ok(()) => log::info!("Loaded vendor module {name}"),
-            Err(error) if error == Errno::EXIST => {
-                log::info!("Vendor module {name} is already loaded");
-            }
-            Err(error) => {
-                return Err(Failure::at(
-                    Stage::ModuleLoad,
-                    Some(name),
-                    "VendorModuleLoad",
-                    format!("finit_module {} failed: {error}", path.display()),
-                ));
-            }
-        }
+/// Load the dependency closure of the APSS minidump transport module.
+///
+/// This is the opt-in path only: the caller has already confirmed the exact
+/// `androidboot.espinit.apss_minidump=true`. It reuses the same module
+/// directory selection, `modules.dep` resolution, dependency ordering and
+/// `finit_module` call as the full vendor preload, so that preload continues
+/// over modules this one already inserted instead of failing on them.
+pub fn preload_apss_minidump() -> Result<(), Failure> {
+    let cmdline = read_metadata(Path::new("/proc/cmdline"), false)?.unwrap_or_default();
+    let bootconfig = read_metadata(Path::new("/proc/bootconfig"), true)?.unwrap_or_default();
+    let mode = classify_boot_mode(
+        &bootconfig,
+        &cmdline,
+        Path::new(RECOVERY_EXECUTABLE).exists(),
+    );
+    let release =
+        read_metadata(Path::new("/proc/sys/kernel/osrelease"), false)?.unwrap_or_default();
 
-        Ok(())
-    })
+    let (base, _list_name) = vendor_module_source(&release, mode)?.ok_or_else(|| {
+        vendor_error(format!(
+            "no vendor module directory for the {APSS_MINIDUMP_MODULE} preload"
+        ))
+    })?;
+
+    let modules = VendorModules::parse(
+        APSS_MINIDUMP_MODULE,
+        &read_vendor_metadata(&base, "modules.dep", true)?,
+        &read_vendor_metadata(&base, "modules.softdep", true)?,
+        &read_vendor_metadata(&base, "modules.options", true)?,
+        &cmdline,
+    )?;
+
+    let target = module_name(APSS_MINIDUMP_MODULE);
+    if !modules.declared_by_dep(&target) {
+        return Err(vendor_error(format!(
+            "{APSS_MINIDUMP_MODULE} is not declared by modules.dep"
+        )));
+    }
+
+    modules
+        .load(|name, module_path, params| load_vendor_module(&base, name, module_path, params))?;
+
+    log::info!("APSS minidump transport {target} and its dependency closure are loaded");
+    Ok(())
 }
 
 /// Resolve a payload module file under the ESP `/espinit` root, rejecting any
@@ -666,6 +772,141 @@ mod tests {
         loaded.iter().map(|(name, _, _)| name.as_str()).collect()
     }
 
+    /// A trimmed but real-shaped `modules.dep` for the APSS transport closure:
+    /// the qcom dload-mode transport transitively needs minidump, the DMA heap
+    /// and mem-buf device, SCM, the debug symbol table and SMEM.
+    const APSS_DEP: &str = concat!(
+        "kernel/qcom_dma_heaps.ko:\n",
+        "kernel/mem_buf_dev.ko: kernel/qcom_dma_heaps.ko\n",
+        "kernel/qcom-scm.ko:\n",
+        "kernel/debug_symbol.ko:\n",
+        "kernel/smem.ko:\n",
+        "kernel/minidump.ko: kernel/debug_symbol.ko\n",
+        "kernel/qcom-dload-mode.ko: kernel/minidump.ko kernel/qcom-scm.ko ",
+        "kernel/mem_buf_dev.ko kernel/smem.ko\n",
+        "kernel/unrelated.ko: kernel/qcom_dma_heaps.ko\n",
+    );
+
+    /// The full Android list: every module, in `modules.dep` order.
+    const APSS_LIST: &str = concat!(
+        "kernel/qcom_dma_heaps.ko\n",
+        "kernel/mem_buf_dev.ko\n",
+        "kernel/qcom-scm.ko\n",
+        "kernel/debug_symbol.ko\n",
+        "kernel/smem.ko\n",
+        "kernel/minidump.ko\n",
+        "kernel/qcom-dload-mode.ko\n",
+        "kernel/unrelated.ko\n",
+    );
+
+    #[test]
+    fn a_targeted_preload_loads_only_the_transport_closure() {
+        let modules = VendorModules::parse(APSS_MINIDUMP_MODULE, APSS_DEP, "", "", "").unwrap();
+        assert!(modules.declared_by_dep(&module_name(APSS_MINIDUMP_MODULE)));
+
+        let loaded = order(&modules).unwrap();
+
+        assert_eq!(
+            names(&loaded),
+            [
+                "debug_symbol",
+                "minidump",
+                "qcom_scm",
+                "qcom_dma_heaps",
+                "mem_buf_dev",
+                "smem",
+                "qcom_dload_mode",
+            ]
+        );
+        assert!(!names(&loaded).contains(&"unrelated"));
+    }
+
+    #[test]
+    fn a_targeted_preload_requires_the_module_to_be_declared() {
+        let modules =
+            VendorModules::parse(APSS_MINIDUMP_MODULE, "kernel/other.ko:\n", "", "", "").unwrap();
+        assert!(!modules.declared_by_dep(&module_name(APSS_MINIDUMP_MODULE)));
+
+        // A malformed dependency database is refused before any load.
+        assert!(
+            VendorModules::parse(
+                APSS_MINIDUMP_MODULE,
+                "kernel/a.ko kernel/b.ko\n",
+                "",
+                "",
+                ""
+            )
+            .is_err()
+        );
+        // A closure whose dependency has no path is fatal, not a partial load.
+        let incomplete = VendorModules::parse(
+            APSS_MINIDUMP_MODULE,
+            "kernel/qcom-dload-mode.ko: kernel/minidump.ko\n",
+            "",
+            "",
+            "",
+        )
+        .unwrap();
+        assert!(order(&incomplete).is_err());
+    }
+
+    #[test]
+    fn an_already_loaded_module_is_not_a_duplicate_load_failure() {
+        assert_eq!(finit_outcome(Ok(())), Ok(true));
+        assert_eq!(finit_outcome(Err(Errno::EXIST)), Ok(false));
+        assert_eq!(finit_outcome(Err(Errno::INVAL)), Err(Errno::INVAL));
+    }
+
+    #[test]
+    fn a_targeted_preload_then_the_full_load_composes() {
+        // Device model: `finit_module` reports EEXIST for a module the kernel
+        // already holds, exactly as the real one does.
+        fn device(
+            inserted: &mut BTreeSet<String>,
+            calls: &mut Vec<(String, bool)>,
+            name: &str,
+        ) -> Result<(), Failure> {
+            let outcome = if inserted.contains(name) {
+                finit_outcome(Err(Errno::EXIST))
+            } else {
+                inserted.insert(name.to_owned());
+                finit_outcome(Ok(()))
+            };
+            let loaded_now = outcome.map_err(|error| {
+                Failure::new(Stage::ModuleLoad, "VendorModuleLoad", error.to_string())
+            })?;
+            calls.push((name.to_owned(), loaded_now));
+            Ok(())
+        }
+
+        let mut inserted = BTreeSet::new();
+        let targeted = VendorModules::parse(APSS_MINIDUMP_MODULE, APSS_DEP, "", "", "").unwrap();
+        let mut preload_calls = Vec::new();
+        targeted
+            .load(|name, _, _| device(&mut inserted, &mut preload_calls, name))
+            .unwrap();
+
+        let full = VendorModules::parse(APSS_LIST, APSS_DEP, "", "", "").unwrap();
+        let mut full_calls = Vec::new();
+        full.load(|name, _, _| device(&mut inserted, &mut full_calls, name))
+            .unwrap();
+
+        // Every module the preload inserted is reported already loaded by the
+        // full pass, and the full pass still loads the rest.
+        let preloaded: Vec<&str> = preload_calls
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            full_calls
+                .iter()
+                .filter(|(name, _)| preloaded.contains(&name.as_str()))
+                .all(|(_, loaded_now)| !loaded_now)
+        );
+        assert!(full_calls.contains(&("unrelated".to_owned(), true)));
+        assert_eq!(preloaded.len(), 7);
+    }
+
     #[test]
     fn hard_dependencies_then_pre_softdeps_load_first() {
         let modules = VendorModules::parse(
@@ -755,8 +996,52 @@ mod tests {
     #[test]
     fn malformed_metadata_is_fatal() {
         assert!(VendorModules::parse("", "kernel/a.ko kernel/b.ko\n", "", "", "").is_err());
-        assert!(VendorModules::parse("", "", "require a\n", "", "").is_err());
         assert!(VendorModules::parse("", "", "", "options\n", "").is_err());
+        // `modules.softdep` is advisory, so it is deliberately absent here: a
+        // line Android's libmodprobe cannot parse is warned about and skipped.
+        assert!(VendorModules::parse("", "", "require a\n", "", "").is_ok());
+    }
+
+    #[test]
+    fn malformed_softdep_lines_are_skipped_and_the_closure_still_loads() {
+        // The vendor set really ships this shape: a glued `pre:<dep>` marker,
+        // three tokens where Android's libmodprobe wants at least four. Android
+        // warns and keeps loading, so the preload must too, including when the
+        // malformed line names the transport itself.
+        let softdep = concat!(
+            "softdep oplus_bsp_uff_fp_driver pre:mtk_disp_notify\n",
+            "require unrelated\n",
+            "softdep qcom_dload_mode pre:minidump\n",
+            "softdep unrelated post: smem\n",
+            "softdep smem pre: debug_symbol\n",
+        );
+
+        let modules =
+            VendorModules::parse(APSS_MINIDUMP_MODULE, APSS_DEP, softdep, "", "").unwrap();
+
+        // Malformed lines are skipped whole, whether or not they name the target.
+        assert!(!modules.pre_softdeps.contains_key("oplus_bsp_uff_fp_driver"));
+        assert!(!modules.pre_softdeps.contains_key("qcom_dload_mode"));
+        // A valid pre-softdep survives, and a post-softdep is never loaded here.
+        assert_eq!(
+            modules.pre_softdeps.get("smem"),
+            Some(&vec!["debug_symbol".to_owned()])
+        );
+        assert!(!modules.pre_softdeps.contains_key("unrelated"));
+
+        // The transport closure still loads, in dependency order.
+        assert_eq!(
+            names(&order(&modules).unwrap()),
+            [
+                "debug_symbol",
+                "minidump",
+                "qcom_scm",
+                "qcom_dma_heaps",
+                "mem_buf_dev",
+                "smem",
+                "qcom_dload_mode",
+            ]
+        );
     }
 
     #[test]
