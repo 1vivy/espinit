@@ -15,6 +15,8 @@ modules_order = ["boot-hal", "thin", "fw-views"]
 # required. Core and efivarfs load first to resolve identity before scripts.
 # Remaining kernel modules initialize before PID1 helpers; GPT resolves and
 # publishes projections after the helpers have created their backend devices.
+# `by-name:<partition>` parameters resolve the unique sysfs PARTNAME/dev_t.
+# PID1 never requires Android's later /dev/block/by-name symlinks for this.
 [[modules]]
 name = "kernelesp"
 path = "lib/kernelesp.ko"

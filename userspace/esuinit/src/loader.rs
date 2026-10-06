@@ -693,22 +693,12 @@ pub fn resolve_payload_file(
     Ok(path)
 }
 
-/// Substitute block-device parameter references after GPT projection.
-/// `metadata` follows the by-name symlink and obtains the target's st_rdev.
-pub fn substitute_by_name_params(params: &str, root: &Path) -> std::io::Result<String> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+/// Resolve symbolic partition parameters from sysfs PARTNAME before Android
+/// first-stage init has created any /dev/block/by-name symlinks.
+pub fn substitute_by_name_params(params: &str) -> std::io::Result<String> {
     substitute_params(params, |name| {
-        let metadata = fs::metadata(root.join(name))?;
-        if !metadata.file_type().is_block_device() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "by-name target is not a block device",
-            ));
-        }
-        Ok((
-            rustix::fs::major(metadata.rdev()),
-            rustix::fs::minor(metadata.rdev()),
-        ))
+        let device = esu_platform::block::partition_by_name(name)?;
+        Ok((rustix::fs::major(device), rustix::fs::minor(device)))
     })
 }
 
@@ -749,15 +739,14 @@ pub fn load_managed_module(path: &Path, entry: &ModuleEntry) -> Result<(), Failu
         )
     })?;
 
-    let params = substitute_by_name_params(&entry.params, Path::new("/dev/block/by-name"))
-        .map_err(|error| {
-            Failure::at(
-                Stage::ModuleLoad,
-                Some(&entry.name),
-                "ModuleParamsInvalid",
-                error.to_string(),
-            )
-        })?;
+    let params = substitute_by_name_params(&entry.params).map_err(|error| {
+        Failure::at(
+            Stage::ModuleLoad,
+            Some(&entry.name),
+            "ModuleParamsInvalid",
+            error.to_string(),
+        )
+    })?;
     let params = CString::new(params).map_err(|_| {
         Failure::at(
             Stage::Configuration,
@@ -832,13 +821,27 @@ mod tests {
     }
 
     #[test]
-    fn by_name_follows_symlinks_and_rejects_non_block_targets() {
-        let root = std::env::temp_dir().join(format!("esu-by-name-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
-        std::os::unix::fs::symlink("/dev/null", root.join("bdsvars")).unwrap();
-        let error = substitute_by_name_params("dev=by-name:bdsvars", &root).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        fs::remove_dir_all(root).unwrap();
+    fn sysfs_partition_parameters_need_no_by_name_device_nodes() {
+        let sources = vec![
+            (
+                "DEVTYPE=partition\nPARTNAME=bdsvars\n".into(),
+                "259:3\n".into(),
+            ),
+            ("DEVTYPE=partition\nPARTNAME=esp\n".into(), "8:16\n".into()),
+        ];
+        let value = substitute_params("dev=by-name:bdsvars other=by-name:esp", |name| {
+            let device = esu_platform::block::partition_in(name, &sources)?;
+            Ok((rustix::fs::major(device), rustix::fs::minor(device)))
+        })
+        .unwrap();
+        assert_eq!(value, "dev=259:3 other=8:16");
+        assert!(
+            substitute_params("dev=by-name:missing", |name| {
+                let device = esu_platform::block::partition_in(name, &sources)?;
+                Ok((rustix::fs::major(device), rustix::fs::minor(device)))
+            })
+            .is_err()
+        );
     }
 
     /// Record `(name, path, params)` in load order.

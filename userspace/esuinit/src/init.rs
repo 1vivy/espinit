@@ -80,8 +80,8 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     checkpoint(probe, ProbeStage::VendorLoaded);
 
     // Identity must be available even when an unmanaged boot has no ESP payload.
-    load_identity_modules()?;
-    let identity = read_identity()?;
+    let bdsvars = load_identity_modules()?;
+    let identity = read_identity(bdsvars.is_some())?;
     if state.esp_mount.is_none() {
         state.esp_mount = optional_unmanaged_payload(wait_for_esp(), identity.is_some())?;
     }
@@ -229,19 +229,22 @@ fn load_and_check_payload(
 
 /// The identity bootstrap cannot depend on an ESP manifest: direct boot may have
 /// none. These two fixed kernel modules are always supplied by the cpio.
-fn load_identity_modules() -> Result<(), Failure> {
+fn load_identity_modules() -> Result<Option<u64>, Failure> {
+    let bdsvars = classify_bdsvars(esu_platform::block::partition_by_name("bdsvars"))?;
     for name in ["kernelesp", "efivarfs"] {
-        if name == "efivarfs"
-            && fs::metadata("/dev/block/by-name/bdsvars")
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        {
+        if name == "efivarfs" && bdsvars.is_none() {
             continue;
         }
         let entry = config::ModuleEntry {
             name: name.into(),
             path: format!("lib/{name}.ko"),
             params: if name == "efivarfs" {
-                "dev=by-name:bdsvars".into()
+                let device = bdsvars.expect("efivarfs requires a discovered bdsvars partition");
+                format!(
+                    "dev={}:{}",
+                    rustix::fs::major(device),
+                    rustix::fs::minor(device)
+                )
             } else {
                 String::new()
             },
@@ -255,7 +258,19 @@ fn load_identity_modules() -> Result<(), Failure> {
             crate::platform::select_core_boot_mode()?;
         }
     }
-    Ok(())
+    Ok(bdsvars)
+}
+
+fn classify_bdsvars(device: std::io::Result<u64>) -> Result<Option<u64>, Failure> {
+    match device {
+        Ok(device) => Ok(Some(device)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Failure::new(
+            Stage::Storage,
+            "BdsvarsDiscoveryFailed",
+            error.to_string(),
+        )),
+    }
 }
 
 fn publish_empty_module_rc() -> Result<(), Failure> {
@@ -279,10 +294,8 @@ fn optional_unmanaged_payload<T>(
     }
 }
 
-fn read_identity() -> Result<Option<(String, u32)>, Failure> {
-    if fs::metadata("/dev/block/by-name/bdsvars")
-        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-    {
+fn read_identity(bdsvars_present: bool) -> Result<Option<(String, u32)>, Failure> {
+    if !bdsvars_present {
         return Ok(None);
     }
     fs::create_dir_all("/efivars")
@@ -297,19 +310,20 @@ fn read_identity() -> Result<Option<(String, u32)>, Failure> {
         "",
     )
     .map_err(|error| Failure::new(Stage::Storage, "EfivarsMountFailed", error.to_string()))?;
-    let result: Result<Option<(String, u32)>, Failure> = (|| {
-        let root = Path::new("/efivars");
-        let Some(id) = esu_platform::efivars::booted_rom(root).map_err(identity_error)? else {
-            return Ok(None);
-        };
-        let number = esu_platform::efivars::rom_number(root, &id).map_err(identity_error)?;
-        Ok(Some((id, number)))
-    })();
+    let result = read_identity_at(Path::new("/efivars"));
     let unmount = rustix::mount::unmount("/efivars", rustix::mount::UnmountFlags::empty())
         .map_err(|error| Failure::new(Stage::Storage, "EfivarsUnmountFailed", error.to_string()));
     let identity = result?;
     unmount?;
     Ok(identity)
+}
+
+fn read_identity_at(root: &Path) -> Result<Option<(String, u32)>, Failure> {
+    let Some(id) = esu_platform::efivars::booted_rom(root).map_err(identity_error)? else {
+        return Ok(None);
+    };
+    let number = esu_platform::efivars::rom_number(root, &id).map_err(identity_error)?;
+    Ok(Some((id, number)))
 }
 
 fn identity_error(error: esu_platform::efivars::Error) -> Failure {
@@ -927,6 +941,67 @@ pub fn stop_boot() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sysfs_bdsvars_discovery_reaches_managed_identity_without_by_name_links() {
+        use esu_platform::{block as platform_block, efivars};
+        let root = std::env::temp_dir().join(format!("esu-bdsvars-sysfs-{}", std::process::id()));
+        let partition = root.join("sys/class/block/storage-part");
+        let variables = root.join("efivars");
+        fs::create_dir_all(&partition).unwrap();
+        fs::create_dir(&variables).unwrap();
+        fs::write(
+            partition.join("uevent"),
+            "DEVTYPE=partition\nPARTNAME=bdsvars\n",
+        )
+        .unwrap();
+        fs::write(partition.join("dev"), "259:3\n").unwrap();
+        let sources = vec![(
+            fs::read_to_string(partition.join("uevent")).unwrap(),
+            fs::read_to_string(partition.join("dev")).unwrap(),
+        )];
+        assert!(!root.join("dev/block/by-name").exists());
+        let device = classify_bdsvars(platform_block::partition_in("bdsvars", &sources))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (rustix::fs::major(device), rustix::fs::minor(device)),
+            (259, 3)
+        );
+        assert!(
+            classify_bdsvars(platform_block::partition_in("missing", &sources))
+                .unwrap()
+                .is_none()
+        );
+        let duplicate = vec![sources[0].clone(), sources[0].clone()];
+        assert_eq!(
+            classify_bdsvars(platform_block::partition_in("bdsvars", &duplicate))
+                .unwrap_err()
+                .error,
+            "BdsvarsDiscoveryFailed"
+        );
+        // A successfully discovered varstore may still describe native/direct
+        // boot, but a selected managed ROM must never lose its Slot failure.
+        assert!(read_identity_at(&variables).unwrap().is_none());
+        efivars::write(&variables, "BootedRom", 7, b"rom2\0").unwrap();
+        assert_eq!(
+            read_identity_at(&variables).unwrap_err().error,
+            "RomRecordMissing"
+        );
+        efivars::write(&variables, "Slot-rom2", 7, b"GBS1\0\0\0\0").unwrap();
+        assert_eq!(
+            read_identity_at(&variables).unwrap_err().error,
+            "RomNumberInvalid"
+        );
+        efivars::write(&variables, "Slot-rom2", 7, b"GBS1\x02\0\0\0").unwrap();
+        assert_eq!(
+            read_identity_at(&variables).unwrap(),
+            Some(("rom2".into(), 2))
+        );
+        efivars::write(&variables, "BootedRom", 7, b"direct\0").unwrap();
+        assert!(read_identity_at(&variables).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn missing_payload_is_optional_only_without_managed_identity() {
