@@ -14,6 +14,10 @@ mod android {
     pub const WORKING_DIR: &str = "/metadata/espinit/";
     pub const BINARY_DIR: &str = concatcp!(WORKING_DIR, "bin/");
     pub const LOG_DIR: &str = concatcp!(WORKING_DIR, "log/");
+    // Boot-window logcat/dmesg captures are megabytes per boot. They live on
+    // /data, never on the managed /metadata volume, which must keep room to
+    // stage the next payload generation beside the current one.
+    pub const BOOTLOG_DIR: &str = "/data/adb/espinit/log/";
 
     pub const DAEMON_PATH: &str = concatcp!(WORKING_DIR, "espinitd");
     pub const DAEMON_LINK_PATH: &str = concatcp!(BINARY_DIR, "espinitd");
