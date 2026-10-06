@@ -24,7 +24,7 @@ ESP /
     build-id
     manifest.toml
     roms/<id>.toml
-    bin/{esuinit,esud,busybox,thin-activate,fw-views}
+    bin/{esuinit,esud,busybox,thin-activate,fw-views,avb-graft}
     modules/
       boot-hal/
         module.prop
@@ -33,6 +33,7 @@ ESP /
         vendor/bin/hw/android.hardware.boot-service.qti
       thin/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
       fw-views/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
+      avb-graft/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
     receipts/
 
 per-ROM newc takeover archive (legacy-LZ4):
@@ -50,7 +51,7 @@ See [`esu/manifest.example.toml`](esu/manifest.example.toml) and [`esu/rom.examp
 
 - `schema_version = 1` and `rom = "roms"`;
 - `modules`: the ordered kernel-module list, with `name`, `path = "lib/<name>.ko"` and parameters;
-- `modules_order`: ESP KernelSU module IDs, for example `["boot-hal", "thin", "fw-views"]`. Earlier IDs have higher overlay precedence.
+- `modules_order`: ESP KernelSU module IDs, for example `["boot-hal", "thin", "fw-views", "avb-graft"]`. Earlier IDs have higher overlay precedence.
 
 The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `firmware_views` are optional as permitted by managed-mode validation. `generation`, `rom_number`, `[platform]` and `recovery_packages` are not compatibility aliases and are rejected. ROM files are selected by bdsvars identity, not a filename inferred from a number. Number-dependent firmware validation runs against the Slot record, not host packaging guesses.
 
@@ -82,6 +83,8 @@ load and actual boot proof; host checks do not qualify device behavior.
 ## Boot stages and modules
 
 PID 1 checks the core UAPI and readiness, obtains bdsvars identity, loads the other kernel modules, runs `pid1.sh` (or `pid1-recovery.sh`), and applies the GPT projection. Script environment includes `ESU_ROM` and `ESU_ROM_NUMBER`. The thin helper validates the physical `userdata` LVM2 metadata and activates the `rom` VG without invoking a shell or mutating LVM metadata. `fw-views` creates external-origin firmware devices for secondary ROMs; see [its module documentation](esu/modules/fw-views/README.md).
+
+The generic [`avb-graft` tool/module](esu/modules/avb-graft/README.md) seeds configured `[[partitions]].metadata` on writable ROM-local views after firmware views and before GPT projection. It never writes physical origins; existing thin/ESP state wins over stale metadata. The module documentation includes host `apply`/`extract` usage, a real avbtool smoke recipe, drop interaction and release package inputs.
 
 Before init handoff PID 1 concatenates `modules/<id>/initrc/*.rc` in module order, prefixes each file with its source name, caps the result at 65536 bytes and sends the root-only set-once module-RC ioctl. It sends an empty buffer too: unset is not equivalent to empty. Recovery includes only modules carrying `recovery-ok`. No metadata-staged RC exists.
 
@@ -121,7 +124,7 @@ python3 scripts/kmi_modules.py verify --kmi-out "$KMI_OUT" \
 
 Admission verifies architecture/type, module name, MODVERSIONS CRCs against `Module.symvers`, and non-versioned imports against `System.map`. Schema-2 compatibility receipts bind the module hash and all KMI reference input hashes. Do not repair CRCs, vermagic or receipts by hand. PID 1 and `esud insmod` share the strict runtime loader; unavailable imports fail before insertion.
 
-Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate and fw-views must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](payloads/boot-hal/build-android.sh).
+Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](payloads/boot-hal/build-android.sh).
 
 ## Host packaging and build identity
 

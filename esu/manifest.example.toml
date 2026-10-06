@@ -9,7 +9,7 @@ rom = "roms"
 # module.prop with matching id. PID1 runs pid1.sh (pid1-recovery.sh in recovery,
 # only with recovery-ok); Android runs early.sh and the usual lifecycle scripts.
 # initrc/*.rc is concatenated in this order, filenames sorted, <=65536 bytes.
-modules_order = ["boot-hal", "thin", "fw-views"]
+modules_order = ["boot-hal", "thin", "fw-views", "avb-graft"]
 
 # Kernel images live ONLY in cpio /lib, never on the ESP. name/path/params are
 # required. Core and efivarfs load first to resolve identity before scripts.

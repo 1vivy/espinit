@@ -35,7 +35,7 @@ jobs:
         workspaces: . -> target
         cache-targets: false
 
-    - name: Build esuinit and phone LVM activator
+    - name: Build esuinit and phone storage helpers
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       run: |
@@ -43,7 +43,7 @@ jobs:
         BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
         test -f "$BUILTINS"
         export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo build --package esuinit --package thin-activate --target=aarch64-linux-android --release
+        cargo build --locked --package esuinit --package thin-activate --package fw-views --package avb-graft-cli --target=aarch64-linux-android --release
 
     - name: Upload esuinit artifacts
       uses: actions/upload-artifact@v7
@@ -52,6 +52,8 @@ jobs:
         path: |
           target/aarch64-linux-android/release/esuinit
           target/aarch64-linux-android/release/thin-activate
+          target/aarch64-linux-android/release/fw-views
+          target/aarch64-linux-android/release/avb-graft
 
     - name: Build esuinit x64
       env:

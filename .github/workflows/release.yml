@@ -18,6 +18,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - name: Download artifacts
         uses: actions/download-artifact@v8
 
@@ -55,6 +57,15 @@ jobs:
           mv ./esuinit-aarch64/thin-activate \
             thin-activate/thin-activate-aarch64-linux-android
 
+      - name: Package phone storage helpers
+        run: |
+          mkdir -p storage-helpers/bin storage-helpers/modules
+          cp ./esuinit-aarch64/{fw-views,avb-graft} storage-helpers/bin/
+          cp thin-activate/thin-activate-aarch64-linux-android storage-helpers/bin/thin-activate
+          cp -R esu/modules/{thin,fw-views,avb-graft} storage-helpers/modules/
+          cp esu/manifest.example.toml storage-helpers/
+          tar -C storage-helpers -czf esu-storage-helpers-aarch64-linux-android.tar.gz .
+
       - name: Rename lkm
         run: |
           mkdir -p lkm
@@ -78,4 +89,5 @@ jobs:
             esuinit/*
             esud/*
             thin-activate/*
+            esu-storage-helpers-aarch64-linux-android.tar.gz
             lkm/lkm-*_kernelesp.ko

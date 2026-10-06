@@ -1,0 +1,6 @@
+id=avb-graft
+name=AVB metadata graft
+version=1
+versionCode=1
+author=esu
+description=Seed configured metadata on writable ROM-local image views before GPT projection

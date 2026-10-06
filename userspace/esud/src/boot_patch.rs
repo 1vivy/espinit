@@ -374,13 +374,26 @@ fn validate_payload(
             "payload binary is not executable: {path}"
         );
     }
+    if manifest.modules_order.iter().any(|id| id == "avb-graft") {
+        check_binary(
+            &payload.join("bin/avb-graft"),
+            machine,
+            Linkage::StaticRequired,
+        )?;
+        ensure!(
+            files
+                .get("bin/avb-graft")
+                .is_some_and(|file| file.mode == 0o755),
+            "avb-graft module requires executable bin/avb-graft"
+        );
+    }
     for path in files.keys().filter(|path| path.starts_with("bin/")) {
         let bytes = read_bounded(platform::open_file(&root, path)?, MAX_BINARY)?;
         if bytes.starts_with(b"\x7fELF") {
             executable(
                 &bytes,
                 Some(machine),
-                if path == "bin/fw-views" {
+                if matches!(path.as_str(), "bin/fw-views" | "bin/avb-graft") {
                     Linkage::StaticRequired
                 } else {
                     Linkage::DynamicAllowed

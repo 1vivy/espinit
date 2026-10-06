@@ -6,6 +6,8 @@ members = [
     "userspace/lvm2-meta",
     "userspace/thin-activate",
     "userspace/fw-views",
+    "userspace/avb-graft",
+    "userspace/avb-graft-cli",
     "userspace/esu-platform",
     "userspace/esu-config",
 ]
@@ -16,6 +18,8 @@ default-members = [
     "userspace/lvm2-meta",
     "userspace/thin-activate",
     "userspace/fw-views",
+    "userspace/avb-graft",
+    "userspace/avb-graft-cli",
     "userspace/esu-config",
 ]
 resolver = "3"
