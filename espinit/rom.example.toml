@@ -15,8 +15,8 @@ schema_version = 1
 generation = "release-1"
 id = "android-a"
 
-# The managed ROM number, identical to this ROM's `Slot-<id>` record and
-# cross-checked by the boot HAL against the installed file: 1 is the stock ROM
+# The managed ROM number, identical to this ROM's `Slot-<id>` record (the boot
+# HAL never gates its startup on the two agreeing): 1 is the stock ROM
 # (also the default when the field is absent, so payloads predating it stay
 # valid), and 2..=5 are the additional ROMs sharing the firmware storage. Five
 # ROMs exactly fill DeviceInfo's per-ROM anti-rollback windows, so no other
