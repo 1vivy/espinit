@@ -5,7 +5,7 @@
 #include <linux/types.h>
 #include <linux/compiler_types.h>
 
-#define KSUD_PATH "/dev/esp/esu/bin/esud"
+#define KSUD_PATH "/debug_ramdisk/esu/bin/esud"
 
 void ksu_esud_init();
 void ksu_esud_exit();

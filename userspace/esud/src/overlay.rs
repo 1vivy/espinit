@@ -158,6 +158,10 @@ fn target_attrs(path: &Path) -> Result<Attrs> {
     })
 }
 
+pub fn file_context(path: &Path) -> Result<String> {
+    Ok(target_attrs(path)?.context)
+}
+
 /// Copy one partition tree. Resolve attributes before creating each destination;
 /// vfat permissions and its single mount label are never used as overlay attrs.
 pub fn stage(

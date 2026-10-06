@@ -110,6 +110,8 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     }
     let manifest = read_manifest(&payload_root)?;
     config::validate_bootstrap(&manifest).map_err(Failure::from)?;
+    mount.verify_retained()?;
+    esp::stage_executables(&payload_root, esp_device)?;
     checkpoint(probe, ProbeStage::ManifestRead);
     crate::platform::validate_modules(&payload_root, &manifest.modules_order)?;
     log_build_ids(&payload_root);
@@ -124,13 +126,11 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     let rom = read_rom(&payload_root, &manifest, &id, rom_number)?;
     config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
 
-    require_esp_file_lifecycle(&rom)?;
-
     if rom.has_writable_esp_file() {
         // A writable `esp-file:` projection (only a managed ROM >= 2 may have
         // one) needs its preallocated image reachable for writing, so the ESP
-        // is remounted read-write for this boot before any module runs. The
-        // mount is still detached before handoff like every other early mount.
+        // is remounted read-write for this boot before any module runs, and
+        // retained across handoff; module data gets a per-mount read-only view.
         esp::make_payload_writable(mount)?;
     }
 
@@ -218,6 +218,13 @@ fn load_and_check_payload(
                     "managed ROM requires gpt",
                 )
             })?;
+        esp::verify_single_esp(
+            &fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+                Failure::new(Stage::Storage, "EspMountLifecycle", error.to_string())
+            })?,
+            esp_device,
+        )
+        .map_err(|detail| Failure::new(Stage::Storage, "EspMountLifecycle", detail))?;
         resolve_backends(rom, esp_mount)?;
         let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
         if !loader::module_loaded("gpt") {
@@ -273,27 +280,6 @@ fn classify_bdsvars(device: std::io::Result<u64>) -> Result<Option<u64>, Failure
             error.to_string(),
         )),
     }
-}
-
-/// An ESP-file loop pins PID 1's contextless FAT superblock across handoff.
-/// Android init cannot mount that same initialized superblock with
-/// `context=esu_file` (device proof: 20261006T091345Z-phone-pinned-esp-mount).
-/// Fail before loop attachment or GPT publication until the kernel can
-/// retain one correctly labeled superblock with a read-only module view.
-fn require_esp_file_lifecycle(rom: &RomConfig) -> Result<(), Failure> {
-    let Some(partition) = rom
-        .partitions
-        .iter()
-        .find(|partition| matches!(partition.backend(), Ok(config::Backend::EspFile(_))))
-    else {
-        return Ok(());
-    };
-    Err(Failure::at(
-        Stage::Configuration,
-        Some(&partition.name),
-        "EspFileMountUnqualified",
-        "ESP-file backing requires a single correctly labeled retained ESP superblock",
-    ))
 }
 
 fn publish_empty_module_rc() -> Result<(), Failure> {
@@ -674,16 +660,10 @@ fn create_minimal_nodes() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Remove esu's own early mounts immediately before the real init runs, so
-/// Android's first-stage init starts with a clean mount namespace. Only mounts
-/// esu created are removed, and a teardown failure is a handoff failure.
-/// The ESP's block device identity is retained so a failed handoff exec can
-/// still re-attach the ESP and persist its receipt.
-fn prepare_handoff(state: &mut ReceiptState, mounts: &[&str]) -> Result<(), Failure> {
-    if let Some(mount) = state.esp_mount.as_mut() {
-        mount.detach()?;
-    }
-
+/// Remove only the minimal mounts. The contextless ESP and executable tmpfs
+/// remain attached across real init; loop backing references never lose their
+/// visible mount. A failed handoff writes its receipt through that same mount.
+fn prepare_handoff(_state: &mut ReceiptState, mounts: &[&str]) -> Result<(), Failure> {
     for mountpoint in mounts.iter().rev() {
         esp::detach_owned(mountpoint)?;
     }
@@ -1024,24 +1004,6 @@ mod tests {
         efivars::write(&variables, "BootedRom", 7, b"direct\0").unwrap();
         assert!(read_identity_at(&variables).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn esp_file_backend_is_refused_before_projection_for_both_access_modes() {
-        let rom = |backend: &str, read_only: bool| {
-            config::parse_rom(&format!(
-                "schema_version=1\nid=\"rom2\"\nmanaged=true\n\
-                 [[partitions]]\nname=\"vendor\"\nbackend=\"{backend}\"\nread_only={read_only}\n"
-            ))
-            .unwrap()
-        };
-        for read_only in [false, true] {
-            let selected = rom("esp-file:rom/rom2/vendor_b.img", read_only);
-            let error = require_esp_file_lifecycle(&selected).unwrap_err();
-            assert_eq!(error.error, "EspFileMountUnqualified");
-            assert_eq!(error.component.as_deref(), Some("vendor"));
-        }
-        require_esp_file_lifecycle(&rom("/dev/mapper/rom2-vendor", false)).unwrap();
     }
 
     #[test]

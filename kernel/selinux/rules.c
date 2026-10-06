@@ -96,7 +96,8 @@ void apply_kernelsu_rules()
     ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
     ksu_typeattribute(db, KERNEL_SU_FILE, "contextmount_type");
     ksu_allow(db, KERNEL_SU_FILE, KERNEL_SU_FILE, "filesystem", "associate");
-    ksu_allow(db, "init", "vfat", "filesystem", "relabelfrom");
+    // Staged executables use normal tmpfs xattrs, not a context= superblock.
+    ksu_allow(db, KERNEL_SU_FILE, "tmpfs", "filesystem", "associate");
     ksu_allow(db, "init", KERNEL_SU_FILE, "filesystem", "relabelto");
 
     // allow all!
@@ -109,6 +110,20 @@ void apply_kernelsu_rules()
         ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
         ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
     }
+
+    // The retained ESP keeps stock genfscon vfat labeling. Never execute or
+    // relabel its files: esu reads module data through a per-mount RO bind.
+    // Remove the concrete vfat grants installed by the upstream wildcard.
+    ksu_deny(db, KERNEL_SU_DOMAIN, "vfat", ALL, ALL);
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "search");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "open");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "read");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "getattr");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "file", "open");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "file", "read");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "file", "getattr");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "filesystem", "getattr");
+    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "filesystem", "remount");
 
     // our ksud triggered by init
     ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);

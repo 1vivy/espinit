@@ -71,9 +71,10 @@ pub(crate) fn arm_delayed_handoff(
     rom: &str,
     rom_number: u32,
 ) -> Result<(), Failure> {
-    let busybox = payload_root.join("bin/busybox");
+    let busybox = Path::new(crate::esp::EXECUTABLE_BIN).join("busybox");
     let command = format!(
-        "exec 3>/proc/sysrq-trigger; ./bin/busybox sleep {HANDOFF_DELAY_SECONDS}; printf c >&3"
+        "exec 3>/proc/sysrq-trigger; {} sleep {HANDOFF_DELAY_SECONDS}; printf c >&3",
+        busybox.display()
     );
     let mut child = std::process::Command::new(&busybox)
         .arg("sh")

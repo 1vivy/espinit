@@ -27,10 +27,10 @@ pub const MAX_COMPONENT_BYTES: usize = 64;
 /// Mount flags used while the ESP is read-only. The same base flag set is used
 /// for the bounded read-write receipt window so the remount only toggles
 /// `RDONLY` and cannot silently widen the block device's exposure. The ESP is
-/// deliberately executable (`NOEXEC` is not set) because the early and recovery
-/// scripts run the busybox binary from the ESP payload.
+/// always data-only; payload executables run from the retained staging tmpfs.
 pub const ESP_MOUNT_FLAGS_RW: MountFlags = MountFlags::NOSUID
     .union(MountFlags::NODEV)
+    .union(MountFlags::NOEXEC)
     .union(MountFlags::RELATIME);
 
 /// Read-only ESP mount flags, used for normal boot and after the receipt write.
@@ -136,18 +136,6 @@ pub fn record(state: &mut ReceiptState, failure: &Failure) {
         );
         return;
     };
-
-    if mount.is_detached()
-        && let Err(error) = mount.reattach_for_receipt()
-    {
-        log::error!(
-            "esu receipt storage failure: stage={:?} error={} detail={}",
-            error.stage,
-            error.error,
-            error.detail,
-        );
-        return;
-    }
 
     if let Err(error) = write_receipt(mount.path(), state.build_id.as_deref(), failure) {
         log::error!("esu receipt storage failure: {error:#}");
@@ -410,8 +398,8 @@ mod tests {
             "the shared base flags must not be widened"
         );
         assert!(
-            !ESP_MOUNT_FLAGS_RW.contains(MountFlags::NOEXEC),
-            "the ESP payload busybox must stay executable"
+            ESP_MOUNT_FLAGS_RW.contains(MountFlags::NOEXEC),
+            "ESP data must never execute"
         );
         assert!(!ESP_MOUNT_FLAGS_RW.contains(MountFlags::RDONLY));
         assert!(ESP_MOUNT_FLAGS_RO.contains(MountFlags::RDONLY));

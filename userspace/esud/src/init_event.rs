@@ -32,6 +32,7 @@ fn boot_mode() -> Result<u32> {
 
 pub fn reload() -> Result<()> {
     boot_mode()?;
+    crate::esp_lifecycle::prepare()?;
     let manifest = module::manifest()?;
     overlay::apply(Path::new(defs::MODULE_DIR), &manifest.modules_order)
 }
@@ -46,6 +47,7 @@ pub fn on_stage(stage: Stage) -> Result<()> {
         },
         "stage does not match core boot mode"
     );
+    crate::esp_lifecycle::prepare()?;
     let manifest = module::manifest()?;
     let rom = rom_isolation::runtime_rom()?;
     if matches!(stage, Stage::Early) {

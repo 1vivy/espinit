@@ -20,6 +20,7 @@ mod cli;
 #[cfg(target_os = "android")]
 mod debug;
 mod defs;
+mod esp_lifecycle;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "android")]

@@ -78,7 +78,7 @@ fn scripts_in(
             .env(
                 "PATH",
                 format!(
-                    "/dev/esp/esu/bin:{}",
+                    "/debug_ramdisk/esu/bin:{}",
                     std::env::var("PATH").unwrap_or_default()
                 ),
             );

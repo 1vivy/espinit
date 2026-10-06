@@ -93,7 +93,7 @@ pub fn is_recovery() -> bool {
 /// Run the module's early or recovery script when the ESP provides one.
 ///
 /// An absent script is not a failure: the stage simply does not exist for that
-/// module. A present script must run successfully through the ESP busybox
+/// module. A present script must run successfully through the staged busybox
 /// within a fixed deadline; a script that outlives it is killed, reaped, and
 /// reported as a classified `ScriptTimeout` failure rather than blocking PID 1.
 pub fn run_module_scripts(
@@ -142,7 +142,7 @@ pub fn run_module_scripts(
         Ok(_) => {}
     }
 
-    let bin = payload_root.join("bin");
+    let bin = Path::new(crate::esp::EXECUTABLE_BIN);
     let busybox = bin.join("busybox");
 
     match fs::symlink_metadata(&busybox) {
@@ -171,7 +171,7 @@ pub fn run_module_scripts(
         .arg("sh")
         .arg(&script)
         .env_clear()
-        .env("PATH", &bin)
+        .env("PATH", bin)
         .env("ESU_ROM", rom)
         .env("ESU_ROM_NUMBER", rom_number.to_string())
         .current_dir(&directory)

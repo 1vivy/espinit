@@ -1,6 +1,6 @@
 # esud
 
-The Android binary is generic KernelSU lifecycle/policy support without the manager. It executes directly from `/dev/esp/esu/bin/esud`; module home is the read-only `/dev/esp/esu/modules`. Init owns the ESP and efivarfs mounts. Writable state is limited to `/data/adb/esu/log`, created at post-fs-data.
+The Android binary is generic KernelSU lifecycle/policy support without the manager. PID 1 copies the complete ESP `esu/bin` tree onto `/debug_ramdisk/esu` tmpfs; esud executes from `/debug_ramdisk/esu/bin/esud`. Init relabels that tree with stock toybox chcon in the esu domain. Before executing staged helpers or module scripts, esud verifies all staging labels are exactly `esu_file`, and PID 1's retained contextless ESP at `/debug_ramdisk/esp` is exactly `vfat`. It creates a per-mount read-only, nosuid/nodev/noexec bind view at `/dev/esp`; module home is `/dev/esp/esu/modules`. Init owns efivarfs, not a second ESP mount. Writable persistent state is limited to `/data/adb/esu/log`, created at post-fs-data.
 
 Android commands: `early`, `post-fs`, `post-fs-data`, `services`, `boot-completed`, `recovery`, `sepolicy`, `insmod`, `unload`, `resetprop`, `core set-boot-mode`, `platform reload`, and the internal boot watchdog. The executable also recognizes the `resetprop` invocation name. There is no install/uninstall, manager, module mutation, metamodule or profile command.
 

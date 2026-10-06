@@ -1,5 +1,5 @@
 //! Per-ROM Android properties and shared credential-store isolation.
-//! ESP and efivarfs are mounted by init, never by this module.
+//! ESP is a retained PID-1 mount with an esud-owned RO bind; init owns efivarfs.
 
 // Everything below the decision tables runs on Android only; the host build
 // compiles this module for its tests, which use just a few of these items.
