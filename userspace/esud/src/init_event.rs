@@ -83,11 +83,20 @@ fn catch_bootlog(name: &str, command: &[&str]) -> Result<()> {
         std::fs::rename(&path, path.with_extension("old.log"))?;
     }
     let log = std::fs::File::create(path)?;
-    std::process::Command::new(defs::BUSYBOX)
+    let mut capture = std::process::Command::new(defs::BUSYBOX);
+    capture
         .args(["timeout", "-s", "9", "30s"])
         .args(command)
         .process_group(0)
-        .stdout(log)
-        .spawn()?;
+        .stdout(log);
+    // SAFETY: use the existing KernelSU child cgroup escape before exec;
+    // otherwise init reaps these captures as soon as post-fs-data returns.
+    unsafe {
+        capture.pre_exec(|| {
+            crate::utils::switch_cgroups();
+            Ok(())
+        });
+    }
+    capture.spawn()?;
     Ok(())
 }

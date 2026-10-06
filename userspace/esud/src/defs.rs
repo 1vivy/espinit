@@ -6,7 +6,6 @@ mod android {
     pub const WORKING_DIR: &str = "/data/adb/esu/";
     pub const LOG_DIR: &str = concatcp!(WORKING_DIR, "log/");
     pub const BOOTLOG_DIR: &str = LOG_DIR;
-    pub const BINARY_DIR: &str = "/dev/esp/esu/bin";
     pub const BUSYBOX: &str = "/dev/esp/esu/bin/busybox";
     pub const MODULE_DIR: &str = "/dev/esp/esu/modules";
 }

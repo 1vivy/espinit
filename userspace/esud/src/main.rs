@@ -26,7 +26,6 @@ mod host;
 mod init_event;
 #[cfg(target_os = "android")]
 mod ksucalls;
-#[cfg(target_os = "android")]
 mod module;
 mod overlay;
 #[cfg(target_os = "android")]

@@ -6,6 +6,15 @@ Android commands: `early`, `post-fs`, `post-fs-data`, `services`, `boot-complete
 
 Stages use the core boot mode rather than a manager/safe-mode/one-shot gate. They can be re-run by root. `platform reload` reapplies strict policy and mounts missing overlays, without executing scripts. Identity and ROM number come from bdsvars through `esu_platform::efivars`; a selected ROM with an invalid Slot fails, rather than defaulting to number 1. Configuration is `/dev/esp/esu/roms/<id>.toml`.
 
+`early.sh` is synchronous and strict: spawn or exit failure aborts the early
+stage. Post-fs, post-fs-data and recovery scripts share a 35-second deadline
+per stage; failures are logged and later modules still run while time remains.
+A timed-out script process group is killed and its shell reaped. `service.sh`
+and `boot-completed.sh` are launched in module order without waiting, so daemon
+loops cannot block Android init. Scripts have separate process groups and
+escape init's service cgroups before exec; background jobs from a successful
+script survive the stage. Bootlog captures use the same cgroup escape.
+
 ## ESP modules
 
 Manifest `modules_order` defines policy/script ordering and overlay precedence (first is highest). Modules use `module.prop`, optional `sepolicy.rule`, `attrs`, lifecycle scripts, `initrc/*.rc`, and partition trees `system`, `vendor`, `product`, `system_ext`, `odm`. There is no remapping of `system/vendor`.
