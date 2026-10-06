@@ -1,8 +1,11 @@
 //! Frozen AIDL V1 dispatch using the NDK C ABI (no vendor QTI libraries).
-use gblbds_boot_hal::{COMMAND_FAILED, Merge, slot_index, storage::Storage};
+use gblbds_boot_hal::{COMMAND_FAILED, Merge, check_rom_config, slot_index, storage::Storage};
 use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+
+/// Staged configuration PID1 published for the booted ROM.
+const INSTALLED_ROM: &str = "/metadata/espinit/rom.toml";
 
 type Opaque = c_void;
 #[link(name = "binder_ndk")]
@@ -186,12 +189,19 @@ pub fn run() -> Result<(), String> {
         &id,
     )
     .map_err(|e| e.to_string())?;
+    let mut record = 0;
     storage
         .transaction(|s| {
-            s.state()?;
+            record = s.state()?.rom_number;
             s.mirror(s.merge()?)
         })
         .map_err(|e| e.to_string())?;
+    // The installed configuration and the Slot record are two independent
+    // statements of this ROM's number. Booting with a disagreement would give
+    // one ROM another ROM's authority, so the HAL refuses to start.
+    let installed = std::fs::read_to_string(INSTALLED_ROM)
+        .map_err(|e| format!("cannot read {INSTALLED_ROM}: {e}"))?;
+    check_rom_config(&installed, &id, record)?;
     HAL.set(Mutex::new(Hal { storage, current }))
         .map_err(|_| "HAL already initialized")?;
 

@@ -19,6 +19,10 @@ use crate::receipt::{Failure, Stage};
 /// Only schema version 1 is accepted by both files.
 pub const SCHEMA_VERSION: u64 = 1;
 
+/// Highest managed ROM number. Five ROMs exactly fill DeviceInfo's 32
+/// per-ROM rollback windows, so a larger number could never be isolated.
+pub const MAX_ROM_NUMBER: u32 = 5;
+
 /// Manifest generation limit, matching every compiled payload component.
 pub const MAX_GENERATION_BYTES: usize = 63;
 
@@ -113,6 +117,12 @@ pub struct ModuleEntry {
     pub params: String,
 }
 
+/// Default managed ROM number: ROM 1, the stock ROM, which every payload that
+/// predates `rom_number` describes.
+fn default_rom_number() -> u32 {
+    1
+}
+
 /// Selected per-ROM configuration, parsed with unknown/duplicate/missing fields rejected.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +131,11 @@ pub struct RomConfig {
     pub generation: String,
     pub id: String,
     pub managed: bool,
+    /// Managed ROM number, identical to this ROM's `Slot-<id>` record.
+    /// `1` for the stock ROM and for every payload that predates the field;
+    /// `2..=5` for the additional ROMs that share the firmware storage.
+    #[serde(default = "default_rom_number")]
+    pub rom_number: u32,
     #[serde(default)]
     pub partitions: Vec<PartitionEntry>,
     /// Stable block nodes resolved by [`validate_backends`], in document order.
@@ -335,6 +350,17 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
 
     validate_generation(&rom.generation).map_err(|error| error.with_component("rom.toml"))?;
     validate_rom_id(&rom.id)?;
+
+    if rom.rom_number == 0 || rom.rom_number > MAX_ROM_NUMBER {
+        return Err(ConfigError::at(
+            "RomNumberInvalid",
+            "rom.toml",
+            format!(
+                "rom_number must be 1..={MAX_ROM_NUMBER}, found {}",
+                rom.rom_number
+            ),
+        ));
+    }
 
     if rom.generation != manifest_generation {
         return Err(ConfigError::at(
@@ -842,6 +868,41 @@ read_only = true
         assert_eq!(manifest.modules[1].params, "debug=0");
         assert_eq!(rom.partitions[0].backend, "/dev/block/by-name/system");
         assert!(rom.partitions[0].read_only);
+    }
+
+    #[test]
+    fn rom_number_defaults_to_the_stock_rom_and_stays_within_the_rollback_table() {
+        assert_eq!(parse_rom(ROM, "release-1").unwrap().rom_number, 1);
+
+        let explicit = ROM.replace("managed = true", "managed = true\nrom_number = 3");
+        assert_eq!(
+            parse_selected_rom(&explicit, "release-1", "android-a")
+                .unwrap()
+                .rom_number,
+            3
+        );
+
+        for invalid in [0, MAX_ROM_NUMBER + 1, u32::MAX] {
+            let text = ROM.replace(
+                "managed = true",
+                &format!("managed = true\nrom_number = {invalid}"),
+            );
+            let error = parse_rom(&text, "release-1").unwrap_err();
+            assert_eq!(error.error, "RomNumberInvalid", "{invalid}");
+            assert_eq!(error.component.as_deref(), Some("rom.toml"));
+            assert!(!error.is_pending());
+            assert!(parse_selected_rom(&text, "release-1", "android-a").is_err());
+        }
+
+        assert_eq!(
+            parse_rom(
+                &ROM.replace("managed = true", "managed = true\nrom_number = \"1\""),
+                "release-1"
+            )
+            .unwrap_err()
+            .error,
+            "RomParse"
+        );
     }
 
     #[test]

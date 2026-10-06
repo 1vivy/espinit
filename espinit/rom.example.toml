@@ -15,6 +15,14 @@ schema_version = 1
 generation = "release-1"
 id = "android-a"
 
+# The managed ROM number, identical to this ROM's `Slot-<id>` record and
+# cross-checked by the boot HAL against the installed file: 1 is the stock ROM
+# (also the default when the field is absent, so payloads predating it stay
+# valid), and 2..=5 are the additional ROMs sharing the firmware storage. Five
+# ROMs exactly fill DeviceInfo's per-ROM anti-rollback windows, so no other
+# value is accepted.
+rom_number = 1
+
 # managed = true requires successful gpt.ko projection of the complete list
 # below before Android handoff, with no stock-ROM fallback. managed = false
 # requires the partitions array to be empty or absent and must not list a gpt
@@ -71,10 +79,26 @@ name = "vendor"
 backend = "esp-file:espinit/backing/vendor.img"
 read_only = true
 
-# Platform staging requires writable projected metadata. Select the actual
-# filesystem explicitly in manifest.platform.metadata_filesystem.
+# Platform staging requires writable projected metadata. A ROM that shares the
+# physical credential store with the other ROMs projects its own per-ROM view
+# here (the operator payload uses the thin view `/dev/mapper/rom-metadata_1`)
+# and adds the shared projection below; a lone ROM may instead project
+# `/dev/block/by-name/metadata` directly. Select the actual filesystem
+# explicitly in manifest.platform.metadata_filesystem.
 [[partitions]]
 name = "metadata"
+backend = "/dev/mapper/rom-metadata_1"
+read_only = false
+
+# Every managed multi-ROM payload also projects the physical metadata partition
+# under a private name: the daemon mounts it at /metadata/shared and binds its
+# `password_slots` directory over /metadata/password_slots, so all ROMs share
+# one AOSP-managed slot map whose entries stay per-ROM (owner `host` for ROM 1,
+# `gsi<N>` for ROM N). Legal next to the ROM's own metadata view: the
+# duplicate-backend rule is per resolved device, and a partition may be a
+# backend of more than one projection. A single-ROM payload omits this entry.
+[[partitions]]
+name = "metadata_shared"
 backend = "/dev/block/by-name/metadata"
 read_only = false
 
