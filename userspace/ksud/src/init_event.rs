@@ -290,7 +290,7 @@ fn catch_bootlog(logname: &str, command: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let logdir = Path::new(defs::LOG_DIR);
+    let logdir = Path::new(defs::BOOTLOG_DIR);
     utils::ensure_dir_exists(logdir)?;
     let bootlog = logdir.join(format!("{logname}.log"));
     let oldbootlog = logdir.join(format!("{logname}.old.log"));
