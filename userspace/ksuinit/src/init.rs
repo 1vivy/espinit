@@ -466,7 +466,12 @@ fn apply_projection(rom: &RomConfig, esp_device: (u32, u32)) -> Result<(), Failu
         )
     })?;
 
-    gptctl::project(&rom.partitions, rom.resolved_backends(), &hide)
+    gptctl::project(
+        &rom.partitions,
+        rom.resolved_backends(),
+        &hide,
+        rom.rom_number >= 2,
+    )
 }
 
 /// Prepare the minimum early mounts, read the probe once, and retain only the

@@ -20,9 +20,9 @@
 
 static_assert(sizeof(struct gpt_projection) == 56);
 static_assert(sizeof(struct gpt_device) == 8);
-static_assert(sizeof(struct gpt_apply) == 5648);
+static_assert(sizeof(struct gpt_apply) == 9232);
 static_assert(sizeof(struct gpt_query) == 16);
-static_assert(GPT_IOCTL_APPLY == 0x56104701U);
+static_assert(GPT_IOCTL_APPLY == 0x64104701U);
 static_assert(GPT_IOCTL_QUERY == 0x80104702U);
 
 #define GPT_ENTRIES 128U
@@ -50,6 +50,13 @@ struct gpt_view {
 	u8 *primary, *backup;
 	struct view_map maps[GPT_MAX_PROJECTIONS];
 	struct hidden_part hidden[GPT_MAX_HIDDEN];
+	/* Seal bookkeeping: what this view made read-only, so teardown can undo
+	 * exactly that and nothing else. */
+	bool seal;
+	struct gendisk **sealed_disks;
+	unsigned int sealed_disk_count, sealed_disk_cap;
+	struct block_device **sealed_parts;
+	unsigned int sealed_part_count, sealed_part_cap;
 	atomic_t inflight;
 	struct completion drained;
 #ifdef CONFIG_BLK_INLINE_ENCRYPTION
@@ -61,6 +68,17 @@ static DEFINE_MUTEX(control_lock);
 static struct gpt_view *active;
 static bool applied;
 static bool ready;
+static bool sealed;
+
+/* Sealing is defined below `validate_apply`, but teardown restores it. */
+static void unseal_view(struct gpt_view *v);
+static int seal_view(struct gpt_view *v);
+static bool disk_is_writable_backend(const struct gpt_view *v,
+				     const struct gendisk *disk);
+static bool part_is_writable_backend(const struct gpt_view *v,
+				     const struct block_device *bdev);
+static int seal_record_disk(struct gpt_view *v, struct gendisk *disk);
+static int seal_record_part(struct gpt_view *v, struct block_device *bdev);
 #ifndef ESPINIT_GENERATION
 #error "ESPINIT_GENERATION must be defined by modules/gpt/Makefile"
 #endif
@@ -69,9 +87,12 @@ static_assert(sizeof(generation) >= 2);
 static_assert(sizeof(generation) <= 64);
 module_param_string(generation, generation, sizeof(generation), 0444);
 module_param(ready, bool, 0444);
+module_param(sealed, bool, 0444);
 MODULE_PARM_DESC(generation, "Payload generation (must match userspace)");
 MODULE_PARM_DESC(ready,
 		 "Y only after the complete GPT view and hiding are active");
+MODULE_PARM_DESC(sealed,
+		 "Y while the sealed physical endpoints are enforced");
 
 static u32 gpt_crc(const void *data, size_t size)
 {
@@ -328,6 +349,9 @@ static void destroy_view(struct gpt_view *v)
 	unsigned int i;
 	if (!v)
 		return;
+	/* The seal was applied last, so it is restored first, while every bdev
+	 * that referenced the sealed disks is still held below. */
+	unseal_view(v);
 	/* Restore physical PARTNAME endpoints before withdrawing replacements. */
 	for (i = v->hide_count; i > 0; i--) {
 		struct hidden_part *h = &v->hidden[i - 1];
@@ -378,7 +402,7 @@ static int validate_apply(const struct gpt_apply *a)
 	dev_t dev;
 	if (a->version != GPT_ABI_VERSION || !a->count ||
 	    a->count > GPT_MAX_PROJECTIONS || a->hide_count > GPT_MAX_HIDDEN ||
-	    a->flags)
+	    (a->flags & ~GPT_APPLY_FLAG_SEAL))
 		return -EINVAL;
 	for (i = 0; i < a->count; i++) {
 		const struct gpt_projection *p = &a->projections[i];
@@ -415,6 +439,171 @@ static int validate_apply(const struct gpt_apply *a)
 	return 0;
 }
 
+/* Seal the physical storage this managed view must not write.
+ *
+ * The candidate set is exactly the storage the view already references: every
+ * projection backend (a partition backend contributes its whole disk) and every
+ * hidden physical partition. Enumeration stays inside those references because
+ * the phone kernel does not export the block class this module would need to
+ * walk every gendisk; a managed ROM must reference every physical partition it
+ * hides, so the referenced set covers every logical unit it opens.
+ *
+ * A candidate disk that is not the lower disk of a writable projection becomes
+ * read-only at the gendisk (GD_READ_ONLY covers the disk and all its
+ * partitions). A candidate disk that stays writable keeps its partitions
+ * writable except for those that are neither a writable backend nor owned by
+ * another subsystem: a partition with an exclusive holder is skipped, which is
+ * what keeps the LVM physical volume (held by dm) usable under the thin pool.
+ * Every applied change is recorded so teardown restores exactly it.
+ *
+ * GD_READ_ONLY is not clearable by BLKROSET, so a sealed disk cannot be opened
+ * for writing by an internal caller again; BD_READ_ONLY on a partition is
+ * clearable by root with BLKROSET and is therefore only a friction layer. This
+ * is not a firewall: bio_check_ro only warns, so a client that opened a device
+ * before the seal keeps writing through that open. */
+static int seal_view(struct gpt_view *v)
+{
+	struct gendisk **disks;
+	unsigned int disk_count = 0, seek, i;
+	int err = 0;
+
+	if (!v->seal)
+		return 0;
+	disks = kcalloc(v->count + v->hide_count, sizeof(*disks), GFP_KERNEL);
+	if (!disks)
+		return -ENOMEM;
+	for (i = 0; i < v->count; i++) {
+		struct gendisk *disk = v->maps[i].lower->bd_disk;
+
+		for (seek = 0; seek < disk_count; seek++)
+			if (disks[seek] == disk)
+				break;
+		if (seek == disk_count)
+			disks[disk_count++] = disk;
+	}
+	for (i = 0; i < v->hide_count; i++) {
+		struct gendisk *disk = v->hidden[i].bdev->bd_disk;
+
+		for (seek = 0; seek < disk_count; seek++)
+			if (disks[seek] == disk)
+				break;
+		if (seek == disk_count)
+			disks[disk_count++] = disk;
+	}
+	for (i = 0; i < disk_count; i++) {
+		struct gendisk *disk = disks[i];
+
+		if (!disk_is_writable_backend(v, disk)) {
+			err = seal_record_disk(v, disk);
+			if (err)
+				goto out;
+			set_disk_ro(disk, true);
+			continue;
+		}
+		mutex_lock(&disk->open_mutex);
+		{
+			unsigned long index;
+			struct block_device *bdev;
+
+			xa_for_each(&disk->part_tbl, index, bdev) {
+				if (!index || bdev->bd_holder ||
+				    part_is_writable_backend(v, bdev) ||
+				    bdev_read_only(bdev))
+					continue;
+				err = seal_record_part(v, bdev);
+				if (err)
+					break;
+				bdev_set_flag(bdev, BD_READ_ONLY);
+			}
+		}
+		mutex_unlock(&disk->open_mutex);
+		if (err)
+			goto out;
+	}
+	WRITE_ONCE(sealed, true);
+out:
+	kfree(disks);
+	return err;
+}
+
+static bool disk_is_writable_backend(const struct gpt_view *v,
+				     const struct gendisk *disk)
+{
+	unsigned int i;
+
+	for (i = 0; i < v->count; i++)
+		if (!v->maps[i].ro && v->maps[i].lower->bd_disk == disk)
+			return true;
+	return false;
+}
+
+static bool part_is_writable_backend(const struct gpt_view *v,
+				     const struct block_device *bdev)
+{
+	unsigned int i;
+
+	for (i = 0; i < v->count; i++)
+		if (!v->maps[i].ro && file_bdev(v->maps[i].backend) == bdev)
+			return true;
+	return false;
+}
+
+static int seal_record_disk(struct gpt_view *v, struct gendisk *disk)
+{
+	if (v->sealed_disk_count == v->sealed_disk_cap) {
+		unsigned int next = v->sealed_disk_cap ?
+					   v->sealed_disk_cap * 2 :
+					   8;
+		struct gendisk **grown =
+			krealloc(v->sealed_disks, next * sizeof(*grown),
+				 GFP_KERNEL);
+		if (!grown)
+			return -ENOMEM;
+		v->sealed_disks = grown;
+		v->sealed_disk_cap = next;
+	}
+	v->sealed_disks[v->sealed_disk_count++] = disk;
+	return 0;
+}
+
+static int seal_record_part(struct gpt_view *v, struct block_device *bdev)
+{
+	if (v->sealed_part_count == v->sealed_part_cap) {
+		unsigned int next = v->sealed_part_cap ?
+					   v->sealed_part_cap * 2 :
+					   8;
+		struct block_device **grown =
+			krealloc(v->sealed_parts, next * sizeof(*grown),
+				 GFP_KERNEL);
+		if (!grown)
+			return -ENOMEM;
+		v->sealed_parts = grown;
+		v->sealed_part_cap = next;
+	}
+	v->sealed_parts[v->sealed_part_count++] = bdev;
+	return 0;
+}
+
+/* Undo the seal in reverse order: the per-partition flags first, then the whole
+ * disks they belong to. */
+static void unseal_view(struct gpt_view *v)
+{
+	unsigned int i;
+
+	for (i = v->sealed_part_count; i > 0; i--)
+		bdev_clear_flag(v->sealed_parts[i - 1], BD_READ_ONLY);
+	for (i = v->sealed_disk_count; i > 0; i--)
+		set_disk_ro(v->sealed_disks[i - 1], false);
+	kfree(v->sealed_parts);
+	kfree(v->sealed_disks);
+	v->sealed_parts = NULL;
+	v->sealed_disks = NULL;
+	v->sealed_part_count = v->sealed_part_cap = 0;
+	v->sealed_disk_count = v->sealed_disk_cap = 0;
+	if (v->seal)
+		WRITE_ONCE(sealed, false);
+}
+
 static int apply_view(const struct gpt_apply *a)
 {
 	struct gpt_view *v;
@@ -433,6 +622,7 @@ static int apply_view(const struct gpt_apply *a)
 	atomic_set(&v->inflight, 1);
 	v->count = a->count;
 	v->hide_count = a->hide_count;
+	v->seal = !!(a->flags & GPT_APPLY_FLAG_SEAL);
 	for (i = 0; i < v->count; i++) {
 		const struct gpt_projection *p = &a->projections[i];
 		struct view_map *m = &v->maps[i];
@@ -584,6 +774,11 @@ static int apply_view(const struct gpt_apply *a)
 		h->changed = true;
 		mutex_unlock(&h->bdev->bd_disk->open_mutex);
 	}
+	/* The seal runs last, when the whole view is live and every PARTNAME is
+	 * hidden, and fails the whole APPLY if it cannot be applied completely. */
+	err = seal_view(v);
+	if (err)
+		goto fail;
 	active = v;
 	applied = true;
 	WRITE_ONCE(ready, true);
@@ -643,8 +838,9 @@ static struct miscdevice control = {
 };
 static int __init gpt_init(void)
 {
-	/* ready is output-only, including when a caller passes ready=Y. */
+	/* ready and sealed are output-only, including when a caller passes them. */
 	ready = false;
+	sealed = false;
 	/* Parameters are read-only after load; also reject load-time spoofing. */
 	if (strcmp(generation, ESPINIT_GENERATION))
 		return -EINVAL;
@@ -662,4 +858,4 @@ static void __exit gpt_exit(void)
 module_init(gpt_init);
 module_exit(gpt_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("espinit in-memory GPT projection, ABI v1");
+MODULE_DESCRIPTION("espinit in-memory GPT projection, ABI v2");

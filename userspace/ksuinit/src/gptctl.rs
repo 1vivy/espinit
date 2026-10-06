@@ -33,6 +33,7 @@ pub fn build_apply(
     partitions: &[PartitionEntry],
     backends: &[ResolvedBackend],
     hide: &[GptDevice],
+    seal: bool,
 ) -> Result<GptApply, String> {
     if partitions.len() != backends.len() {
         return Err(format!(
@@ -66,6 +67,11 @@ pub fn build_apply(
         version: crate::gpt_uapi::GPT_ABI_VERSION,
         count: partitions.len() as u32,
         hide_count: hide.len() as u32,
+        flags: if seal {
+            crate::gpt_uapi::GPT_APPLY_FLAG_SEAL
+        } else {
+            0
+        },
         ..GptApply::default()
     };
 
@@ -247,8 +253,9 @@ pub fn project(
     partitions: &[PartitionEntry],
     backends: &[ResolvedBackend],
     hide: &[GptDevice],
+    seal: bool,
 ) -> Result<(), Failure> {
-    let payload = match build_apply(partitions, backends, hide) {
+    let payload = match build_apply(partitions, backends, hide, seal) {
         Ok(payload) => payload,
         Err(detail) => {
             return Err(Failure::new(
@@ -310,7 +317,7 @@ mod tests {
             GptDevice { major: 8, minor: 1 },
         ];
 
-        let apply = build_apply(&partitions, &backends, &hide).unwrap();
+        let apply = build_apply(&partitions, &backends, &hide, false).unwrap();
 
         assert_eq!(apply.version, crate::gpt_uapi::GPT_ABI_VERSION);
         assert_eq!(apply.count, 2);
@@ -345,6 +352,23 @@ mod tests {
     }
 
     #[test]
+    fn seal_flag_is_encoded_only_when_requested() {
+        let partitions = [partition("super", false)];
+        let backends = [backend("/dev/espinit/backends/sda1", 0x0801)];
+
+        let unsealed = build_apply(&partitions, &backends, &[], false).unwrap();
+        assert_eq!(unsealed.flags, 0);
+
+        let sealed = build_apply(&partitions, &backends, &[], true).unwrap();
+        assert_eq!(sealed.flags, crate::gpt_uapi::GPT_APPLY_FLAG_SEAL);
+        // The flag is the only difference: devices, labels and counts match.
+        assert_eq!(sealed.version, unsealed.version);
+        assert_eq!(sealed.count, unsealed.count);
+        assert_eq!(sealed.hide_count, unsealed.hide_count);
+        assert_eq!(sealed.projections[0], unsealed.projections[0]);
+    }
+
+    #[test]
     fn misc_minor_requires_an_exact_two_field_name() {
         let contents = "  1 psaux\n242 gptctl\n243 gptctl-extra\n";
         assert_eq!(misc_minor(contents, "gptctl"), Some(242));
@@ -360,8 +384,8 @@ mod tests {
             backend("/dev/espinit/backends/sda2", 0x0802),
         ];
 
-        assert!(build_apply(&partitions, &backends, &[]).is_err());
-        assert!(build_apply(&[], &[], &[]).is_err());
+        assert!(build_apply(&partitions, &backends, &[], false).is_err());
+        assert!(build_apply(&[], &[], &[], false).is_err());
 
         let many: Vec<PartitionEntry> = (0..=crate::gpt_uapi::GPT_MAX_PROJECTIONS)
             .map(|index| partition(&format!("p{index}"), true))
@@ -369,10 +393,10 @@ mod tests {
         let many_backends: Vec<ResolvedBackend> = (0..=crate::gpt_uapi::GPT_MAX_PROJECTIONS)
             .map(|index| backend("/dev/loop0", 0x0700 + index as u64))
             .collect();
-        assert!(build_apply(&many, &many_backends, &[]).is_err());
+        assert!(build_apply(&many, &many_backends, &[], false).is_err());
 
         let hide = vec![GptDevice::default(); crate::gpt_uapi::GPT_MAX_HIDDEN + 1];
-        assert!(build_apply(&partitions, &backends[..1], &hide).is_err());
+        assert!(build_apply(&partitions, &backends[..1], &hide, false).is_err());
 
         // A label outside the ABI is rejected before any ioctl is attempted.
         let long = [partition(
@@ -380,7 +404,7 @@ mod tests {
             true,
         )];
         let long_backend = [backend("/dev/loop0", 0x0700)];
-        assert!(build_apply(&long, &long_backend, &[]).is_err());
+        assert!(build_apply(&long, &long_backend, &[], false).is_err());
     }
 
     #[test]
@@ -394,7 +418,10 @@ mod tests {
         verify_query(&good, 2).unwrap();
 
         for query in [
-            GptQuery { version: 2, ..good },
+            GptQuery {
+                version: crate::gpt_uapi::GPT_ABI_VERSION + 1,
+                ..good
+            },
             GptQuery { active: 0, ..good },
             GptQuery { active: 2, ..good },
             GptQuery { count: 1, ..good },
