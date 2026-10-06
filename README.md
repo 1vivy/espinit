@@ -207,9 +207,11 @@ A projection spans exactly the entire backend block device; no resizing, implici
 
 ## LVM activation
 
-Managed phone payloads place `thin` before `gpt` and ship
-`modules/thin/early.sh`, which executes the argument-free `thin-activate`
-binary. The activator finds exactly one physical GPT partition whose sysfs
+Managed phone payloads place `thin` before `gpt` and ship both
+`modules/thin/early.sh` and `modules/thin/recovery.sh`, which execute the
+argument-free `thin-activate` binary: managed recovery projects the same LV
+backends, so a payload without the recovery script fails closed in recovery with
+`RomBackendUnavailable`. The activator finds exactly one physical GPT partition whose sysfs
 `PARTNAME` is `userdata`, creates one private node from its kernel-reported
 major/minor pair, and reads the LVM2 label and committed text metadata
 read-only. It requires the PV byte size and UUID to match a single-PV VG named
@@ -228,6 +230,7 @@ thin IDs, accept arguments, or guess another PV/VG.
 
 Managed ROMs `2..=5` also list `fw-views` between `thin` and `gpt`. That entry
 is a **userspace helper module**, not a kernel module: `modules/fw-views/early.sh`
+(and the identical `recovery.sh`)
 runs the argument-free `bin/fw-views`, which resolves the selected ROM exactly
 like PID 1 does and creates one external-origin thin device per `firmware_views`
 entry of that ROM. Unwritten blocks then read the physical firmware partition's
