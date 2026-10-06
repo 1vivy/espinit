@@ -60,6 +60,12 @@ enum Commands {
         params: Vec<String>,
     },
 
+    /// Configure the core from a root recovery shell
+    Core {
+        #[command(subcommand)]
+        command: Core,
+    },
+
     /// Install the esu userspace component
     Install,
 
@@ -104,6 +110,15 @@ enum Commands {
     Initrc {
         #[command(subcommand)]
         command: Initrc,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Core {
+    /// Set the boot mode once (1 = Android, 2 = recovery)
+    SetBootMode {
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=2))]
+        mode: u32,
     },
 }
 
@@ -381,6 +396,9 @@ pub fn run() -> Result<()> {
         Commands::BootWatchdog { seconds } => crate::boot_watchdog::run(seconds),
 
         Commands::Insmod { module, params } => debug::insmod(&module, &params),
+        Commands::Core { command } => match command {
+            Core::SetBootMode { mode } => esuinit::set_core_boot_mode(mode),
+        },
 
         Commands::Module { command } => {
             utils::switch_mnt_ns(1)?;

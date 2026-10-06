@@ -73,8 +73,6 @@ int esu_set_platform_boot_mode(int mode)
 {
     int previous;
 
-    if (task_pid_nr(current) != 1)
-        return -EPERM;
     if (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)
         return -EINVAL;
     previous = READ_ONCE(platform_boot_mode);

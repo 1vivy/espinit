@@ -89,18 +89,6 @@ int __init esu_init(void)
     }
 #endif
 
-#ifdef MODULE
-    /*
-     * esu hooks the boot path, so kernelesp.ko must be loaded by init
-     * (PID 1) during early boot. A later load would leave the device in a
-     * partially initialized state, so refuse it before any side effect.
-     */
-    if (current->pid != 1) {
-        pr_err("esu can only be loaded by init (pid 1), refusing load from pid %d\n", current->pid);
-        return -EPERM;
-    }
-#endif
-
 #ifdef CONFIG_KERNELESP_DEBUG
     pr_alert("*************************************************************");
     pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
