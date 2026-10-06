@@ -134,7 +134,10 @@ fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
             (".text", vec![0; 4], 1, 6, 0, 0),
             (
                 ".modinfo",
-                format!("name={name}\0vermagic=6.12-test modversions aarch64\0").into_bytes(),
+                format!(
+                    "name={name}\0vermagic=6.12-test SMP preempt mod_unload modversions aarch64\0"
+                )
+                .into_bytes(),
                 1,
                 2,
                 0,
@@ -203,7 +206,7 @@ impl Fixture {
             fs::write(&path, &binary).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        fs::write(payload.join("manifest.toml"), format!("schema_version = 1\ngeneration = \"{GENERATION}\"\nrom = \"roms\"\n[platform]\nmetadata_filesystem = \"ext4\"\npackages = []\n[[modules]]\nname = \"kernelesp\"\npath = \"modules/kernelesp.ko\"\nparams = \"\"\n")).unwrap();
+        fs::write(payload.join("manifest.toml"), format!("schema_version = 1\ngeneration = \"{GENERATION}\"\nrom = \"roms\"\n[platform]\nmetadata_filesystem = \"ext4\"\npackages = []\n[[modules]]\nname = \"kernelesp\"\npath = \"lib/kernelesp.ko\"\nparams = \"\"\n")).unwrap();
         fs::write(payload.join("roms/rom1.toml"), format!("schema_version = 1\ngeneration = \"{GENERATION}\"\nid = \"rom1\"\nmanaged = false\n")).unwrap();
         let source = root.path().join("kernel-src");
         let output = root.path().join("kernel-out");
@@ -232,6 +235,9 @@ impl Fixture {
         )
         .unwrap();
         fs::write(output.join("Module.symvers"), "0x12345678\tmodule_layout\tvmlinux\tEXPORT_SYMBOL\n0x11223344\tknown\tvmlinux\tEXPORT_SYMBOL\n").unwrap();
+        fs::write(output.join("System.map"), "ffff000000001000 T known\n").unwrap();
+        let modules = root.path().join("modules");
+        fs::create_dir(&modules).unwrap();
         let mut symbols = vec![0u8; 48];
         put32(&mut symbols, 24, 1);
         symbols[28] = 0x10;
@@ -250,28 +256,23 @@ impl Fixture {
         )
         .unwrap();
         let module = module_fixture(GENERATION);
-        fs::write(payload.join("modules/kernelesp.ko"), &module).unwrap();
+        fs::write(modules.join("kernelesp.ko"), &module).unwrap();
         // Test-only provenance for this synthetic kernel. Production has no path
         // that creates compatibility receipts or writes kernel version data.
         let mut inputs = BTreeMap::new();
         for path in [
-            &config,
-            &source.join("Makefile"),
-            &output.join(".config"),
-            &output.join("include/config/auto.conf"),
-            &output.join("include/generated/autoconf.h"),
-            &output.join("include/generated/utsrelease.h"),
             &output.join("Module.symvers"),
-            &output.join("vmlinux"),
+            &output.join("System.map"),
+            &output.join("include/generated/utsrelease.h"),
         ] {
             inputs.insert(
                 path.to_str().unwrap().to_owned(),
                 digest(&fs::read(path).unwrap()),
             );
         }
-        let receipt = serde_json::json!({"schema_version": 1, "kernel_src": source, "kernel_out": output, "kernel_config": config, "stable": "1", "inputs": inputs, "module_sha256": digest(&module)});
+        let receipt = serde_json::json!({"schema_version": 2, "kmi": {"branch": "android16-6.12", "generation": 6}, "kmi_out_inputs": inputs, "imports": {"versioned": 2, "kallsyms": []}, "module_sha256": digest(&module)});
         fs::write(
-            payload.join("modules/kernelesp.ko.compat.json"),
+            modules.join("kernelesp.ko.compat.json"),
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
@@ -289,6 +290,8 @@ impl Fixture {
         let args = BootPatchArgs {
             esuinit: pid1,
             payload,
+            modules_dir: modules,
+            kmi_out: output,
             rom: "rom1".to_owned(),
             out: root.path().join("result"),
             boot,
@@ -304,9 +307,7 @@ impl Fixture {
             .replace("packages = []", "packages = [\"boot-hal\", \"tiny-espsu\"]");
         fs::write(
             manifest,
-            format!(
-                "{text}\n[[modules]]\nname = \"gpt\"\npath = \"modules/gpt.ko\"\nparams = \"\"\n"
-            ),
+            format!("{text}\n[[modules]]\nname = \"gpt\"\npath = \"lib/gpt.ko\"\nparams = \"\"\n"),
         )
         .unwrap();
         let rom = payload.join("roms/rom1.toml");
@@ -315,14 +316,14 @@ impl Fixture {
             .replace("managed = false", "managed = true");
         fs::write(rom, format!("{text}\n[[partitions]]\nname = \"metadata\"\nbackend = \"/dev/mapper/metadata\"\nread_only = false\n")).unwrap();
         let module = named_module_fixture("gpt", GENERATION);
-        fs::write(payload.join("modules/gpt.ko"), &module).unwrap();
+        fs::write(self.args.modules_dir.join("gpt.ko"), &module).unwrap();
         let mut receipt: serde_json::Value = serde_json::from_slice(
-            &fs::read(payload.join("modules/kernelesp.ko.compat.json")).unwrap(),
+            &fs::read(self.args.modules_dir.join("kernelesp.ko.compat.json")).unwrap(),
         )
         .unwrap();
         receipt["module_sha256"] = digest(&module).into();
         fs::write(
-            payload.join("modules/gpt.ko.compat.json"),
+            self.args.modules_dir.join("gpt.ko.compat.json"),
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
@@ -391,12 +392,30 @@ fn stock_boot(version: u32, ramdisk: &[u8]) -> Vec<u8> {
 fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
     let binary = binary_fixture(GENERATION);
     let real_init = binary_fixture("stock-init");
-    let overlay = takeover_cpio(binary.clone(), real_init.clone()).unwrap();
+    let overlay = takeover_cpio(
+        binary.clone(),
+        real_init.clone(),
+        BTreeMap::from([("lib/kernelesp.ko".to_owned(), vec![7, 8, 9])]),
+    )
+    .unwrap();
     assert_eq!(legacy_lz4(&overlay).unwrap(), legacy_lz4(&overlay).unwrap());
     assert_eq!(overlay.len() % 512, 0);
     validate_cpio(&overlay).unwrap();
+    let modules = Cpio::load_from_data(&overlay).unwrap();
+    let module = modules.entry_by_name("lib/kernelesp.ko").unwrap();
+    assert_eq!(module.data().unwrap(), [7, 8, 9]);
+    let name_offset = overlay
+        .windows(b"lib/kernelesp.ko\0".len())
+        .position(|bytes| bytes == b"lib/kernelesp.ko\0")
+        .unwrap();
+    let mode = u32::from_str_radix(
+        std::str::from_utf8(&overlay[name_offset - 96..name_offset - 88]).unwrap(),
+        16,
+    )
+    .unwrap();
+    assert_eq!(mode & 0o777, 0o644);
     let cpio = Cpio::load_from_data(&overlay).unwrap();
-    assert_eq!(cpio.entries().len(), 2);
+    assert_eq!(cpio.entries().len(), 4);
     assert_eq!(cpio.entry_by_name("init").unwrap().data().unwrap(), binary);
     assert_eq!(
         cpio.entry_by_name("init.real").unwrap().data().unwrap(),
@@ -428,7 +447,7 @@ fn cpio_traversal_truncation_and_bad_crc_fail() {
         cpio.dump(&mut bytes).unwrap();
         assert!(validate_cpio(&bytes).is_err());
     }
-    let archive = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6]).unwrap();
+    let archive = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6], BTreeMap::new()).unwrap();
     for size in [1, 100, 110, 115, 119] {
         assert!(validate_cpio(&archive[..size]).is_err());
     }
@@ -440,7 +459,7 @@ fn cpio_traversal_truncation_and_bad_crc_fail() {
 #[test]
 fn host_transaction_is_complete_deterministic_and_nonmutating() {
     let mut fixture = Fixture::new();
-    let original = fs::read(fixture.args.payload.join("modules/kernelesp.ko")).unwrap();
+    let original = fs::read(fixture.args.modules_dir.join("kernelesp.ko")).unwrap();
     patch(&fixture.args).unwrap();
     let first_receipt = fs::read(fixture.args.out.join("receipt.json")).unwrap();
     let receipt: serde_json::Value = serde_json::from_slice(&first_receipt).unwrap();
@@ -470,7 +489,7 @@ fn host_transaction_is_complete_deterministic_and_nonmutating() {
     );
     assert_eq!(
         original,
-        fs::read(fixture.args.payload.join("modules/kernelesp.ko")).unwrap()
+        fs::read(fixture.args.modules_dir.join("kernelesp.ko")).unwrap()
     );
     assert!(!fixture.args.payload.join("bin/esuinit").exists());
 }
@@ -551,7 +570,7 @@ fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted()
             source.extend(vec![0x55; 4096]);
         }
         source.extend(b"untrusted AVB tail");
-        let overlay = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6]).unwrap();
+        let overlay = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6], BTreeMap::new()).unwrap();
         let patched = patch_boot(&source, &overlay, "rom1").unwrap();
         let image = BootImage::parse(&patched).unwrap();
         assert!(image.get_blocks().get_kernel().is_none());
@@ -573,20 +592,22 @@ fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted()
 
 #[test]
 fn missing_manifest_rom_or_module_receipt_never_publishes() {
-    for path in [
-        "manifest.toml",
-        "roms/rom1.toml",
-        "modules/kernelesp.ko.compat.json",
-    ] {
+    for path in ["manifest.toml", "roms/rom1.toml"] {
         let fixture = Fixture::new();
         fs::remove_file(fixture.args.payload.join(path)).unwrap();
         fixture.reject("No such file");
     }
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.args.modules_dir.join("kernelesp.ko.compat.json")).unwrap();
+    fixture.reject("No such file");
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.args.modules_dir.join("kernelesp.ko")).unwrap();
+    fixture.reject("required manifest module missing");
 }
 
 #[test]
 fn generation_disagreement_in_every_component_fails_closed() {
-    for path in ["roms/rom1.toml", "bin/esud", "modules/kernelesp.ko"] {
+    for path in ["roms/rom1.toml", "bin/esud"] {
         let fixture = Fixture::new();
         let path = fixture.args.payload.join(path);
         if path
@@ -615,10 +636,7 @@ fn generation_disagreement_in_every_component_fails_closed() {
 #[test]
 fn receipt_hash_and_exact_kernel_inputs_are_not_trusted() {
     let fixture = Fixture::new();
-    let path = fixture
-        .args
-        .payload
-        .join("modules/kernelesp.ko.compat.json");
+    let path = fixture.args.modules_dir.join("kernelesp.ko.compat.json");
     let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     receipt["module_sha256"] = "0".repeat(64).into();
     fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
@@ -628,8 +646,8 @@ fn receipt_hash_and_exact_kernel_inputs_are_not_trusted() {
     fixture.reject("CRC mismatch");
     let fixture = Fixture::new();
     fs::write(
-        fixture.root.path().join("kernel-src/Makefile"),
-        "VERSION = 7\n",
+        fixture.root.path().join("kernel-out/System.map"),
+        "ffff000000001000 T different\n",
     )
     .unwrap();
     fixture.reject("mismatched build receipt");
@@ -646,7 +664,7 @@ fn traversal_symlink_orphan_module_and_existing_output_fail_closed() {
         &path,
         fs::read_to_string(&path)
             .unwrap()
-            .replace("modules/kernelesp.ko", "../kernelesp.ko"),
+            .replace("lib/kernelesp.ko", "../kernelesp.ko"),
     )
     .unwrap();
     fixture.reject("Path");
@@ -655,7 +673,7 @@ fn traversal_symlink_orphan_module_and_existing_output_fail_closed() {
     fixture.reject("symlink");
     let fixture = Fixture::new();
     fs::write(fixture.args.payload.join("modules/unlisted.ko"), b"orphan").unwrap();
-    fixture.reject("unlisted module");
+    fixture.reject("kernel modules must be supplied");
     let fixture = Fixture::new();
     fs::create_dir(&fixture.args.out).unwrap();
     fs::write(fixture.args.out.join("keep"), b"user file").unwrap();
@@ -773,7 +791,6 @@ fn managed_payload_stages_both_packages_and_rejects_stale_or_missing_sources() {
     fixture.managed();
     patch(&fixture.args).unwrap();
     for path in [
-        "modules/gpt.ko.compat.json",
         "modules/boot-hal/boot-gblbds.rc",
         "modules/tiny-espsu/install.sh",
         "modules/tiny-espsu/policy.cil",
@@ -796,12 +813,12 @@ fn managed_payload_stages_both_packages_and_rejects_stale_or_missing_sources() {
     fixture.reject("No such file");
     let fixture = Fixture::new();
     fixture.managed();
-    let receipt = fixture.args.payload.join("modules/gpt.ko.compat.json");
+    let receipt = fixture.args.modules_dir.join("gpt.ko.compat.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
-    value["kernel_out"] = "/different/kernel/output".into();
+    value["kmi_out_inputs"] = serde_json::json!({"/different/Module.symvers": "0".repeat(64)});
     fs::write(receipt, serde_json::to_vec(&value).unwrap()).unwrap();
-    fixture.reject("receipts disagree");
+    fixture.reject("mismatched build receipt");
 }
 
 #[test]

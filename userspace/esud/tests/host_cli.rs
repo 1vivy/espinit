@@ -26,7 +26,15 @@ fn host_help_exposes_only_artifact_builder() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for required in ["--esuinit", "--payload", "--rom", "--out", "--boot"] {
+    for required in [
+        "--esuinit",
+        "--payload",
+        "--modules-dir",
+        "--kmi-out",
+        "--rom",
+        "--out",
+        "--boot",
+    ] {
         assert!(help.contains(required));
     }
     for removed in [
@@ -37,7 +45,6 @@ fn host_help_exposes_only_artifact_builder() {
         "--allow-shell",
         "--enable-adbd",
         "--partition",
-        "--kmi",
     ] {
         assert!(!help.contains(removed));
     }

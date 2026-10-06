@@ -21,13 +21,13 @@ cargo build --locked --release -p esud --bin esud --target x86_64-unknown-linux-
 
 Put the resulting `esud` on your host PATH. Packaging needs Python 3.11 or newer
 as `python3`; it invokes the **embedded, unmodified** committed
-`scripts/phone_modules.py` with `-I` and its `verify` action. The script is
+`scripts/kmi_modules.py` with `-I` and its `verify` action. The script is
 embedded at build time, so an installed `esud` does not need the source checkout.
-It does need access to the exact kernel source/output/captured configuration
-recorded in each module's existing `.ko.compat.json` build receipt.
+It needs the explicit `--kmi-out` reference output containing Module.symvers,
+System.map and include/generated/utsrelease.h and schema-2 compatibility receipts.
 
-The exact-phone module build recipes documented in the repository produce those
-receipts. Build modules with the same `ESU_GENERATION` as the payload. Keep
+The KMI module recipes documented in the repository produce those
+receipts. Build core/thin/gpt with the same `ESU_GENERATION` as the payload. Keep
 the receipts alongside their `.ko` files. Do not hand-edit receipts, CRC tables,
 or vermagic strings. `esud` never manufactures or repairs them. A stripped module
 without its generation object/symbol table is not admissible.
@@ -56,13 +56,7 @@ payload/
     busybox                   executable static interpreter
     thin-activate             when required by the thin early script
   modules/
-    kernelesp.ko
-    kernelesp.ko.compat.json
-    thin.ko                   if listed in manifest.modules
-    thin.ko.compat.json
     thin/early.sh             when using the current thin activation flow
-    gpt.ko                    required for managed ROMs
-    gpt.ko.compat.json
     boot-hal/module.toml      normal managed platform package
     ...                       every declared package source file
     tiny-espsu/module.toml
@@ -76,18 +70,17 @@ placeholder ROMs or stamp over generations. It reuses PID-1's strict manifest,
 ROM and platform package validators:
 
 - `manifest.toml` must have schema 1, a valid generation, explicit ROM directory,
-  ordered modules beginning with `esu`, and `[platform]` for complete staging.
+  ordered modules beginning with `kernelesp`, and `[platform]` for complete staging.
 - `--rom rom1` selects `<manifest.rom>/rom1.toml`, whose ID and generation must
   agree. All copied ROM TOMLs must agree with the generation and managed-module
   rules. Managed ROMs require `gpt`; unmanaged ROMs must not list it.
 - Normal and recovery package plans must be complete. All listed packages,
   including ones skipped at runtime in unmanaged mode, are validated. An
-  unlisted `module.toml`, `.ko`, or orphan compatibility receipt is rejected.
-- Current exact-target verification supports the repository's `esu`, `thin`
-  and `gpt` modules. It checks their ELF generation objects and executes the
-  existing full compatibility verifier against the staged bytes, not merely a
-  module hash comparison. All module receipts must identify the same exact
-  kernel inputs. Those inputs must still exist and match their recorded hashes.
+  unlisted `module.toml` is rejected. Any `.ko` inside the ESP payload fails.
+- `--modules-dir` contains every manifest `lib/<name>.ko` and its schema-2
+  `<name>.ko.compat.json`. The captured bytes are verified against `--kmi-out`;
+  missing modules, stale receipts, CRC mismatches and missing imports fail closed.
+  Core/thin/gpt retain generation checks; upstream efivarfs has no generation.
 - `bin/esuinit` is populated from `--esu`. If already present in the source,
   it must be byte-identical; stale PID-1 copies fail rather than being hidden.
 - Supply every helper used by your scripts. Scripts are copied but never run or
@@ -116,6 +109,8 @@ preserved in the per-ROM takeover archive:
 esud boot-patch \
   --esuinit /build/esu-static \
   --payload /build/payload \
+  --modules-dir /build/modules \
+  --kmi-out /build/kmi-out \
   --rom rom1 \
   --boot /build/stock/init_boot.img \
   --out /build/artifacts/rom1
@@ -149,7 +144,8 @@ rom1/
 The canonical firmware artifact is a deterministic legacy-LZ4 stream containing
 one newc overlay. It installs esu as executable `/init` and copies the stock
 image's effective executable `/init` to the reserved `/init.real`, both mode
-`0755` with normalized metadata. The overlay contains no modules or debug policy.
+`0755` with normalized metadata. The overlay also contains manifest kernel modules
+at `lib/<name>.ko` (0644); it contains no debug policy.
 The packager rejects an absent/non-static/non-AArch64 stock init and any existing
 `/init.real` collision.
 

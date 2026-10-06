@@ -1,11 +1,11 @@
 # esu manifest
 #
 # Deployed path: /debug_ramdisk/esp/esu/manifest.toml
-# All relative paths are resolved from the ESP subtree /esu, and may not
-# be absolute or traverse symlinks or `..`.
+# Kernel `lib/*.ko` paths resolve from the ramdisk root `/`; all other relative
+# paths resolve from ESP `/esu`. Paths may not traverse symlinks or `..`.
 #
-# The manifest, selected roms/<id>.toml, PID-1 binary, esud, and every listed module
-# must all carry the same `generation` value.
+# The manifest, ROM config, binaries and core/thin/gpt carry one generation.
+# Upstream efivarfs has no generation or readiness parameters.
 #
 # The ESP is normally mounted read-only. Early hard-failure receipts use ESP
 # /esu/receipts/failure.json, never unprojected /metadata. On failure only,
@@ -27,10 +27,10 @@ packages = ["boot-hal", "tiny-espsu"]
 recovery_packages = []
 
 # Modules load strictly in document order. The first entry must be the core
-# module, named `esu`. A managed ROM additionally requires `gpt` after it
+# module, named `kernelesp`. A managed ROM additionally requires `gpt` after it
 # and before real-init handoff; an unmanaged manifest that lists `gpt` is
 # rejected, because there is no projection contract to apply. Each module must
-# pass its readiness self-check before the next entry is processed.
+# pass its readiness self-check before the next entry, except upstream efivarfs.
 #
 # An entry whose `path` ends in `.ko` is a kernel module: it is loaded, its
 # `/sys/module/<name>` generation and readiness are verified, and then its stage
@@ -50,7 +50,7 @@ recovery_packages = []
 
 [[modules]]
 name = "kernelesp"
-path = "modules/kernelesp.ko"
+path = "lib/kernelesp.ko"
 params = ""
 
 # Managed storage loads the private thin target, then runs
@@ -58,7 +58,7 @@ params = ""
 # LVM2 metadata and recreates the exact rom VG tables before projection.
 [[modules]]
 name = "thin"
-path = "modules/thin.ko"
+path = "lib/thin.ko"
 params = ""
 
 # Per-ROM firmware views, required only by a managed ROM that lists
@@ -78,5 +78,10 @@ params = ""
 # QUERY match before the gpt early/recovery script runs.
 [[modules]]
 name = "gpt"
-path = "modules/gpt.ko"
+path = "lib/gpt.ko"
 params = ""
+
+[[modules]]
+name = "efivarfs"
+path = "lib/efivarfs.ko"
+params = "dev=by-name:bdsvars"

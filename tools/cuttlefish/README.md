@@ -34,8 +34,8 @@ Required inputs, all explicit paths (`--flag` above each file):
 | `--busybox` | static interpreter for ESP scripts, `esu/bin/busybox` |
 | `--thin-activate` | output of `build-thin-activate.sh`, `esu/bin/thin-activate` |
 | `--fw-views` | `fw-views` payload helper built for the CF guest's x86_64 Android: a clean r29 NDK (a `libc.a` bundling Rust std members, e.g. the local r30 or a contaminated install, fails the static link) plus `-C link-arg=$NDK/.../libclang_rt.builtins-x86_64-android.a`, `esu/bin/fw-views` |
-| `--core-module`, `--thin-module`, `--gpt-module` | `kernelesp.ko`, `thin.ko`, `gpt.ko` built for the session kernel |
-| `--kernel-src`, `--kernel-out`, `--kernel-config` | exact source/output and independent target config; shared LKM admission requires MODVERSIONS, matching imports/export CRCs, vermagic/BTF, and build receipts |
+| `--core-module`, `--thin-module`, `--gpt-module`, `--efivarfs-module` | Four KMI-built modules, installed as `/lib/<name>.ko` in the ramdisk, never in the ESP image |
+| `--kmi-out` | Reference output containing Module.symvers, System.map and utsrelease.h |
 | `--generation` | one identifier, `[A-Za-z0-9._-]{1,63}`, written into every generation-bearing artifact |
 | `--rom-id` | required catalogue ID matching `androidboot.esu.rom`; generates `esu/roms/<id>.toml` with matching `id`, not a global/default ROM config |
 | `--output-dir` | target directory; must be empty (or hold only previous artifacts with `--overwrite`) |
@@ -58,20 +58,20 @@ tools/cuttlefish/assemble.py \
     --core-module      <kernelesp.ko> \
     --thin-module      <thin.ko> \
     --gpt-module       <gpt.ko> \
-    --kernel-src       <exact kernel source> \
-    --kernel-out       <complete exact kernel output> \
-    --kernel-config    <independent target config> \
+    --efivarfs-module  <efivarfs.ko> \
+    --kmi-out          <KMI reference output> \
     --generation       <generation> \
     --rom-id           <catalogue ROM ID> \
     --esp-size-mib     <pinned custom partition size> \
     --output-dir       <empty directory>
 ```
 
-The assembler runs the repository's shared `scripts/phone_modules.py verify`
+The assembler runs the repository's shared `scripts/kmi_modules.py verify`
 before creating or replacing any payload image. Each module needs its matching
-`<name>.ko.compat.json` beside it. The same gate applies to phone and lab
-payloads: unversioned modules, stale receipts and config mismatches are not
-accepted as a Cuttlefish exception. See [build notes](../../README.md#build-notes).
+schema-2 `<name>.ko.compat.json` beside it. CRC mismatches, missing kallsyms
+imports and stale receipts fail closed. The Cuttlefish device lane remains
+paused; this AArch64 gate is not a claim of x86_64 guest compatibility.
+See [build notes](../../README.md#build-notes).
 
 Host tools used, each through a checked subprocess argument list (never a
 shell): the supplied `avbtool`, plus `unpack_bootimg`, `mkbootimg`, `cpio`,
@@ -104,9 +104,10 @@ exactly:
 /esu/bin/thin-activate          x86_64 Android static helper
 /esu/bin/fw-views               per-ROM firmware-view helper
 /esu/bin/esud               daemon install source
-/esu/modules/kernelesp.ko
-/esu/modules/thin.ko
-/esu/modules/gpt.ko
+/lib/kernelesp.ko               ramdisk only, mode 0644
+/lib/thin.ko                    ramdisk only, mode 0644
+/lib/gpt.ko                     ramdisk only, mode 0644
+/lib/efivarfs.ko                dev=by-name:bdsvars after projection
 /esu/modules/thin/early.sh      #!/bin/sh, set -eu, exec thin-activate
 /esu/modules/fw-views/early.sh  #!/bin/sh, set -eu, exec fw-views
 /esu/modules/boot-hal/module.toml

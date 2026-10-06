@@ -19,7 +19,7 @@ use goblin::elf::{Elf, header, program_header, section_header, sym};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const VERIFIER: &[u8] = include_bytes!("../../../scripts/phone_modules.py");
+const VERIFIER: &[u8] = include_bytes!("../../../scripts/kmi_modules.py");
 const MAX_BINARY: u64 = 64 * 1024 * 1024;
 const MAX_BOOT: u64 = 512 * 1024 * 1024;
 
@@ -34,6 +34,12 @@ pub struct BootPatchArgs {
     /// Complete payload root containing manifest.toml, roms/, bin/, and modules/
     #[arg(long)]
     pub payload: PathBuf,
+    /// Kernel modules and schema-2 compatibility receipts for the ramdisk
+    #[arg(long)]
+    pub modules_dir: PathBuf,
+    /// KMI reference output used to verify the captured modules
+    #[arg(long)]
+    pub kmi_out: PathBuf,
     /// Explicit ROM ID selected from the manifest's ROM directory
     #[arg(long)]
     pub rom: String,
@@ -74,12 +80,10 @@ struct Receipt {
 #[serde(deny_unknown_fields)]
 struct CompatibilityReceipt {
     schema_version: u32,
-    kernel_src: PathBuf,
-    kernel_out: PathBuf,
-    kernel_config: PathBuf,
-    stable: String,
-    inputs: BTreeMap<String, String>,
+    kmi: serde_json::Value,
+    kmi_out_inputs: BTreeMap<String, String>,
     module_sha256: String,
+    imports: serde_json::Value,
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {
@@ -392,6 +396,10 @@ fn validate_payload(
     machine: u16,
     files: &BTreeMap<String, Artifact>,
 ) -> Result<()> {
+    ensure!(
+        !files.keys().any(|path| path.ends_with(".ko")),
+        "kernel modules must be supplied in --modules-dir, not the ESP payload"
+    );
     let root = platform::open_root(payload)?;
     let platform_config = manifest
         .platform
@@ -527,52 +535,31 @@ fn validate_payload(
 
 fn verify_modules(
     payload: &Path,
+    modules_dir: &Path,
+    kmi_out: &Path,
     manifest: &config::Manifest,
     machine: u16,
     files: &BTreeMap<String, Artifact>,
 ) -> Result<serde_json::Value> {
-    let declared: BTreeSet<_> = manifest
-        .modules
-        .iter()
-        .map(|module| module.path.as_str())
-        .collect();
-    ensure!(
-        declared.len() == manifest.modules.len(),
-        "duplicate module path"
-    );
-    for path in files.keys() {
-        if path.ends_with(".ko") {
-            ensure!(declared.contains(path.as_str()), "unlisted module: {path}");
-        }
-        if let Some(module) = path.strip_suffix(".compat.json") {
-            ensure!(
-                module.ends_with(".ko") && declared.contains(module),
-                "orphan compatibility receipt: {path}"
-            );
-        }
-    }
     let verifier = tempfile::tempdir()?;
-    let script = verifier.path().join("phone_modules.py");
+    let script = verifier.path().join("kmi_modules.py");
     write_file(&script, VERIFIER, 0o644)?;
     let mut command = Command::new("python3");
-    command.arg("-I").arg(script).arg("verify");
-    let mut first: Option<CompatibilityReceipt> = None;
+    command
+        .arg("-I")
+        .arg(script)
+        .arg("verify")
+        .arg("--kmi-out")
+        .arg(kmi_out);
+    let mut declared = BTreeSet::new();
     for module in &manifest.modules {
         if !module.path.ends_with(".ko") {
-            // A userspace helper module has no kernel ABI and no compatibility
-            // receipt: it is executed by its own module script from the ESP, so
-            // only its presence, its executability and its generation note are
-            // checked. Its parameters must stay empty for the same reason.
             ensure!(
-                matches!(module.name.as_str(), "fw-views"),
-                "phone verifier does not admit helper module {}",
+                module.name == "fw-views",
+                "KMI verifier does not admit helper module {}",
                 module.name
             );
-            ensure!(
-                module.params.is_empty(),
-                "helper module {} takes no parameters",
-                module.name
-            );
+            ensure!(module.params.is_empty(), "helper takes no parameters");
             ensure!(
                 files
                     .get(&module.path)
@@ -589,74 +576,61 @@ fn verify_modules(
             continue;
         }
         ensure!(
-            matches!(module.name.as_str(), "kernelesp" | "thin" | "gpt"),
-            "phone verifier does not admit module {}",
-            module.name
+            module.path == format!("lib/{}.ko", module.name),
+            "kernel module must use lib/<name>.ko: {}",
+            module.path
         );
-        ensure!(module.path.ends_with(".ko"), "module must use .ko suffix");
-        let bytes = read_bounded(input_file(&payload.join(&module.path))?, MAX_BINARY)?;
-        module_generation(&bytes, &module.name, &manifest.generation, machine)?;
+        ensure!(declared.insert(&module.path), "duplicate module path");
+        let name = format!("{}.ko", module.name);
+        let path = modules_dir.join(&name);
+        let bytes = input_file(&path)
+            .and_then(|file| read_bounded(file, MAX_BINARY))
+            .with_context(|| format!("required manifest module missing: {}", module.path))?;
+        if module.name != "efivarfs" {
+            module_generation(&bytes, &module.name, &manifest.generation, machine)?;
+        }
         let receipt: CompatibilityReceipt = serde_json::from_slice(&read_bounded(
-            input_file(&payload.join(format!("{}.compat.json", module.path)))?,
+            input_file(&modules_dir.join(format!("{name}.compat.json")))?,
             MAX_BINARY,
         )?)?;
         ensure!(
-            receipt.schema_version == 1
-                && receipt.stable == "1"
-                && receipt.module_sha256 == digest(&bytes),
+            receipt.schema_version == 2 && receipt.module_sha256 == digest(&bytes),
             "module/compatibility receipt mismatch: {}",
             module.name
         );
-        ensure!(
-            receipt.kernel_src.is_absolute()
-                && receipt.kernel_out.is_absolute()
-                && receipt.kernel_config.is_absolute(),
-            "compatibility receipt requires absolute kernel inputs"
-        );
-        if let Some(first) = &first {
-            ensure!(
-                first.kernel_src == receipt.kernel_src
-                    && first.kernel_out == receipt.kernel_out
-                    && first.kernel_config == receipt.kernel_config
-                    && first.inputs == receipt.inputs,
-                "module receipts disagree on exact kernel inputs"
-            );
-        } else {
-            command
-                .arg("--kernel-src")
-                .arg(&receipt.kernel_src)
-                .arg("--kernel-out")
-                .arg(&receipt.kernel_out)
-                .arg("--kernel-config")
-                .arg(&receipt.kernel_config);
-            first = Some(receipt);
-        }
-        command
-            .arg(format!("--{}", module.name))
-            .arg(payload.join(&module.path));
+        command.arg("--module").arg(path);
     }
     let output = command
         .output()
-        .context("run embedded phone_modules.py (Python 3.11+ required)")?;
+        .context("run embedded kmi_modules.py (Python 3.11+ required)")?;
     ensure!(
         output.status.success(),
-        "phone module admission failed: {} {}",
+        "KMI module admission failed: {} {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let report: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("invalid phone verifier result")?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     ensure!(
         report["status"] == "accepted",
-        "phone verifier did not accept payload"
+        "KMI verifier did not accept modules"
     );
     Ok(report)
 }
 
-fn takeover_cpio(binary: Vec<u8>, real_init: Vec<u8>) -> Result<Vec<u8>> {
+fn takeover_cpio(
+    binary: Vec<u8>,
+    real_init: Vec<u8>,
+    modules: BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>> {
     let mut cpio = Cpio::new();
     cpio.add("init", CpioEntry::regular(0o755, Box::new(binary)))?;
     cpio.add("init.real", CpioEntry::regular(0o755, Box::new(real_init)))?;
+    if !modules.is_empty() {
+        cpio.add("lib", CpioEntry::dir(0o755))?;
+    }
+    for (path, bytes) in modules {
+        cpio.add(&path, CpioEntry::regular(0o644, Box::new(bytes)))?;
+    }
     let mut bytes = Vec::new();
     cpio.dump(&mut bytes)?;
     bytes.resize(bytes.len().next_multiple_of(512), 0);
@@ -960,13 +934,48 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
     let binary_artifact = write_file(&staged_binary, &binary, 0o755)?;
     platform::check_artifact(&mut input_file(&staged_binary)?, &manifest.generation)?;
     validate_payload(&payload, &manifest, &rom, &rom_path, machine, &source_files)?;
-    let module_verification = verify_modules(&payload, &manifest, machine, &source_files)?;
+    let captured_modules = stage.path().join("modules");
+    make_dir(&captured_modules)?;
+    let mut module_files = BTreeMap::new();
+    let module_root = platform::open_root(&absolute(&args.modules_dir)?)?;
+    snapshot(
+        &absolute(&args.modules_dir)?,
+        &module_root,
+        "",
+        &captured_modules,
+        &mut module_files,
+    )?;
+    let module_verification = verify_modules(
+        &payload,
+        &captured_modules,
+        &absolute(&args.kmi_out)?,
+        &manifest,
+        machine,
+        &source_files,
+    )?;
+    let mut modules = BTreeMap::new();
+    for entry in manifest
+        .modules
+        .iter()
+        .filter(|entry| entry.path.ends_with(".ko"))
+    {
+        modules.insert(
+            entry.path.clone(),
+            read_bounded(
+                input_file(&captured_modules.join(format!("{}.ko", entry.name)))?,
+                MAX_BINARY,
+            )?,
+        );
+    }
     make_dir(&payload.join("receipts"))?;
     let mut sources: BTreeMap<_, _> = source_files
         .iter()
         .map(|(path, item)| (format!("payload/{path}"), item.clone()))
         .collect();
     sources.insert("esuinit".to_owned(), binary_artifact.clone());
+    for (path, artifact) in module_files {
+        sources.insert(format!("modules/{path}"), artifact);
+    }
     let mut artifacts: BTreeMap<_, _> = source_files
         .into_iter()
         .map(|(path, item)| (format!("esp/esu/{path}"), item))
@@ -982,7 +991,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         },
     );
     let real_init = stock_init(&source, machine)?;
-    let overlay = takeover_cpio(binary, real_init)?;
+    let overlay = takeover_cpio(binary, real_init, modules)?;
     let archive = legacy_lz4(&overlay)?;
     artifacts.insert(
         "esu.cpio".to_owned(),

@@ -195,6 +195,13 @@ fn load_and_check_payload(
     let mut projection_checked = false;
 
     for entry in manifest.modules.iter().skip(1) {
+        if entry.name == "efivarfs"
+            && std::fs::metadata("/dev/block/by-name/bdsvars")
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            log::info!("Skipping efivarfs: no bdsvars by-name device (unmanaged boot)");
+            continue;
+        }
         let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
 
         if entry.name == "gpt" {
@@ -237,7 +244,7 @@ fn load_and_check_payload(
             apply_projection(rom, esp_device)?;
             selfcheck::check_projection_ready(&entry.name, modes)?;
             projection_checked = true;
-        } else {
+        } else if entry.name != "efivarfs" {
             selfcheck::check_module(&entry.name, generation)?;
         }
 

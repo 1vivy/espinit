@@ -627,14 +627,18 @@ pub fn preload_apss_minidump() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Resolve a payload module file under the ESP `/esu` root, rejecting any
-/// symbolic link component and any non-regular file.
+/// Resolve kernel modules from the ramdisk root and helpers from the ESP,
+/// rejecting any symbolic link component and any non-regular file.
 pub fn resolve_payload_file(
     payload_root: &Path,
     relative: &str,
     component: &str,
 ) -> Result<PathBuf, Failure> {
-    let mut path = payload_root.to_path_buf();
+    let mut path = if relative.ends_with(".ko") {
+        PathBuf::from("/")
+    } else {
+        payload_root.to_path_buf()
+    };
 
     for part in relative.split('/') {
         path.push(part);
@@ -701,6 +705,48 @@ pub fn is_kernel_module(entry: &ModuleEntry) -> bool {
     entry.path.ends_with(".ko")
 }
 
+/// Substitute block-device parameter references after GPT projection.
+/// `metadata` follows the by-name symlink and obtains the target's st_rdev.
+pub fn substitute_by_name_params(params: &str, root: &Path) -> std::io::Result<String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    substitute_params(params, |name| {
+        let metadata = fs::metadata(root.join(name))?;
+        if !metadata.file_type().is_block_device() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "by-name target is not a block device",
+            ));
+        }
+        Ok((
+            rustix::fs::major(metadata.rdev()),
+            rustix::fs::minor(metadata.rdev()),
+        ))
+    })
+}
+
+fn substitute_params(
+    params: &str,
+    mut resolve: impl FnMut(&str) -> std::io::Result<(u32, u32)>,
+) -> std::io::Result<String> {
+    params
+        .split_whitespace()
+        .map(|token| {
+            let Some((prefix, name)) = token.split_once("by-name:") else {
+                return Ok(token.to_owned());
+            };
+            if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "invalid by-name partition",
+                ));
+            }
+            let (major, minor) = resolve(name)?;
+            Ok(format!("{prefix}{major}:{minor}"))
+        })
+        .collect::<std::io::Result<Vec<_>>>()
+        .map(|tokens| tokens.join(" "))
+}
+
 /// Load one ESP payload module through the existing relocation loader.
 ///
 /// `params` are passed to the kernel as module parameters and are never
@@ -715,7 +761,16 @@ pub fn load_managed_module(path: &Path, entry: &ModuleEntry) -> Result<(), Failu
         )
     })?;
 
-    let params = CString::new(entry.params.as_str()).map_err(|_| {
+    let params = substitute_by_name_params(&entry.params, Path::new("/dev/block/by-name"))
+        .map_err(|error| {
+            Failure::at(
+                Stage::ModuleLoad,
+                Some(&entry.name),
+                "ModuleParamsInvalid",
+                error.to_string(),
+            )
+        })?;
+    let params = CString::new(params).map_err(|_| {
         Failure::at(
             Stage::Configuration,
             Some(&entry.name),
@@ -767,6 +822,36 @@ pub fn module_sysfs_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn by_name_parameters_resolve_each_token() {
+        let value = substitute_params("dev=by-name:bdsvars other=by-name:esp flag=1", |name| {
+            Ok(match name {
+                "bdsvars" => (259, 3),
+                "esp" => (8, 16),
+                _ => unreachable!(),
+            })
+        })
+        .unwrap();
+        assert_eq!(value, "dev=259:3 other=8:16 flag=1");
+        assert!(substitute_params("dev=by-name:../escape", |_| Ok((8, 16))).is_err());
+        assert!(
+            substitute_params("dev=by-name:bdsvars", |_| Err(std::io::Error::from(
+                ErrorKind::NotFound
+            )))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn by_name_follows_symlinks_and_rejects_non_block_targets() {
+        let root = std::env::temp_dir().join(format!("esu-by-name-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink("/dev/null", root.join("bdsvars")).unwrap();
+        let error = substitute_by_name_params("dev=by-name:bdsvars", &root).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Record `(name, path, params)` in load order.
     fn order(modules: &VendorModules) -> Result<Vec<(String, String, String)>, Failure> {

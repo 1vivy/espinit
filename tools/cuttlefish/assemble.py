@@ -51,6 +51,7 @@ PATHS = (
     "core_module",
     "thin_module",
     "gpt_module",
+    "efivarfs_module",
 )
 BINARIES = (
     ("busybox", "bin/busybox"),
@@ -58,7 +59,7 @@ BINARIES = (
     ("fw_views", "bin/fw-views"),
     ("esud", "bin/esud"),
 )
-MODULES = (("core_module", "kernelesp"), ("thin_module", "thin"), ("gpt_module", "gpt"))
+MODULES = (("core_module", "kernelesp"), ("thin_module", "thin"), ("gpt_module", "gpt"), ("efivarfs_module", "efivarfs"))
 ESP_DIRECTORIES = (
     "esu",
     "esu/bin",
@@ -104,15 +105,17 @@ def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tu
         'packages = ["boot-hal", "tiny-espsu"]\nrecovery_packages = []\n'
     )
     for name, path in (
-        ("kernelesp", "modules/kernelesp.ko"),
-        ("thin", "modules/thin.ko"),
+        ("kernelesp", "lib/kernelesp.ko"),
+        ("thin", "lib/thin.ko"),
         # An ordered userspace helper: it runs `bin/fw-views` through its own
         # early.sh between `thin` and `gpt`, and a ROM without firmware views
         # makes it a no-op.
         ("fw-views", "bin/fw-views"),
-        ("gpt", "modules/gpt.ko"),
+        ("gpt", "lib/gpt.ko"),
+        ("efivarfs", "lib/efivarfs.ko"),
     ):
-        manifest += f'\n[[modules]]\nname = "{name}"\npath = "{path}"\nparams = ""\n'
+        params = "dev=by-name:bdsvars" if name == "efivarfs" else ""
+        manifest += f'\n[[modules]]\nname = "{name}"\npath = "{path}"\nparams = "{params}"\n'
 
     # Valid managed shape with a deliberately impossible backend: the lab lane
     # replaces this file with the complete generated GPT projection before boot.
@@ -197,7 +200,7 @@ def compress(mode: str, raw: bytes) -> bytes:
     return raw
 
 
-def add_pid1(ramdisk: bytes, pid1: Path, work: Path) -> bytes:
+def add_pid1(ramdisk: bytes, pid1: Path, work: Path, modules: dict[str, Path] | None = None) -> bytes:
     # Validate every stock archive before preserving it byte-for-byte. Android
     # initramfs commonly concatenates platform and vendor newc archives; the
     # kernel applies later members last, so a final archive installs /esuinitinit
@@ -209,11 +212,21 @@ def add_pid1(ramdisk: bytes, pid1: Path, work: Path) -> bytes:
     shutil.copyfile(pid1, root / "esuinit")
     (root / "esuinit").chmod(0o755)
     os.utime(root / "esuinit", (0, 0))
+    members = ["esuinit"]
+    if modules:
+        (root / "lib").mkdir()
+        members.append("lib")
+        for name, source in sorted(modules.items()):
+            target = root / "lib" / f"{name}.ko"
+            shutil.copyfile(source, target)
+            target.chmod(0o644)
+            os.utime(target, (0, 0))
+            members.append(f"lib/{name}.ko")
 
     addition = run(
         ["cpio", "--create", "--format=newc", "--owner=0:0", "--reproducible", "--quiet"],
         cwd=root,
-        data=b"esuinit\n",
+        data=("\n".join(members) + "\n").encode(),
     )
     _ = list(records(addition))
 
@@ -223,7 +236,7 @@ def add_pid1(ramdisk: bytes, pid1: Path, work: Path) -> bytes:
 
 
 def repack_init_boot(
-    stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path
+    stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path, modules: dict[str, Path] | None = None
 ) -> Path:
     """Install /esuinit and re-sign the fixed-size Cuttlefish init_boot."""
     original = stock.read_bytes()
@@ -255,7 +268,7 @@ def repack_init_boot(
 
     mode, raw = decompress(ramdisk)
     replacement = work / "ramdisk"
-    replacement.write_bytes(compress(mode, add_pid1(raw, pid1, work)))
+    replacement.write_bytes(compress(mode, add_pid1(raw, pid1, work, modules)))
 
     arguments[arguments.index("--ramdisk") + 1] = str(replacement)
     image = work / "init_boot.img"
@@ -389,8 +402,6 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
         )
     for key, target in BINARIES:
         files.append((sources[key], f"esu/{target}", 0o755))
-    for key, name in MODULES:
-        files.append((sources[key], f"esu/modules/{name}.ko", 0o644))
     # Manifest generation is already validated by configurations().
     generation = tomllib.loads(manifest)["generation"]
     files.extend(platform_files(sources, generation, tree))
@@ -422,14 +433,12 @@ def assemble(arguments: argparse.Namespace) -> None:
         if not source.is_file() or source.stat().st_size == 0:
             raise ValueError(f"--{name.replace('_', '-')}: input must be a nonempty regular file")
 
-    # Use the same exact-kernel admission gate as every phone module recipe.
+    # Run shared KMI admission before creating/replacing any payload image.
     # Run before creating/replacing any payload image.
     run([
-        sys.executable, REPOSITORY / "scripts/phone_modules.py", "verify",
-        "--kernel-src", arguments.kernel_src,
-        "--kernel-out", arguments.kernel_out,
-        "--kernel-config", arguments.kernel_config,
-        *(item for key, name in MODULES for item in (f"--{name}", sources[key])),
+        sys.executable, REPOSITORY / "scripts/kmi_modules.py", "verify",
+        "--kmi-out", arguments.kmi_out,
+        *(item for key, name in MODULES for item in ("--module", sources[key])),
     ])
 
     output = Path(arguments.output_dir).absolute()
@@ -454,6 +463,7 @@ def assemble(arguments: argparse.Namespace) -> None:
             sources["avbtool"],
             sources["avb_key"],
             work,
+            {name: sources[key] for key, name in MODULES},
         )
         esp = build_esp(sources, manifest, rom, work, arguments.esp_size_mib)
 
@@ -483,8 +493,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in PATHS:
         parser.add_argument(f"--{name.replace('_', '-')}", required=True, metavar="FILE")
-    for name in ("kernel-src", "kernel-out", "kernel-config"):
-        parser.add_argument(f"--{name}", required=True, metavar="PATH")
+    parser.add_argument("--kmi-out", required=True, metavar="PATH")
     parser.add_argument("--metadata-filesystem", required=True, choices=("ext4", "f2fs"))
     parser.add_argument("--generation", required=True, metavar="ID")
     parser.add_argument("--rom-id", required=True, metavar="ID")

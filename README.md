@@ -23,7 +23,7 @@ a boot that actually reaches the named stage before it can be read as a timing.
 - `esud` is the Android-side daemon, not a `su` replacement or an application privilege broker. It is installed under the mutable state root and executed by Android init as `/metadata/esu/esud`; the ESP holds only its read-only payload copy.
 - `/debug_ramdisk/esp/esu` is the runtime ESP payload root; `/metadata/esu` is the persistent Android working root after successful handoff. Early failure receipts use the ESP, not projected metadata. Do not use KernelSU's `/data/adb/ksu` state.
 - The SELinux domain/type are `esu`/`esu_file` (`u:r:esu:s0`, `u:object_r:esu_file:s0`); `esud` keeps `esu_file` on its own binary. Staged package inodes start as `metadata_file`; tiny-espsu applies the dedicated HAL and bdsvars labels before use. Public module, ioctl/install magic, anonymous-inode, and socket identities are distinct from KernelSU: the anonymous inodes are `[esu]` and `[esu_fdwrapper]`, and the info surface reports only the LKM flag. Private `ksu_` implementation prefixes remain internal, not compatibility interfaces.
-- `gpt.ko` is a later, separate ESP module, never another name for the core module.
+- `gpt.ko` projects storage and `efivarfs.ko` exposes the projected bdsvars partition. All four kernel modules live in the per-ROM ramdisk, not on the ESP.
 
 A real KernelSU installation must not be detected as an esu module, satisfy an esu self-check, or share esu state/control endpoints. SELinux policy installation does not depend on retaining syscall-table ownership: PID 1's successful policy load arms an explicit post-exec state machine, and rules are published only after the second-stage exec has completed competing pre-exec hooks. Policy construction returns errors, publication is transactional and idempotent, and a failed post-exec application rearms rather than consuming its trigger. The inherited exec hook remains a fallback. Other simultaneous hook ownership still requires integration testing; this is not a general coexistence promise.
 
@@ -42,58 +42,47 @@ These are dependency stages, not claims of device compatibility. Cuttlefish and 
 
 ## Build notes
 
-Every shipped phone LKM (`kernelesp.ko`, `thin.ko`, `gpt.ko`) uses one contract:
-[`scripts/phone_modules.py`](scripts/phone_modules.py), shared by the three
-Makefiles and the payload assembler. Supply **the exact source and complete
-output tree**, plus an independently captured full phone config. A defconfig,
-`modules_prepare` alone, a nearby GKI/KMI release or a vermagic rewrite is not
-an ABI match.
+Every shipped phone LKM (`kernelesp.ko`, `thin.ko`, `gpt.ko`, `efivarfs.ko`)
+uses [`scripts/kmi_modules.py`](scripts/kmi_modules.py), shared by the module
+Makefiles and the payload assembler. Supply the ACK `android16-6.12` generation
+6 source and a complete output with the published GKI export whitelist applied.
+A raw untrimmed `gki_defconfig` export set is not the phone's KMI: symbols trimmed
+from the published kernel must remain non-versioned imports for the relocation
+loader. `modules_prepare` alone cannot produce the required CRCs.
 
 ```sh
-export KERNEL_SRC=/path/to/exact/kernel/source
-export KERNEL_OUT=/path/to/exact/kernel/output
-export KERNEL_CONFIG=/path/to/captured-phone.config
+export KMI_SRC=/path/to/android16-6.12/source
+export KMI_OUT=/path/to/complete/trimmed/gki-output
 export ESU_GENERATION=<coordinated-payload-generation>
 make -C kernel phone JOBS=13
 make -C modules/thin JOBS=13
 make -C modules/gpt JOBS=13
-python3 scripts/phone_modules.py verify \
-    --esuinit kernel/kernelesp.ko --thin modules/thin/thin.ko --gpt modules/gpt/gpt.ko
+make -C modules/efivarfs JOBS=13
+python3 scripts/kmi_modules.py verify --kmi-out "$KMI_OUT" \
+    --module kernel/kernelesp.ko --module modules/thin/thin.ko \
+    --module modules/gpt/gpt.ko --module modules/efivarfs/efivarfs.ko
 ```
 
-The recipes fail closed before compiling unless `.config` matches the capture,
-generated configuration is current, `CONFIG_MODVERSIONS=y`, and the target's
-`CONFIG_GENDWARFKSYMS` setting is preserved. They clean old module objects and
-build with `KBUILD_GENDWARFKSYMS_STABLE=1`. Complete `Module.symvers` and `vmlinux`
-from that output are mandatory. All imported exported symbols, including
-`module_layout`, need real matching version records. Modules with exports
-(notably thin, and any core variant with exports) need corresponding export
-CRC tables; gpt's no-export shape does not. Target vermagic and BTF settings
-must match too. Never insert an empty `__versions`, synthesize CRCs or disable
-kernel checks to make a module pass.
+Builds clean old objects and use `ARCH=arm64 LLVM=1`,
+`KBUILD_GENDWARFKSYMS_STABLE=1` and `KBUILD_MODPOST_WARN=1`. Admission checks
+ELF `ET_REL` aarch64, module name, every legacy or extended version CRC against
+`Module.symvers`, and every non-versioned import against `System.map`.
+Vermagic flags must be `SMP preempt mod_unload modversions aarch64`; the release
+token is deliberately ignored because MODVERSIONS kernels ignore that token.
+There is no exact-release, full-config or BTF-presence gate.
 
-GKI release naming, exported KMI and kallsyms availability are distinct.
-`thin` must use exported KMI. Core and gpt may use the existing relocation
-loader for non-KMI imports only when those imports are defined in the exact
-`vmlinux`; their other import versions and all export CRCs remain mandatory.
-The older `check_symbol` tool is now only a DDK import diagnostic, not phone
-artifact admission.
+Each build writes `<module>.ko.compat.json` schema 2: KMI branch/generation,
+SHA-256 hashes of `Module.symvers`, `System.map` and `utsrelease.h` keyed by
+their absolute input paths, module SHA-256, and versioned import count plus
+sorted `kallsyms` imports. Generation is read from
+`KMI_SRC/build.config.constants` at build time and recorded in the receipt;
+verification checks it against `KMI_OUT/source/build.config.constants` when
+available, or the receipt when the source is absent. Keep the receipt next to
+the module; modified modules or input files invalidate it.
+`verify` prints JSON with `status: accepted` and `kmi.generation: 6`, or exits
+nonzero with a named reason. The older `check_symbol` is only a DDK diagnostic.
 
-Each successful phone build writes `<module>.ko.compat.json`, binding its
-SHA-256 to the exact source/output paths, config, generated headers, symvers,
-vmlinux and stable-build setting. Keep the receipt beside the module when
-copying it for packaging; stripping or modifying the module invalidates it.
-`verify` emits JSON on success and exits nonzero with a named reason on failure.
-Provisioners must run that command before opening a write window. The
-external GBL provisioner is not maintained in this repository.
-
-The historical `.work/thinpool-proof/.work/phone-espinit-out` is **not** a valid
-rebuild input: it disables MODVERSIONS/Rust and lacks vmlinux. The independent
-capture is `.work/thinpool-proof/.work/phone-live.config`; `phone-common` and
-`phone-stable-out` in that same parent are candidates only after their complete
-config/toolchain/release provenance matches that capture. Do not silently
-substitute them. Host regression tests: `python3 -m unittest
-scripts.test_phone_modules tools.cuttlefish.test_assemble`.
+Host gate: `python3 -m unittest scripts.test_kmi_modules`.
 
 The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--esu-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. The assembler re-signs the modified `init_boot` with the explicitly supplied key after proving that key verifies the pinned stock image. That lane is packaging and boot plumbing only; it proves no boot by itself.
 
@@ -112,11 +101,9 @@ ESP filesystem /                      # normally read-only
     │   ├── esud                      # install source, not the executed path
     │   ├── fw-views                  # per-ROM firmware-view helper (ROM >= 2)
     │   └── busybox                   # static interpreter for ESP scripts
-    ├── modules/                      # kernel payload plus explicit Android packages
-    │   ├── kernelesp.ko
+    ├── modules/                      # stage scripts and Android packages only
     │   ├── esu/early.sh
     │   ├── esu/recovery.sh
-    │   ├── gpt.ko                    # required only for managed-ROM projection
     │   ├── gpt/early.sh
     │   ├── gpt/recovery.sh
     │   ├── fw-views/early.sh          # executes bin/fw-views between thin and gpt
@@ -149,6 +136,25 @@ Kernel `.ko` loading remains exclusively controlled by `manifest.modules` in doc
 
 The host packager derives each ROM archive from that ROM's stock `init_boot`: it emits a legacy-LZ4 overlay that installs the matching static binary as `/init` and preserves the effective prior init as `/init.real`. Firmware appends the overlay after stock ramdisks and supplies only `androidboot.esu.rom=<id>`; no `rdinit` is used. On success esu executes the fixed saved path with the kernel-provided argv/envp and PID 1. A manifest cannot choose another init. This KernelSU-style takeover preserves an existing KernelSU wrapper, whose own `/init.real` remains in the stock archive. No generation fallback or implicit module discovery exists. `esud` starts through Android init only after successful handoff.
 
+The overlay also carries `lib/{kernelesp,thin,gpt,efivarfs}.ko` with mode 0644.
+The ESP payload must contain no `.ko` files. Module compatibility receipts stay
+beside the input modules, not in the ESP. Packaging captures and hashes these
+inputs and verifies them against an explicit KMI output before publishing:
+
+```sh
+cargo run --locked -p esud -- boot-patch \
+  --esuinit /path/to/esuinit --payload /path/to/esu \
+  --modules-dir /path/to/modules --kmi-out "$KMI_OUT" \
+  --rom rom1 --boot /path/to/init_boot.img --out /path/to/new-output
+```
+
+`--modules-dir` contains every manifest `lib/*.ko` and each matching
+`<name>.ko.compat.json` schema-2 receipt. A missing module or stale receipt fails
+closed. Undefined imports absent from `/proc/kallsyms` also fail before loading,
+with every missing symbol named; `esud insmod` shares the PID-1 loader.
+Root recovery shells may load kernelesp and run `esud core set-boot-mode 1`
+(Android) or `2` (recovery). The root-only ioctl remains set-once.
+
 Recovery has one explicit rescue path that is separate from normal managed
 recovery. When bootconfig contains exactly one `androidboot.mode=recovery` and
 exactly one `androidboot.esu.recovery_passthrough=true`, PID 1 tears down
@@ -168,14 +174,14 @@ See [`esu/manifest.example.toml`](esu/manifest.example.toml). TOML is used direc
 | `generation` | Nonempty release identifier, case-sensitive ASCII letters/digits plus `.`, `_`, `-`; maximum 63 bytes. It identifies one complete, coordinated payload, not a kernel version. |
 | `rom` | Relative directory of per-ROM configurations, e.g. `roms`; PID1 reads only `<rom>/<androidboot.esu.rom>.toml`. No global-file/default-ROM compatibility path. |
 | `modules` | Nonempty array of tables, processed strictly in document order. |
-| `modules[].name` | Unique logical module name, identical to the loaded module name without `.ko`. The first entry must be `esu`. |
-| `modules[].path` | Relative regular-file path of the module file, written in full and rooted at the ESP `/esu` subtree (e.g. `modules/kernelesp.ko`); no absolute paths, empty components, `.`/`..`, or symlink traversal. |
-| `modules[].params` | String of Linux module parameters, passed as module parameters, never evaluated by a shell. Empty string means no parameters. |
+| `modules[].name` | Unique logical module name, identical to the loaded module name without `.ko`. The first entry must be `kernelesp`. |
+| `modules[].path` | Kernel module paths are `lib/<name>.ko`, rooted at the ramdisk `/`; helper paths such as `bin/fw-views` are rooted at ESP `/esu`. No absolute paths, empty components, `.`/`..`, or symlink traversal. |
+| `modules[].params` | Linux parameters, never a shell expression. `by-name:<PARTNAME>` references resolve through `/dev/block/by-name/` symlinks to the target block device's `major:minor` after projection. Missing bdsvars skips efivarfs on unmanaged boots. |
 | `platform.metadata_filesystem` | Explicit `ext4` or `f2fs`, required for every payload; no probing/fallback filesystem. |
 | `platform.packages` | Unique IDs of normal Android packages; managed normal boot requires `boot-hal` and `tiny-espsu`. These two are excluded in unmanaged mode. Other selected packages remain mandatory. Unrelated to kernel load order. |
 | `platform.recovery_packages` | Optional list (default empty), staged only for recovery. The two normal HAL packages are forbidden here. |
 
-All entries are required; there are no optional loads, discovery, retries with another generation, or sorting by filename. Unknown fields, duplicate entries/keys, missing fields, and incorrect types are errors. A managed ROM requires `gpt` after `esu` and before real-init handoff; an unmanaged manifest that lists `gpt` is rejected, because there is no projection contract to apply. Other modules must obey the same generation and readiness requirements; dependencies must precede dependents.
+Entries load in manifest order without discovery or sorting. Unknown fields, duplicate entries/keys, missing fields, and incorrect types are errors. A managed ROM requires `gpt` after `kernelesp` and before real-init handoff; an unmanaged manifest that lists `gpt` is rejected. Core/thin/gpt obey generation and readiness requirements; dependencies precede dependents. Upstream efivarfs has neither parameter and is skipped only when the bdsvars by-name device is absent.
 
 ## ROM configuration
 
@@ -242,12 +248,12 @@ the schema, the authoring rule and the seal interplay.
 
 ## Generation matching and module self-check
 
-The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; `ESU_GENERATION` selects it explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
+The manifest, ROM configuration, PID-1 binary, daemon, core/thin/gpt modules and userspace helpers must carry the **same generation**. Upstream efivarfs is exempt: its compatibility is established by the KMI import gate and successful loading. `ESU_GENERATION` selects the generation explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
 
-Before loading dependent modules, PID 1 queries the esu-specific UAPI v3 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose matching `generation` and `ready` parameters before the next entry proceeds. For `gpt`, generation is checked before APPLY can publish or hide anything; readiness is checked afterwards in the projection failure stage and diagnostics include the validated requested partition/mode counts.
+Before loading dependent modules, PID 1 queries the esu-specific UAPI v3 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Thin and gpt expose matching `generation` and `ready` parameters. For `gpt`, generation is checked before APPLY can publish or hide anything; readiness is checked afterwards in the projection failure stage and diagnostics include the validated requested partition/mode counts. Efivarfs loads after projection with the projected bdsvars device number.
 
 After core validation PID1 sets its stable boot classification through the
-PID1-only, write-once control ioctl (`1` Android, `2` recovery/fastbootd), then
+root-only, write-once control ioctl (`1` Android, `2` recovery/fastbootd), then
 requires matching readback from get-info. Unset or recovery mode selects zero
 built-in/custom init RC bytes. This is a fixed boot handshake, not an
 app-facing control or a property-based fallback.
@@ -476,6 +482,9 @@ target installed:
 export ESU_GENERATION=release-1
 export ESU_NDK=/path/to/android-ndk-r29
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ESU_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo +nightly-2026-08-08 build --locked --release \
+  --target aarch64-linux-android -p esuinit --bin esuinit
 RUSTFLAGS="-C target-feature=+crt-static" \
   cargo +nightly-2026-08-08 build --locked --release \
   --target aarch64-linux-android -p thin-activate --bin thin-activate

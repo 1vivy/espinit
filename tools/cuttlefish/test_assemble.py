@@ -43,11 +43,12 @@ class PlatformPackaging(unittest.TestCase):
         self.assertEqual(
             [(module["name"], module["path"]) for module in value["modules"]],
             [
-                ("kernelesp", "modules/kernelesp.ko"),
-                ("thin", "modules/thin.ko"),
+                ("kernelesp", "lib/kernelesp.ko"),
+                ("thin", "lib/thin.ko"),
                 # The userspace helper runs between `thin` and `gpt`.
                 ("fw-views", "bin/fw-views"),
-                ("gpt", "modules/gpt.ko"),
+                ("gpt", "lib/gpt.ko"),
+                ("efivarfs", "lib/efivarfs.ko"),
             ],
         )
         self.assertEqual(value["platform"], {"metadata_filesystem": "ext4", "packages": ["boot-hal", "tiny-espsu"], "recovery_packages": []})
