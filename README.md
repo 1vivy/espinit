@@ -54,7 +54,21 @@ See [`esu/manifest.example.toml`](esu/manifest.example.toml) and [`esu/rom.examp
 
 The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `firmware_views` are optional as permitted by managed-mode validation. `generation`, `rom_number`, `[platform]` and `recovery_packages` are not compatibility aliases and are rejected. ROM files are selected by bdsvars identity, not a filename inferred from a number. Number-dependent firmware validation runs against the Slot record, not host packaging guesses.
 
-A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backends are an exact sysfs by-name partition, an exact `/dev/mapper/<name>`, an existing `/dev/loopN`, or a preallocated `esp-file:<relative-path>` attached through loop-control. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Writable ESP-file backends require a managed ROM numbered at least 2. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
+A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter are **not admitted at runtime** below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
+
+**ESP-file admission is blocked in this kernel/module build.** A loop-backed
+file pins PID 1's contextless ESP vfat superblock through handoff. Android
+init then cannot remount the same superblock with `context=esu_file`:
+the disposable phone loop proof
+`gbl-bds-lab/records/20261006T091345Z-phone-pinned-esp-mount` observed
+`EINVAL` and `Same superblock, different security settings`. PID 1 rejects
+*any* `esp-file:` backend with `EspFileMountUnqualified` before loop
+attachment or GPT publication, whether the mapping is RO or RW. ROM 1's
+current mapper/by-name-only configuration is unaffected. ROM ≥ 2
+`esp-file:` boot needs an owner-approved kernel lifecycle that creates
+one correctly labeled retained ESP superblock and a per-mount-RO Android
+module view; additional SELinux allow rules or a second FAT mount cannot
+repair the current design. This source tree does **not** qualify ROM ≥ 2.
 
 `gpt.ko` never writes disk GPT metadata or changes partition boundaries. It is a naming/projection facility, not a hostile-root isolation boundary: raw whole-LU access is not filtered. Shadowed physical backends retain native access modes so DM/LVM projections can use them.
 

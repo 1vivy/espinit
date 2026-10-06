@@ -124,6 +124,8 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     let rom = read_rom(&payload_root, &manifest, &id, rom_number)?;
     config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
 
+    require_esp_file_lifecycle(&rom)?;
+
     if rom.has_writable_esp_file() {
         // A writable `esp-file:` projection (only a managed ROM >= 2 may have
         // one) needs its preallocated image reachable for writing, so the ESP
@@ -271,6 +273,27 @@ fn classify_bdsvars(device: std::io::Result<u64>) -> Result<Option<u64>, Failure
             error.to_string(),
         )),
     }
+}
+
+/// An ESP-file loop pins PID 1's contextless FAT superblock across handoff.
+/// Android init cannot mount that same initialized superblock with
+/// `context=esu_file` (device proof: 20261006T091345Z-phone-pinned-esp-mount).
+/// Fail before loop attachment or GPT publication until the kernel can
+/// retain one correctly labeled superblock with a read-only module view.
+fn require_esp_file_lifecycle(rom: &RomConfig) -> Result<(), Failure> {
+    let Some(partition) = rom
+        .partitions
+        .iter()
+        .find(|partition| block::is_esp_file(&partition.backend))
+    else {
+        return Ok(());
+    };
+    Err(Failure::at(
+        Stage::Configuration,
+        Some(&partition.name),
+        "EspFileMountUnqualified",
+        "ESP-file backing requires a single correctly labeled retained ESP superblock",
+    ))
 }
 
 fn publish_empty_module_rc() -> Result<(), Failure> {
@@ -1001,6 +1024,24 @@ mod tests {
         efivars::write(&variables, "BootedRom", 7, b"direct\0").unwrap();
         assert!(read_identity_at(&variables).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn esp_file_backend_is_refused_before_projection_for_both_access_modes() {
+        let rom = |backend: &str, read_only: bool| {
+            config::parse_rom(&format!(
+                "schema_version=1\nid=\"rom2\"\nmanaged=true\n\
+                 [[partitions]]\nname=\"vendor\"\nbackend=\"{backend}\"\nread_only={read_only}\n"
+            ))
+            .unwrap()
+        };
+        for read_only in [false, true] {
+            let selected = rom("esp-file:rom/rom2/vendor_b.img", read_only);
+            let error = require_esp_file_lifecycle(&selected).unwrap_err();
+            assert_eq!(error.error, "EspFileMountUnqualified");
+            assert_eq!(error.component.as_deref(), Some("vendor"));
+        }
+        require_esp_file_lifecycle(&rom("/dev/mapper/rom2-vendor", false)).unwrap();
     }
 
     #[test]
