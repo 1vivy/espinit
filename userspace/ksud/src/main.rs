@@ -33,6 +33,7 @@ mod module_config;
 mod resetprop;
 #[cfg(target_os = "android")]
 mod restorecon;
+mod rom_isolation;
 #[cfg(target_os = "android")]
 mod sepolicy;
 #[cfg(target_os = "android")]

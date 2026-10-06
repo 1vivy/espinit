@@ -250,6 +250,35 @@ fn run_from_args(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Set one system property, with the same byte-copy semantics as the
+/// `resetprop <name> <value>` command.
+///
+/// `skip_svc` bypasses the read-only property service rule, so an `ro.*`
+/// property the running system already published can still be overridden; the
+/// callers here set properties Android reads later in the same boot.
+pub fn set_property(name: &str, value: &str) -> Result<()> {
+    sys_prop::init().context("Failed to initialize system property API")?;
+
+    let rp = ResetProp {
+        skip_svc: true,
+        persistent: false,
+        persist_only: false,
+        verbose: false,
+        show_context: false,
+        rebuild: false,
+    };
+
+    if rp
+        .set(name, value)
+        .with_context(|| format!("Failed to set {name}"))?
+    {
+        log::warn!("rebuild is needed after setting {name}");
+    }
+
+    info!("Set {name} to {value}");
+    Ok(())
+}
+
 /// Load system.prop file using internal resetprop API.
 ///
 /// Equivalent to `resetprop -n --file <path>`.

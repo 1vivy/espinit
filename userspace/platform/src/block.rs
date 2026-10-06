@@ -126,12 +126,21 @@ mod tests {
     #[test]
     fn an_exact_unique_partname_wins_and_absence_is_pending() {
         let sources = [
-            source("DEVTYPE=partition\nDEVNAME=sda1\nPARTNAME=metadata\n", "8:1\n"),
-            source("DEVTYPE=partition\nDEVNAME=sdb1\nPARTNAME=bdsvars\n", "65:1\n"),
+            source(
+                "DEVTYPE=partition\nDEVNAME=sda1\nPARTNAME=metadata\n",
+                "8:1\n",
+            ),
+            source(
+                "DEVTYPE=partition\nDEVNAME=sdb1\nPARTNAME=bdsvars\n",
+                "65:1\n",
+            ),
             source("DEVTYPE=disk\nDEVNAME=sda\n", "8:0\n"),
         ];
 
-        assert_eq!(partition_in("metadata", &sources).unwrap(), libc::makedev(8, 1));
+        assert_eq!(
+            partition_in("metadata", &sources).unwrap(),
+            libc::makedev(8, 1)
+        );
         assert_eq!(
             partition_in("bdsvars", &sources).unwrap(),
             libc::makedev(65, 1)
