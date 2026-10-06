@@ -449,7 +449,12 @@ allows, bootctl block permissions and init type transition. Integration adds
 `blk_file lock` for preserved flock transactions, `filesystem associate` for the
 HAL inode on labeledfs and bdsvars on tmpfs, and the narrowly targeted
 `init -> hal_bootctl_default:process2 nosuid_transition` required by a bind source
-on nosuid metadata. Packaged `policy.cil` is only a mirror, never the required path.
+on nosuid metadata, plus `hal_bootctl_default` `metadata_file` `dir search` and
+`file getattr open read`, so the HAL can read the staged
+`/metadata/espinit/rom.toml` it cross-checks against its `Slot-<id>` record
+before registering. Without that read the HAL refuses to start, and vold's
+checkpointed `/data` mount waits for `IBootControl` indefinitely.
+Packaged `policy.cil` is only a mirror, never the required path.
 
 Recovery still runs its existing projection and recovery scripts. It publishes
 a recovery snapshot without the normal HAL/helper/RC, so a previous normal
