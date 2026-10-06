@@ -267,16 +267,25 @@ out:
 static int load_module_rc_once(void)
 {
     int ret = 0;
+    int mode;
 
     mutex_lock(&module_rc_lock);
     if (module_rc_loaded)
         goto out;
-    if (!esu_platform_rc_size(READ_ONCE(platform_boot_mode), 1) || ksu_no_custom_rc) {
+    mode = READ_ONCE(platform_boot_mode);
+    if (ksu_no_custom_rc ||
+        (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)) {
         ksu_rc_len = 0;
         module_rc_len = 0;
-    } else if (!module_rc_set) {
-        ret = -ENODATA;
-        goto out;
+    } else {
+        /* Recovery retains only PID1's recovery-ok module fragments; the
+         * Android-only core service rc must not run in recovery. */
+        if (mode == ESU_PLATFORM_RECOVERY)
+            ksu_rc_len = 0;
+        if (!module_rc_set) {
+            ret = -ENODATA;
+            goto out;
+        }
     }
     module_rc_loaded = true;
 out:
