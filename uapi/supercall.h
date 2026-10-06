@@ -44,6 +44,13 @@ struct ksu_set_sepolicy_cmd {
     __aligned_u64 data; /* Input: pointer to serialized payload */
 };
 
+/* Root-only, set once before Android init reads its rc. */
+struct esu_module_rc_cmd {
+    __aligned_u64 ptr; /* Input: pointer to len bytes of init rc */
+    __u32 len; /* Input: 0..65536 bytes */
+    __u32 reserved; /* Input: must be zero */
+};
+
 struct ksu_sepolicy_cmd_hdr {
     __u32 cmd; /* Input: command type, CMD_* */
     __u32 subcmd; /* Input: command subtype */
@@ -109,6 +116,7 @@ static const __u8 KSU_UMOUNT_DEL = 2; /* delete entry, strcmp */
  * any existing KernelSU installation using type 'K'. */
 static const __u32 KSU_IOCTL_GET_INFO = _IOR('E', 2, struct ksu_get_info_cmd);
 static const __u32 ESU_IOCTL_SET_BOOT_MODE = _IOW('E', 20, __u32);
+static const __u32 ESU_IOCTL_SET_MODULE_RC = _IOW('E', 21, struct esu_module_rc_cmd);
 /* deprecated */
 static const __u32 KSU_IOCTL_GET_INFO_LEGACY = _IOC(_IOC_READ, 'E', 2, 0);
 static const __u32 KSU_IOCTL_REPORT_EVENT = _IOC(_IOC_WRITE, 'E', 3, 0);

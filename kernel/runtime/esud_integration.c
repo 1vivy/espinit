@@ -1,6 +1,7 @@
 #include "feature/selinux_hide.h"
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
+#include <linux/mutex.h>
 #include <linux/mm.h>
 #include <asm/current.h>
 #include <linux/compat.h>
@@ -33,7 +34,7 @@
 // clang-format off
 static const char KERNEL_SU_RC[] =
     "\n"
-    "service esu-platform-early " KSUD_PATH " early\n"
+    "service esu-early " KSUD_PATH " early\n"
     "    user root\n"
     "    group root\n"
     "    seclabel u:r:" KERNEL_SU_DOMAIN ":s0\n"
@@ -42,28 +43,24 @@ static const char KERNEL_SU_RC[] =
     "    reboot_on_failure reboot\n"
     "\n"
     "on init\n"
-    "    exec_start esu-platform-early\n"
+    "    mkdir /dev/esp 0700 root root\n"
+    "    wait /dev/block/by-name/esp 10\n"
+    "    mount vfat /dev/block/by-name/esp /dev/esp ro nosuid nodev fmask=0077,dmask=0077,utf8,context=u:object_r:esu_file:s0\n"
+    "    mkdir /dev/efivars 0755 root root\n"
+    "    mount efivarfs none /dev/efivars nosuid nodev noexec context=u:object_r:esu_file:s0\n"
+    "    exec_start esu-early\n"
     "\n"
-    // Android init reaches post-fs before post-fs-data; keep the synchronous
-    // post-fs module run ahead of the post-fs-data event it must not report.
     "on post-fs\n"
     "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs\n"
-    "\n"
     "on post-fs-data\n"
     "    start logd\n"
-    // We should wait for the post-fs-data finish
     "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs-data\n"
-    "\n"
     "on nonencrypted\n"
     "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
-    "\n"
     "on property:vold.decrypt=trigger_restart_framework\n"
     "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
-    "\n"
     "on property:sys.boot_completed=1\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n"
-    "\n"
-    "\n";
+    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n";
 // clang-format on
 
 static int platform_boot_mode;
@@ -200,10 +197,7 @@ void ksu_handle_execveat_esud(const char *path, struct user_arg_ptr *argv)
         if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
             pr_info("/system/bin/init second_stage executed\n");
             ksu_selinux_hide_handle_second_stage();
-            if (apply_esu_rules()) {
-                pr_err("failed to apply esu SELinux rules before second stage\n");
-                return;
-            }
+            apply_kernelsu_rules();
             cache_sid();
             setup_ksu_cred();
             init_second_stage_executed = true;
@@ -226,81 +220,68 @@ static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
 static struct file_operations fops_proxy;
 static ssize_t ksu_rc_pos = 0;
 
-#define MODULE_RC_PATH "/metadata/esu/initrc/modules.rc"
+static DEFINE_MUTEX(module_rc_lock);
 static char *module_rc_buf;
 static size_t module_rc_len;
 static ssize_t module_rc_pos;
+static bool module_rc_set;
+static bool module_rc_loaded;
 
-static struct file *open_module_rc(const char **chosen_path)
+int esu_set_module_rc(const void __user *ptr, u32 len)
 {
-    struct file *f = filp_open(MODULE_RC_PATH, O_RDONLY, 0);
+    char *buf = NULL;
+    int ret = 0;
 
-    *chosen_path = MODULE_RC_PATH;
-    return f;
+    if (len > 65536)
+        return -EINVAL;
+    mutex_lock(&module_rc_lock);
+    if (module_rc_set) {
+        ret = -EALREADY;
+        goto out;
+    }
+    if (module_rc_loaded) {
+        ret = -EBUSY;
+        goto out;
+    }
+    if (len) {
+        buf = kvmalloc(len, GFP_KERNEL);
+        if (!buf) {
+            ret = -ENOMEM;
+            goto out;
+        }
+        if (copy_from_user(buf, ptr, len)) {
+            kvfree(buf);
+            ret = -EFAULT;
+            goto out;
+        }
+    }
+    module_rc_buf = buf;
+    module_rc_len = len;
+    module_rc_set = true;
+out:
+    mutex_unlock(&module_rc_lock);
+    return ret;
 }
 
-static void load_module_rc_once(void)
+/* The read proxies append core rc first, then this immutable userspace payload. */
+static int load_module_rc_once(void)
 {
-    static bool loaded = false;
-    struct file *f;
-    const char *path = NULL;
-    loff_t pos = 0;
-    ssize_t r;
-    size_t fsize;
-    const struct cred *old_cred;
+    int ret = 0;
 
-    if (loaded)
-        return;
-    loaded = true;
-    if (!esu_platform_rc_size(READ_ONCE(platform_boot_mode), 1))
-        return;
-    if (ksu_no_custom_rc) {
-        pr_info("custom rc is disabled\n");
-        return;
+    mutex_lock(&module_rc_lock);
+    if (module_rc_loaded)
+        goto out;
+    if (!esu_platform_rc_size(READ_ONCE(platform_boot_mode), 1) || ksu_no_custom_rc) {
+        ksu_rc_len = 0;
+        module_rc_len = 0;
+    } else if (!module_rc_set) {
+        ret = -ENODATA;
+        goto out;
     }
-
-    old_cred = override_creds(ksu_cred);
-
-    f = open_module_rc(&path);
-    if (IS_ERR(f)) {
-        pr_info("module rc: open %s failed: %ld\n", path, PTR_ERR(f));
-        goto out_revert_creds;
-    }
-
-    if (!S_ISREG(file_inode(f)->i_mode)) {
-        pr_warn("module rc: %s is not a regular file\n", path);
-        goto out_close_file;
-    }
-
-    fsize = i_size_read(file_inode(f));
-    if (fsize == 0) {
-        pr_warn("module rc: skip empty module rc\n");
-        goto out_close_file;
-    }
-
-    module_rc_buf = kvmalloc(fsize, GFP_KERNEL);
-    if (!module_rc_buf) {
-        pr_err("module rc: alloc %zu failed\n", fsize);
-        goto out_close_file;
-    }
-
-    r = kernel_read(f, module_rc_buf, fsize, &pos);
-
-    if (r <= 0) {
-        pr_err("module rc: read failed: %zd\n", r);
-        kvfree(module_rc_buf);
-        module_rc_buf = NULL;
-        goto out_close_file;
-    }
-
-    module_rc_len = r;
-    pr_info("module rc: loaded %zu bytes from %s\n", module_rc_len, path);
-
-out_close_file:
-    filp_close(f, NULL);
-
-out_revert_creds:
-    revert_creds(old_cred);
+    module_rc_loaded = true;
+out:
+    mutex_unlock(&module_rc_lock);
+    return ret;
 }
 
 static void free_module_rc(void)
@@ -341,7 +322,7 @@ append_ksu_rc:
         // copy_to_user returns the number of bytes that could not be copied
         if (copy_to_user(buf + ret, KERNEL_SU_RC + ksu_rc_pos, append_count)) {
             pr_info("read_proxy: append error, totally appended %ld\n", ksu_rc_pos);
-            return ret;
+            return ret ? ret : -EFAULT;
         }
         pr_info("read_proxy: append static %zu\n", append_count);
         ksu_rc_pos += append_count;
@@ -357,7 +338,7 @@ append_module_rc:
             append_count = count - ret;
         if (copy_to_user(buf + ret, module_rc_buf + module_rc_pos, append_count)) {
             pr_info("read_proxy: module append error, totally appended %zd\n", module_rc_pos);
-            return ret;
+            return ret ? ret : -EFAULT;
         }
         pr_info("read_proxy: append module %zu\n", append_count);
         module_rc_pos += append_count;
@@ -395,7 +376,7 @@ append_ksu_rc:
         append_count = copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);
         if (!append_count) {
             pr_info("read_iter_proxy: append error, totally appended %ld\n", ksu_rc_pos);
-            return ret;
+            return ret ? ret : (iov_iter_count(to) ? -EFAULT : 0);
         }
         pr_info("read_iter_proxy: append static %zu\n", append_count);
         ksu_rc_pos += append_count;
@@ -410,7 +391,7 @@ append_module_rc:
         append_count = copy_to_iter(module_rc_buf + module_rc_pos, module_rc_len - module_rc_pos, to);
         if (!append_count) {
             pr_info("read_iter_proxy: module append error, appended %zd\n", module_rc_pos);
-            return ret;
+            return ret ? ret : (iov_iter_count(to) ? -EFAULT : 0);
         }
         pr_info("read_iter_proxy: append module %zu\n", append_count);
         module_rc_pos += append_count;
@@ -453,26 +434,18 @@ static bool is_init_rc(struct file *fp)
     return true;
 }
 
-static void ksu_install_rc_hook(struct file *file)
+static int ksu_install_rc_hook(struct file *file)
 {
-    if (!is_init_rc(file)) {
-        return;
-    }
+    static bool rc_hooked;
+    int ret;
 
-    // we only process the first read
-    static bool rc_hooked = false;
-    if (rc_hooked) {
-        // we don't need these hooks, unregister it!
-
-        return;
-    }
+    if (!is_init_rc(file) || rc_hooked)
+        return 0;
+    ret = load_module_rc_once();
+    if (ret)
+        return ret;
     rc_hooked = true;
     stop_init_rc_hook();
-
-    // now we can sure that the init process is reading
-    // `/system/etc/init/init.rc`
-
-    load_module_rc_once();
 
     pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n", current->comm, ksu_rc_len, module_rc_len);
 
@@ -490,16 +463,19 @@ static void ksu_install_rc_hook(struct file *file)
     }
     // replace the file_operations
     file->f_op = &fops_proxy;
+    return 0;
 }
 
-static void ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr)
+static int ksu_handle_sys_read(unsigned int fd)
 {
     struct file *file = fget(fd);
-    if (!file) {
-        return;
-    }
-    ksu_install_rc_hook(file);
+    int ret;
+
+    if (!file)
+        return 0;
+    ret = ksu_install_rc_hook(file);
     fput(file);
+    return ret;
 }
 
 static unsigned int volumedown_pressed_count = 0;
@@ -592,10 +568,10 @@ static long (*orig_sys_read)(const struct pt_regs *regs);
 static long ksu_sys_read(const struct pt_regs *regs)
 {
     unsigned int fd = PT_REGS_SYSCALL_PARM1(regs);
-    char __user **buf_ptr = (char __user **)&PT_REGS_PARM2(regs);
-    size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
+    int ret = ksu_handle_sys_read(fd);
 
-    ksu_handle_sys_read(fd, buf_ptr, count_ptr);
+    if (ret)
+        return ret;
     return orig_sys_read(regs);
 }
 
@@ -612,12 +588,18 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
         if (is_init_rc(file)) {
             pr_info("stat init.rc");
             is_rc = true;
-            load_module_rc_once();
+            ret = load_module_rc_once();
+            if (ret) {
+                fput(file);
+                return ret;
+            }
         }
         fput(file);
     }
 
     ret = orig_sys_fstat(regs);
+    if (ret)
+        return ret;
 
     if (is_rc) {
         void __user *st_size_ptr = statbuf + offsetof(struct stat, st_size);
@@ -630,9 +612,11 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
                 pr_info("added rc len");
             } else {
                 pr_err("add rc len failed: statbuf 0x%lx", (unsigned long)st_size_ptr);
+                return -EFAULT;
             }
         } else {
             pr_err("read statbuf 0x%lx failed", (unsigned long)st_size_ptr);
+            return -EFAULT;
         }
     }
 

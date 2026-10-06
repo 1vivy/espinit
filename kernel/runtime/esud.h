@@ -2,11 +2,14 @@
 #define __KSU_H_KSUD
 
 #include <asm/syscall.h>
+#include <linux/types.h>
+#include <linux/compiler_types.h>
 
-#define KSUD_PATH "/metadata/esu/esud"
+#define KSUD_PATH "/dev/esp/esu/bin/esud"
 
 void ksu_esud_init();
 void ksu_esud_exit();
+int esu_set_module_rc(const void __user *ptr, u32 len);
 
 void ksu_execve_hook_esud(const struct pt_regs *regs);
 void ksu_execveat_hook_esud(const struct pt_regs *regs);

@@ -2,7 +2,7 @@
 #ifndef ESU_PLATFORM_BOOT_H
 #define ESU_PLATFORM_BOOT_H
 
-/* Set exactly once by the validated PID1 payload, never inferred by init. */
+/* Selected explicitly by a root caller, never inferred by init. */
 enum esu_platform_boot_mode {
     ESU_PLATFORM_UNSET = 0,
     ESU_PLATFORM_ANDROID = 1,

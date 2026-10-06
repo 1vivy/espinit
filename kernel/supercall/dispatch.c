@@ -19,6 +19,7 @@
 #include "hook/tp_marker.h"
 #include "supercall/supercall.h"
 #include "runtime/platform_boot.h"
+#include "runtime/esud.h"
 
 /*
  * Build generation of the core module. kernel/Kbuild derives it from
@@ -97,6 +98,17 @@ static int do_set_boot_mode(void __user *arg)
         return -EFAULT;
 
     return esu_set_platform_boot_mode(mode);
+}
+
+static int do_set_module_rc(void __user *arg)
+{
+    struct esu_module_rc_cmd cmd;
+
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    if (cmd.reserved || cmd.len > 65536)
+        return -EINVAL;
+    return esu_set_module_rc(u64_to_user_ptr(cmd.ptr), cmd.len);
 }
 
 static int do_get_info_legacy(void __user *arg)
@@ -502,6 +514,12 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .cmd = ESU_IOCTL_SET_BOOT_MODE,
         .name = "SET_BOOT_MODE",
         .handler = do_set_boot_mode,
+        .perm_check = only_root
+    },
+    {
+        .cmd = ESU_IOCTL_SET_MODULE_RC,
+        .name = "SET_MODULE_RC",
+        .handler = do_set_module_rc,
         .perm_check = only_root
     },
     {

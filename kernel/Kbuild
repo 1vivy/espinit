@@ -4,7 +4,6 @@ kernelesp-objs += feature/kernel_umount.o
 kernelesp-objs += feature/selinux_hide.o
 
 kernelesp-objs += hook/lsm_hook.o
-kernelesp-objs += hook/selinux_policy_hook.o
 kernelesp-objs += hook/setuid_hook.o
 kernelesp-objs += hook/syscall_event_bridge.o
 kernelesp-objs += hook/syscall_hook_manager.o
@@ -29,7 +28,6 @@ kernelesp-objs += runtime/boot_event.o
 kernelesp-objs += runtime/esud_integration.o
 
 kernelesp-objs += selinux/selinux.o
-kernelesp-objs += selinux/policy_transaction.o
 kernelesp-objs += selinux/rules.o
 kernelesp-objs += selinux/sepolicy.o
 
