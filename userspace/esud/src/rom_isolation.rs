@@ -128,7 +128,8 @@ pub fn runtime_rom() -> Result<Option<RuntimeRom>> {
 
 /// Override Android properties and share the projected credential store.
 ///
-/// Errors reach init's `reboot_on_failure` service and stop the boot; there is
+/// Errors reach init's `reboot_on_failure` service and stop the boot in
+/// Android; recovery's core RC omits that property and only logs them. There is
 /// no partial-isolation boot.
 #[cfg(target_os = "android")]
 pub fn early(rom: &RomConfig, number: u32) -> Result<()> {

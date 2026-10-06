@@ -82,7 +82,9 @@ is best effort and deferred to the next state-dependent transaction on failure.
 Current-slot, slot-count, suffix and frozen version/hash replies remain available.
 
 Recovery retains its projection and `pid1-recovery.sh` scripts for modules
-marked `recovery-ok`; the normal Boot HAL overlay is not applied there.
+marked `recovery-ok`. The core `on init` path now runs there too, so the Boot
+HAL overlay is applied in recovery whenever its `vendor` target is already a
+mount point; a target recovery mounts later is left untouched.
 No native writer is invoked as a fallback. The source capture also contained
 HIDL 1.0-1.2 implementations: recovery AIDL/HIDL parity and device-specific
 suppression of stock activation routes remain unproved integration prerequisites.

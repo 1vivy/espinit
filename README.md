@@ -72,7 +72,8 @@ the ESP. Before running scripts or applying overlays, esud verifies the
 staging filesystem and every inode label, the retained ESP device identity,
 and exactly `u:object_r:vfat:s0` on the retained root. It then creates only
 a per-mount-RO bind view at `/dev/esp`. Any early gate failure reaches the
-`reboot_on_failure` service. The blanket ESP-file refusal is removed only
+`reboot_on_failure` service in Android; recovery's core RC drops that property
+and init logs the failed service instead. The blanket ESP-file refusal is removed only
 with these lifecycle gates. ROM >= 2 boot still needs disposable FAT/policy
 load and actual boot proof; host checks do not qualify device behavior.
 
@@ -84,12 +85,12 @@ PID 1 checks the core UAPI and readiness, obtains bdsvars identity, loads the ot
 
 Before init handoff PID 1 concatenates `modules/<id>/initrc/*.rc` in module order, prefixes each file with its source name, caps the result at 65536 bytes and sends the root-only set-once module-RC ioctl. It sends an empty buffer too: unset is not equivalent to empty. Recovery includes only modules carrying `recovery-ok`. No metadata-staged RC exists.
 
-The core boot-mode ioctl is root-only and set-once (`1` Android, `2` recovery). Init's synchronous `esu-early` service runs before early HAL startup and uses `reboot_on_failure`. `esud early`:
+The core boot-mode ioctl is root-only and set-once (`1` Android, `2` recovery). Init's synchronous `esu-early` service runs before early HAL startup in both Android and recovery, so a managed recovery or fastbootd launch gets the same ESP lifecycle, staged binaries, module RC and managed mounts. Its core RC has two variants: Android arms `reboot_on_failure`, while recovery has no rescue path to fall back to and omits the line, so init logs a failed service instead of looping the recovery session. `esud early`:
 
 1. Reads every selected module's `sepolicy.rule` strictly. Malformed rules or failed kernel updates propagate as boot failure.
 2. Stages partition trees on executable tmpfs `/dev/esu`, mode 0700, without `nosuid`. Supported roots are `system`, `vendor`, `product`, `system_ext`, and `odm`; there is no `system/vendor` remapping.
 3. Applies per-inode attrs from lines `/<partition>/<path> <octal-mode> <uid> <gid> <SELinux-context>`. Without an explicit entry it copies mode, owner and label from the existing target using no-follow metadata/xattr reads. A missing target/label is `OverlayAttrsMissing`, not an invented label.
-4. Mounts one read-only, lowerdir-only overlay per partition: ordered module trees followed by the stock partition. There is no unobserved bind-mount fallback.
+4. Mounts one read-only, lowerdir-only overlay per partition: ordered module trees followed by the stock partition. There is no unobserved bind-mount fallback. Recovery overlays only partitions that are already mount points; one that recovery mounts later is left untouched so the overlay cannot block it. The lab boot watchdog stays Android-only because recovery never sets `sys.boot_completed`.
 5. Runs `early.sh` with staged tmpfs BusyBox in module order, failing on nonzero status, then applies ROM isolation.
 
 Post-fs, post-fs-data, services, boot-completed and recovery run the corresponding KernelSU scripts from the ESP in module order. Stages may be re-run from a root shell and are gated by the core boot mode, not manager state or a one-shot service event. `esud platform reload` reapplies policies and mounts missing overlays without running scripts.

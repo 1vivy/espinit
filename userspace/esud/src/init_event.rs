@@ -31,10 +31,14 @@ fn boot_mode() -> Result<u32> {
 }
 
 pub fn reload() -> Result<()> {
-    boot_mode()?;
+    let mode = boot_mode()?;
     crate::esp_lifecycle::prepare()?;
     let manifest = module::manifest()?;
-    overlay::apply(Path::new(defs::MODULE_DIR), &manifest.modules_order)
+    overlay::apply(
+        Path::new(defs::MODULE_DIR),
+        &manifest.modules_order,
+        mode == 2,
+    )
 }
 
 pub fn on_stage(stage: Stage) -> Result<()> {
@@ -51,8 +55,16 @@ pub fn on_stage(stage: Stage) -> Result<()> {
     let manifest = module::manifest()?;
     let rom = rom_isolation::runtime_rom()?;
     if matches!(stage, Stage::Early) {
-        crate::boot_watchdog::arm();
-        overlay::apply(Path::new(defs::MODULE_DIR), &manifest.modules_order)?;
+        // The lab watchdog waits for sys.boot_completed, which recovery never
+        // sets: arming it there would reboot the rescue path on its deadline.
+        if mode == 1 {
+            crate::boot_watchdog::arm();
+        }
+        overlay::apply(
+            Path::new(defs::MODULE_DIR),
+            &manifest.modules_order,
+            mode == 2,
+        )?;
     }
     if matches!(stage, Stage::PostFsData) {
         std::fs::create_dir_all(defs::LOG_DIR)?;

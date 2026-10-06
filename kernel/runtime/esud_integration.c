@@ -31,37 +31,12 @@
 #include "hook/syscall_event_bridge.h"
 #include "runtime/platform_boot.h"
 
-// clang-format off
-static const char KERNEL_SU_RC[] =
-    "\n"
-    "service esu-early " KSUD_PATH " early\n"
-    "    user root\n"
-    "    group root\n"
-    "    seclabel u:r:" KERNEL_SU_DOMAIN ":s0\n"
-    "    disabled\n"
-    "    oneshot\n"
-    "    reboot_on_failure reboot\n"
-    "\n"
-    "on init\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/toybox chcon -R u:object_r:esu_file:s0 /debug_ramdisk/esu\n"
-    "    mkdir /dev/efivars 0755 root root\n"
-    "    mount efivarfs none /dev/efivars nosuid nodev noexec context=u:object_r:esu_file:s0\n"
-    "    exec_start esu-early\n"
-    "\n"
-    "on post-fs\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs\n"
-    "on post-fs-data\n"
-    "    start logd\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs-data\n"
-    "on nonencrypted\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
-    "on property:vold.decrypt=trigger_restart_framework\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
-    "on property:sys.boot_completed=1\n"
-    "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n";
-// clang-format on
+/* Android aborts the boot when esu-early fails; recovery logs it instead. */
+static const char KERNEL_SU_RC[] = ESU_PLATFORM_RC_ANDROID(KSUD_PATH, KERNEL_SU_DOMAIN);
+static const char KERNEL_SU_RC_RECOVERY[] = ESU_PLATFORM_RC_RECOVERY(KSUD_PATH, KERNEL_SU_DOMAIN);
 
 static int platform_boot_mode;
+static const char *ksu_rc = KERNEL_SU_RC;
 static size_t ksu_rc_len;
 
 int esu_set_platform_boot_mode(int mode)
@@ -74,7 +49,13 @@ int esu_set_platform_boot_mode(int mode)
     if (previous != ESU_PLATFORM_UNSET && previous != mode)
         return -EPERM;
     WRITE_ONCE(platform_boot_mode, mode);
-    ksu_rc_len = esu_platform_rc_size(mode, sizeof(KERNEL_SU_RC) - 1);
+    if (mode == ESU_PLATFORM_RECOVERY) {
+        ksu_rc = KERNEL_SU_RC_RECOVERY;
+        ksu_rc_len = sizeof(KERNEL_SU_RC_RECOVERY) - 1;
+    } else {
+        ksu_rc = KERNEL_SU_RC;
+        ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
+    }
     return 0;
 }
 
@@ -271,15 +252,13 @@ static int load_module_rc_once(void)
     if (module_rc_loaded)
         goto out;
     mode = READ_ONCE(platform_boot_mode);
-    if (ksu_no_custom_rc ||
-        (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)) {
+    if (ksu_no_custom_rc || (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)) {
         ksu_rc_len = 0;
         module_rc_len = 0;
     } else {
-        /* Recovery retains only PID1's recovery-ok module fragments; the
-         * Android-only core service rc must not run in recovery. */
-        if (mode == ESU_PLATFORM_RECOVERY)
-            ksu_rc_len = 0;
+        /* Both Android and recovery publish the core RC: the `on init` path
+         * runs the ESP lifecycle there too, and recovery's RC variant only
+         * drops reboot_on_failure. */
         if (!module_rc_set) {
             ret = -ENODATA;
             goto out;
@@ -327,7 +306,7 @@ append_ksu_rc:
         if (append_count > count - ret)
             append_count = count - ret;
         // copy_to_user returns the number of bytes that could not be copied
-        if (copy_to_user(buf + ret, KERNEL_SU_RC + ksu_rc_pos, append_count)) {
+        if (copy_to_user(buf + ret, ksu_rc + ksu_rc_pos, append_count)) {
             pr_info("read_proxy: append error, totally appended %ld\n", ksu_rc_pos);
             return ret ? ret : -EFAULT;
         }
@@ -380,7 +359,7 @@ static ssize_t read_iter_proxy(struct kiocb *iocb, struct iov_iter *to)
 append_ksu_rc:
     if (ksu_rc_pos < ksu_rc_len) {
         // copy_to_iter returns the number of bytes successfully copied
-        append_count = copy_to_iter(KERNEL_SU_RC + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);
+        append_count = copy_to_iter(ksu_rc + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);
         if (!append_count) {
             pr_info("read_iter_proxy: append error, totally appended %ld\n", ksu_rc_pos);
             return ret ? ret : (iov_iter_count(to) ? -EFAULT : 0);

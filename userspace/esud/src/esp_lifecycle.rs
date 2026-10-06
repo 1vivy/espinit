@@ -109,7 +109,8 @@ fn check_staging_mount(text: &str) -> Result<()> {
 }
 
 /// Fail before scripts, helpers or overlays when policy or retained mounts differ.
-/// The early service's reboot_on_failure makes a failed gate fatal to boot.
+/// The Android early service's reboot_on_failure makes a failed gate fatal to
+/// boot; recovery's RC omits it and init logs the failure.
 pub fn prepare() -> Result<()> {
     let text = fs::read_to_string("/proc/self/mountinfo")?;
     check_staging_mount(&text)?;

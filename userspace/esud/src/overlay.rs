@@ -252,8 +252,21 @@ fn mount(
     Ok(())
 }
 
+/// True when `target` is a mount point in this mount namespace.
+pub fn mount_point(target: &str) -> Result<bool> {
+    Ok(fs::read_to_string("/proc/self/mountinfo")?
+        .lines()
+        .filter_map(|line| line.split_once(" - ").map(|(left, _)| left))
+        .any(|left| left.split_whitespace().nth(4) == Some(target)))
+}
+
 /// Policy must be installed before copying labels. A reload does not execute scripts.
-pub fn apply(root: &Path, order: &[String]) -> Result<()> {
+///
+/// Recovery shares the ESP stack with Android, but its ramdisk mounts a target
+/// partition later than `on init` on some devices: a partition that is not a
+/// mount point yet is skipped instead of being covered by an overlay that would
+/// block recovery's own mount.
+pub fn apply(root: &Path, order: &[String], recovery: bool) -> Result<()> {
     let mut layers: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
     for id in order {
         let module = root.join(id);
@@ -273,8 +286,13 @@ pub fn apply(root: &Path, order: &[String]) -> Result<()> {
             if !source.exists() {
                 continue;
             }
+            let target = format!("/{partition}");
+            if recovery && !mount_point(&target)? {
+                log::warn!("recovery: {target} is not a mount point; skipping its overlay");
+                continue;
+            }
             let destination = Path::new(STAGING).join(id).join(partition);
-            if !mounted(&format!("/{partition}"), "overlay")? {
+            if !mounted(&target, "overlay")? {
                 if !mounted(STAGING, "tmpfs")? {
                     fs::create_dir_all(STAGING)?;
                     mount(
@@ -288,13 +306,7 @@ pub fn apply(root: &Path, order: &[String]) -> Result<()> {
                 let private = Path::new(STAGING).join(id);
                 fs::create_dir_all(&private)?;
                 fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
-                stage(
-                    &source,
-                    &destination,
-                    Path::new(&format!("/{partition}")),
-                    &format!("/{partition}"),
-                    &attrs,
-                )?;
+                stage(&source, &destination, Path::new(&target), &target, &attrs)?;
             }
             layers.entry(partition).or_default().push(destination);
         }
@@ -363,7 +375,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("bad")).unwrap();
         fs::write(temp.path().join("bad/sepolicy.rule"), "allow broken").unwrap();
-        let error = apply(temp.path(), &["bad".to_owned()]).unwrap_err();
+        let error = apply(temp.path(), &["bad".to_owned()], false).unwrap_err();
         assert!(format!("{error:#}").contains("parse policy"));
+    }
+    #[test]
+    fn mount_point_reads_this_mount_namespace() {
+        // Recovery gates its overlays on this predicate: the root always is a
+        // mount point, an unused path never is.
+        assert!(mount_point("/").unwrap());
+        assert!(!mount_point("/esu-nonexistent-mount").unwrap());
     }
 }

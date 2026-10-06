@@ -4,12 +4,14 @@ The Android binary is generic KernelSU lifecycle/policy support without the mana
 
 Android commands: `early`, `post-fs`, `post-fs-data`, `services`, `boot-completed`, `recovery`, `sepolicy`, `insmod`, `unload`, `resetprop`, `core set-boot-mode`, `platform reload`, and the internal boot watchdog. The executable also recognizes the `resetprop` invocation name. There is no install/uninstall, manager, module mutation, metamodule or profile command.
 
-Stages use the core boot mode rather than a manager/safe-mode/one-shot gate. They can be re-run by root. `platform reload` reapplies strict policy and mounts missing overlays, without executing scripts. Identity and ROM number come from bdsvars through `esu_platform::efivars`; a selected ROM with an invalid Slot fails, rather than defaulting to number 1. Configuration is `/dev/esp/esu/roms/<id>.toml`.
+Stages use the core boot mode rather than a manager/safe-mode/one-shot gate. They can be re-run by root. `platform reload` reapplies strict policy and mounts missing overlays, without executing scripts. The core RC publishes the `on init` path in recovery too, so a managed recovery or fastbootd launch runs the same `early` stage; only recovery's RC variant drops `reboot_on_failure`, and init logs a failed service instead of restarting the rescue path. `post-fs-data` and `boot-completed` stay defined but never fire where recovery has no `/data` root or completed boot. Identity and ROM number come from bdsvars through `esu_platform::efivars`; a selected ROM with an invalid Slot fails, rather than defaulting to number 1. Configuration is `/dev/esp/esu/roms/<id>.toml`.
 
 `early.sh` is synchronous and strict: spawn or exit failure aborts the early
 stage. Post-fs, post-fs-data and recovery scripts share a 35-second deadline
 per stage; failures are logged and later modules still run while time remains.
-A timed-out script process group is killed and its shell reaped. `service.sh`
+Recovery scripts are per-module opt-in through a `recovery-ok` regular file,
+the same marker PID 1 uses before publishing `initrc/*.rc` fragments in
+recovery. A timed-out script process group is killed and its shell reaped. `service.sh`
 and `boot-completed.sh` are launched in module order without waiting, so daemon
 loops cannot block Android init. Scripts have separate process groups and
 escape init's service cgroups before exec; background jobs from a successful
@@ -19,7 +21,7 @@ script survive the stage. Bootlog captures use the same cgroup escape.
 
 Manifest `modules_order` defines policy/script ordering and overlay precedence (first is highest). Modules use `module.prop`, optional `sepolicy.rule`, `attrs`, lifecycle scripts, `initrc/*.rc`, and partition trees `system`, `vendor`, `product`, `system_ext`, `odm`. There is no remapping of `system/vendor`.
 
-Early processing applies policies strictly, stages trees into tmpfs `/dev/esu/<id>/<partition>` (private root 0700, no nosuid), mounts read-only lowerdir-only overlays, executes every `early.sh` through ESP BusyBox, then runs ROM isolation. Attr lines are:
+Early processing applies policies strictly, stages trees into tmpfs `/dev/esu/<id>/<partition>` (private root 0700, no nosuid), mounts read-only lowerdir-only overlays, executes every `early.sh` through ESP BusyBox, then runs ROM isolation. In recovery only partitions that are already mount points are overlaid, so a partition recovery mounts later is not blocked, and the lab boot watchdog is armed only in Android because recovery never sets `sys.boot_completed`. Attr lines are:
 
 ```text
 /vendor/bin/hw/android.hardware.boot-service.qti 0755 0 2000 u:object_r:hal_bootctl_default_exec:s0
