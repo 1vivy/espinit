@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use log::{error, info, warn};
-use std::{io::Read, path::Path, time::Instant};
+use std::{path::Path, time::Instant};
 
 /// Module stages handled by espinitd when the Android dynamic runtime is available.
 /// PID-1 runs the ESP early/recovery scripts separately, before Android handoff.
@@ -46,19 +46,10 @@ pub fn on_stage(stage: Stage) -> Result<()> {
                 ksucalls::get_info().boot_mode == 1,
                 "early platform stage requires PID1's Android boot selection"
             );
-            let root = espinit_platform::open_root(Path::new(espinit_platform::ROOT))?;
-            let mut installed = String::new();
-            espinit_platform::open_file(&root, "rom.toml")?.read_to_string(&mut installed)?;
             // Reuse the same ROM contract as PID1, not a parallel runtime
             // generation/mode manifest. Both generation and managed are strict.
-            let selected = crate::utils::getprop("ro.boot.espinit.rom")
-                .context("missing ro.boot.espinit.rom")?;
-            let rom = espinit::config::parse_selected_rom(
-                &installed,
-                espinit_platform::generation::generation(),
-                &selected,
-            )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let root = espinit_platform::open_root(Path::new(espinit_platform::ROOT))?;
+            let rom = crate::rom_isolation::installed_rom_in(&root)?;
             assets::ensure_binaries(true).context("prepare early stage interpreter")?;
             if rom.managed {
                 let helper = format!("{}/{}", espinit_platform::ROOT, espinit_platform::HELPER);
@@ -74,6 +65,7 @@ pub fn on_stage(stage: Stage) -> Result<()> {
                     .context("start tiny-espsu")?;
                 anyhow::ensure!(status.success(), "tiny-espsu failed: {status}");
             }
+            crate::rom_isolation::early(&rom).context("ROM isolation early stage")?;
             run_stage(
                 stage.name(),
                 ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT),
@@ -116,6 +108,21 @@ pub fn on_post_fs_data() -> Result<()> {
     ksucalls::report_post_fs_data();
 
     utils::umask(0);
+
+    // Per-ROM isolation that needs `/data`: the gatekeeper first-boot marker.
+    // Failures are recorded and never fatal, unlike the early stage.
+    match crate::rom_isolation::installed_rom() {
+        Ok(rom) => {
+            if let Err(error) = crate::rom_isolation::post_fs_data(&rom) {
+                crate::rom_isolation::report(&format!(
+                    "ROM isolation post-fs-data failed: {error:#}"
+                ));
+            }
+        }
+        Err(error) => crate::rom_isolation::report(&format!(
+            "ROM isolation configuration unavailable: {error:#}"
+        )),
+    }
 
     // Clear all temporary module configs early
     if let Err(e) = crate::module_config::clear_all_temp_configs() {
