@@ -23,6 +23,19 @@ pub const SCHEMA_VERSION: u64 = 1;
 /// per-ROM rollback windows, so a larger number could never be isolated.
 pub const MAX_ROM_NUMBER: u32 = 5;
 
+/// Physical bases whose `_a`/`_b` pair is selected by the kernel from the
+/// current slot. A ROM never shadows them with its own firmware view: the
+/// running kernel already chose the slot it booted from.
+const KERNEL_SET_BASES: [&str; 7] = [
+    "boot",
+    "init_boot",
+    "vendor_boot",
+    "dtbo",
+    "vbmeta",
+    "vbmeta_system",
+    "vbmeta_vendor",
+];
+
 /// Manifest generation limit, matching every compiled payload component.
 pub const MAX_GENERATION_BYTES: usize = 63;
 
@@ -138,6 +151,12 @@ pub struct RomConfig {
     pub rom_number: u32,
     #[serde(default)]
     pub partitions: Vec<PartitionEntry>,
+    /// Per-ROM firmware views: thin devices of the shared pool that serve a
+    /// physical firmware partition's exact bytes until this ROM writes to them.
+    /// Only valid on a managed ROM `>= 2`; ROM 1 and single-ROM payloads leave
+    /// the list absent.
+    #[serde(default)]
+    pub firmware_views: Vec<FirmwareView>,
     /// Stable block nodes resolved by [`validate_backends`], in document order.
     /// Never read from the file: the logical `partitions` stay unchanged.
     #[serde(skip)]
@@ -149,6 +168,16 @@ impl RomConfig {
     /// later `gpt` APPLY. Empty until [`validate_backends`] has succeeded.
     pub fn resolved_backends(&self) -> &[ResolvedBackend] {
         self.resolved.get().map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// Whether any projection writes through an `esp-file:` backend, i.e. the
+    /// loader must hold the ESP superblock writable for this boot so its own
+    /// loop devices can reach the preallocated images. Every other payload
+    /// keeps the ESP read-only.
+    pub fn has_writable_esp_file(&self) -> bool {
+        self.partitions
+            .iter()
+            .any(|partition| !partition.read_only && block::is_esp_file(&partition.backend))
     }
 
     /// Summarize requested access modes without exposing partition/backend names.
@@ -192,6 +221,21 @@ pub struct PartitionEntry {
     pub name: String,
     pub backend: String,
     pub read_only: bool,
+}
+
+/// One per-ROM firmware view. The physical partition named by `name` is served
+/// by a thin device of the shared pool through the external-origin `thin`
+/// table, so unwritten blocks read the physical bytes and every ROM's OTA
+/// writes land in its own provisioned blocks.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareView {
+    /// Physical sysfs `PARTNAME` this view shadows: `<base>_a` or `<base>_b`.
+    pub name: String,
+    /// Pool-unique thin id, fixed to `(rom_number << 16) | index` with the
+    /// 1-based position of this view in the list, so ids are deterministic and
+    /// never collide with an LVM2-owned id below `0x10000`.
+    pub thin_id: u32,
 }
 
 /// Parse and validate `manifest.toml` text.
@@ -417,11 +461,113 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
         validate_backend_path(&partition.backend)
             .map_err(|error| error.with_component(partition.name.clone()))?;
 
-        if block::is_esp_file(&partition.backend) && !partition.read_only {
+        if block::is_esp_file(&partition.backend) && !partition.read_only && rom.rom_number < 2 {
             return Err(ConfigError::at(
                 "RomEspFileWritable",
                 partition.name.clone(),
-                "ESP-file projections must be read-only",
+                "a writable ESP-file backend requires a managed ROM >= 2",
+            ));
+        }
+    }
+
+    validate_firmware_views(rom)?;
+
+    Ok(())
+}
+
+/// Enforce the per-ROM firmware-view schema.
+///
+/// Views exist only on a managed ROM `>= 2`: ROM 1 and single-ROM payloads read
+/// the physical firmware partitions directly. Every view names a physical
+/// `<base>_a`/`<base>_b` PARTNAME that is not one of the seven kernel-set bases
+/// (the running kernel already chose that slot), carries the deterministic
+/// `(rom_number << 16) | index` thin id of its 1-based list position, appears
+/// once, and is projected as the writable `/dev/mapper/rom<N>-fw-<name>`
+/// partition that `fw-views` creates before the `gpt` entry runs.
+fn validate_firmware_views(rom: &RomConfig) -> Result<(), ConfigError> {
+    if rom.firmware_views.is_empty() {
+        return Ok(());
+    }
+
+    if !rom.managed {
+        return Err(ConfigError::new(
+            "RomFirmwareViewsUnmanaged",
+            "firmware views require a managed ROM",
+        ));
+    }
+
+    if rom.rom_number < 2 {
+        return Err(ConfigError::new(
+            "RomFirmwareViewsRomNumber",
+            format!(
+                "firmware views require rom_number >= 2, found {}",
+                rom.rom_number
+            ),
+        ));
+    }
+
+    let mut names: Vec<&str> = Vec::with_capacity(rom.firmware_views.len());
+
+    for (offset, view) in rom.firmware_views.iter().enumerate() {
+        let component = || format!("firmware_views[{offset}]");
+
+        validate_partition_name(&view.name).map_err(|error| error.with_component(component()))?;
+
+        if names.contains(&view.name.as_str()) {
+            return Err(ConfigError::at(
+                "RomFirmwareViewDuplicate",
+                view.name.clone(),
+                "firmware view name is listed more than once",
+            ));
+        }
+        names.push(&view.name);
+
+        let base = view
+            .name
+            .strip_suffix("_a")
+            .or_else(|| view.name.strip_suffix("_b"))
+            .filter(|base| !base.is_empty());
+
+        let Some(base) = base else {
+            return Err(ConfigError::at(
+                "RomFirmwareViewName",
+                view.name.clone(),
+                "firmware view must name a physical <base>_a or <base>_b partition",
+            ));
+        };
+
+        if KERNEL_SET_BASES.contains(&base) {
+            return Err(ConfigError::at(
+                "RomFirmwareViewName",
+                view.name.clone(),
+                format!("{base} is selected by the kernel and is never viewed"),
+            ));
+        }
+
+        let expected = (rom.rom_number << 16) | (offset as u32 + 1);
+
+        if view.thin_id != expected {
+            return Err(ConfigError::at(
+                "RomFirmwareViewThinId",
+                view.name.clone(),
+                format!(
+                    "thin id {} is not the reserved id {expected} for firmware view {}",
+                    view.thin_id, view.name
+                ),
+            ));
+        }
+
+        let backend = format!("/dev/mapper/rom{}-fw-{}", rom.rom_number, view.name);
+
+        let projected = rom.partitions.iter().any(|partition| {
+            partition.name == view.name && partition.backend == backend && !partition.read_only
+        });
+
+        if !projected {
+            return Err(ConfigError::at(
+                "RomFirmwareViewProjection",
+                view.name.clone(),
+                format!("firmware view requires a writable partition with backend {backend}"),
             ));
         }
     }
@@ -468,10 +614,12 @@ pub fn validate_managed(manifest: &Manifest, rom: &RomConfig) -> Result<(), Conf
 /// volume, mapper device, loop or ESP file published by them is visible. A
 /// `/dev/block/by-name/<PARTNAME>` or `/dev/mapper/<name>` backend is resolved
 /// from sysfs to an owned stable block node, an existing `/dev/loopN` is
-/// accepted as it is, and an `esp-file:<relative-path>` backend is attached
-/// read-only to a fresh loop device below the read-only ESP mount. Each
-/// accepted form establishes its own allowed device kind, so a whole logical
-/// unit, a writable ESP file and every other path are rejected. The resolved
+/// accepted as it is, and an `esp-file:<relative-path>` backend is attached to
+/// a fresh loop device with the projection's access: read-only below the
+/// read-only ESP mount, writable only for a managed ROM `>= 2` whose loader
+/// holds the ESP read-write. Each accepted form establishes its own allowed
+/// device kind and access, so a whole logical unit, a mismatched ESP file and
+/// every other path are rejected. The resolved
 /// set is retained on the configuration and returned for the `gpt` APPLY, which
 /// keeps every loop guard open, while the logical `partitions` stay untouched.
 ///
@@ -491,7 +639,12 @@ pub fn validate_backends<'a>(
     let mut resolved = Vec::with_capacity(rom.partitions.len());
 
     for partition in &rom.partitions {
-        let backend = block::resolve(&partition.backend, esp_mount)
+        let access = if partition.read_only {
+            block::Access::ReadOnly
+        } else {
+            block::Access::Writable
+        };
+        let backend = block::resolve(&partition.backend, esp_mount, access)
             .map_err(|error| backend_error(partition, &error))?;
 
         validate_backend_identity(&mut backends, &backend, partition)?;
@@ -796,6 +949,21 @@ managed = true
 name = "system"
 backend = "/dev/block/by-name/system"
 read_only = true
+"#;
+    /// One managed ROM 2 view of the physical `xbl_a` firmware partition.
+    const FW_ROM: &str = r#"
+schema_version = 1
+generation = "release-1"
+id = "android-b"
+rom_number = 2
+managed = true
+[[firmware_views]]
+name = "xbl_a"
+thin_id = 131073
+[[partitions]]
+name = "xbl_a"
+backend = "/dev/mapper/rom2-fw-xbl_a"
+read_only = false
 "#;
 
     #[test]
@@ -1112,7 +1280,7 @@ read_only = true
     }
 
     #[test]
-    fn esp_file_backends_must_be_read_only() {
+    fn esp_file_backends_are_read_only_on_rom_one_and_writable_later() {
         let writable = ROM
             .replace("/dev/block/by-name/system", "esp-file:espinit/backing.img")
             .replace("read_only = true", "read_only = false");
@@ -1120,6 +1288,131 @@ read_only = true
         let error = parse_rom(&writable, "release-1").unwrap_err();
         assert_eq!(error.error, "RomEspFileWritable");
         assert_eq!(error.component.as_deref(), Some("system"));
+
+        // A managed ROM >= 2 owns the ESP-file image and may write through it.
+        let later = writable.replace("managed = true", "managed = true\nrom_number = 2");
+        let rom = parse_rom(&later, "release-1").unwrap();
+        assert_eq!(rom.rom_number, 2);
+        assert!(rom.has_writable_esp_file());
+        assert!(!parse_rom(ROM, "release-1").unwrap().has_writable_esp_file());
+    }
+
+    #[test]
+    fn firmware_views_require_a_managed_rom_from_two_on() {
+        let rom = parse_rom(FW_ROM, "release-1").unwrap();
+        assert_eq!(rom.rom_number, 2);
+        assert_eq!(rom.firmware_views.len(), 1);
+        assert_eq!(rom.firmware_views[0].name, "xbl_a");
+        assert_eq!(rom.firmware_views[0].thin_id, 131_073);
+
+        // ROM 1 reads the physical firmware partitions directly.
+        let error = parse_rom(
+            &FW_ROM.replace("rom_number = 2", "rom_number = 1"),
+            "release-1",
+        )
+        .unwrap_err();
+        assert_eq!(error.error, "RomFirmwareViewsRomNumber");
+
+        // Only a managed ROM has a projection contract for a view.
+        let unmanaged = "schema_version = 1\ngeneration = \"release-1\"\nid = \"android-b\"\n\
+                         rom_number = 2\nmanaged = false\n\
+                         [[firmware_views]]\nname = \"xbl_a\"\nthin_id = 131073\n";
+        let error = parse_rom(unmanaged, "release-1").unwrap_err();
+        assert_eq!(error.error, "RomFirmwareViewsUnmanaged");
+        assert_eq!(error.component.as_deref(), None);
+
+        // Five ROMs fill the reserved id range, so a sixth never has a view.
+        let error = parse_rom(
+            &FW_ROM.replace("rom_number = 2", "rom_number = 6"),
+            "release-1",
+        )
+        .unwrap_err();
+        assert_eq!(error.error, "RomNumberInvalid");
+    }
+
+    #[test]
+    fn firmware_view_names_and_reserved_thin_ids_are_pinned() {
+        // The name must be a physical `<base>_a`/`<base>_b` PARTNAME and its base
+        // must not be one the running kernel selects from the current slot.
+        for name in ["xbl", "xbl_c", "boot_a", "vbmeta_vendor_b"] {
+            let text = FW_ROM.replacen(
+                "name = \"xbl_a\"\nthin_id",
+                &format!("name = {name:?}\nthin_id"),
+                1,
+            );
+            let error = parse_rom(&text, "release-1").unwrap_err();
+            assert_eq!(error.error, "RomFirmwareViewName", "{name}");
+            assert_eq!(error.component.as_deref(), Some(name));
+        }
+
+        // The id is the reserved `(rom_number << 16) | index` value, never an
+        // LVM2-owned id and never another ROM's id.
+        for id in ["0", "1", "131074", "16777216"] {
+            let text = FW_ROM.replacen("thin_id = 131073", &format!("thin_id = {id}"), 1);
+            let error = parse_rom(&text, "release-1").unwrap_err();
+            assert_eq!(error.error, "RomFirmwareViewThinId", "{id}");
+            assert_eq!(error.component.as_deref(), Some("xbl_a"));
+        }
+
+        // Repeating a name is refused even when every other rule would pass.
+        let duplicate = FW_ROM.replace(
+            "[[partitions]]",
+            "[[firmware_views]]\nname = \"xbl_a\"\nthin_id = 131074\n\n[[partitions]]",
+        );
+        let error = parse_rom(&duplicate, "release-1").unwrap_err();
+        assert_eq!(error.error, "RomFirmwareViewDuplicate");
+        assert_eq!(error.component.as_deref(), Some("xbl_a"));
+    }
+
+    #[test]
+    fn every_firmware_view_needs_its_own_writable_projection() {
+        let prefix = FW_ROM.split("[[partitions]]").next().unwrap();
+        let other = "[[partitions]]\nname = \"system\"\nbackend = \"/dev/block/by-name/system\"\nread_only = false\n";
+
+        for text in [
+            // No projection at all.
+            format!("{prefix}{other}"),
+            // Right name, wrong device.
+            format!(
+                "{prefix}[[partitions]]\nname = \"xbl_a\"\nbackend = \"/dev/block/by-name/xbl_a\"\nread_only = false\n"
+            ),
+            // Right device, read-only.
+            FW_ROM.replace("read_only = false", "read_only = true"),
+        ] {
+            let error = parse_rom(&text, "release-1").unwrap_err();
+            assert_eq!(error.error, "RomFirmwareViewProjection");
+            assert_eq!(error.component.as_deref(), Some("xbl_a"));
+        }
+
+        // Two views are numbered by their list position, and ROM 5 owns the top
+        // of the reserved range.
+        let both = FW_ROM
+            .replace(
+                "[[partitions]]",
+                "[[firmware_views]]\nname = \"tz_a\"\nthin_id = 131074\n\n[[partitions]]",
+            )
+            .replace(
+                "read_only = false\n",
+                "read_only = false\n\n[[partitions]]\nname = \"tz_a\"\nbackend = \"/dev/mapper/rom2-fw-tz_a\"\nread_only = false\n",
+            );
+        let rom = parse_rom(&both, "release-1").unwrap();
+        assert_eq!(
+            rom.firmware_views
+                .iter()
+                .map(|view| (view.name.as_str(), view.thin_id))
+                .collect::<Vec<_>>(),
+            [("xbl_a", 131_073), ("tz_a", 131_074)]
+        );
+
+        let rom = parse_rom(
+            &FW_ROM
+                .replacen("rom_number = 2", "rom_number = 5", 1)
+                .replacen("thin_id = 131073", "thin_id = 327681", 1)
+                .replacen("/dev/mapper/rom2-fw-xbl_a", "/dev/mapper/rom5-fw-xbl_a", 1),
+            "release-1",
+        )
+        .unwrap();
+        assert_eq!(rom.firmware_views[0].thin_id, 327_681);
     }
 
     #[test]

@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use crate::plan::{Mapper, Target};
-use lvm2_meta::DeviceNumber;
+//! Shared device-mapper ioctl client.
+//!
+//! One `DeviceMapper` drives the raw `DM_*` ioctl ABI used by the ESP payload
+//! helpers: `thin-activate` activates LVM2-derived tables and the Android-side
+//! `fw-views` helper creates and removes independent thin devices. Tables are
+//! only ever derived from checked metadata or built by the caller; nothing here
+//! parses a user-supplied command string or evaluates a shell.
+//!
+//! [`DeviceMapper::message`] adds the `DM_TARGET_MSG` command so a thin-pool
+//! target can be told to `create_thin`/`delete` a device id, which is how
+//! `fw-views` owns the thin ids LVM2 metadata never names.
+
+pub use lvm2_meta::DeviceNumber;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -8,6 +19,32 @@ use std::mem::{offset_of, size_of};
 use std::os::fd::AsRawFd;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// One device-mapper table target: `start length kind params`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub start: u64,
+    pub length: u64,
+    pub kind: String,
+    pub params: String,
+}
+
+/// A device-mapper table publisher. Implemented by [`DeviceMapper`] on a real
+/// system and by recorders in tests, so the table derivation stays testable
+/// without a kernel.
+pub trait Mapper {
+    fn activate(&mut self, name: &str, targets: &[Target]) -> Result<DeviceNumber, String>;
+}
+
+/// A target message that the kernel refused.
+#[derive(Debug)]
+pub enum MessageError {
+    /// The target reported that the requested object already exists. A thin-pool
+    /// `create_thin` for an id created on an earlier boot is the expected case.
+    AlreadyExists,
+    /// Every other failure, including an absent device or an unknown message.
+    Failed(io::Error),
+}
 
 const BUFFER_BYTES: usize = 16 * 1024;
 const DM_IOCTL_TYPE: u64 = 0xfd;
@@ -17,6 +54,7 @@ const DM_DEV_REMOVE_CMD: u64 = 4;
 const DM_DEV_SUSPEND_CMD: u64 = 6;
 const DM_TABLE_LOAD_CMD: u64 = 9;
 const DM_TABLE_STATUS_CMD: u64 = 12;
+const DM_TARGET_MSG_CMD: u64 = 14;
 const DM_STATUS_TABLE_FLAG: u32 = 1 << 4;
 const DM_ACTIVE_PRESENT_FLAG: u32 = 1 << 5;
 const DM_BUFFER_FULL_FLAG: u32 = 1 << 8;
@@ -32,6 +70,7 @@ const DM_DEV_REMOVE: libc::Ioctl = ioctl(DM_DEV_REMOVE_CMD);
 const DM_DEV_SUSPEND: libc::Ioctl = ioctl(DM_DEV_SUSPEND_CMD);
 const DM_TABLE_LOAD: libc::Ioctl = ioctl(DM_TABLE_LOAD_CMD);
 const DM_TABLE_STATUS: libc::Ioctl = ioctl(DM_TABLE_STATUS_CMD);
+const DM_TARGET_MSG: libc::Ioctl = ioctl(DM_TARGET_MSG_CMD);
 
 #[repr(C)]
 struct DmIoctl {
@@ -72,6 +111,39 @@ fn align8(value: usize) -> Option<usize> {
 
 fn trim_params(value: &str) -> &str {
     value.trim_end_matches(' ')
+}
+
+/// Wrap a rejected request as a target-message failure.
+fn message_failure(detail: impl Into<String>) -> MessageError {
+    MessageError::Failed(io::Error::new(io::ErrorKind::InvalidInput, detail.into()))
+}
+
+/// Encode one target message at `data_start` inside the ioctl buffer.
+///
+/// The record is the kernel's `struct dm_target_msg`: a `u64` sector followed by
+/// a NUL-terminated message. The kernel reads exactly `strlen + 1` bytes after
+/// the sector, so the message must be nonempty and NUL-free, and the encoding is
+/// bounded by the same 16 KiB buffer every other request uses.
+fn write_target_message(
+    value: &mut [u8],
+    data_start: usize,
+    sector: u64,
+    text: &str,
+) -> Result<(), String> {
+    if text.is_empty() || text.as_bytes().contains(&0) {
+        return Err("invalid device-mapper target message".to_owned());
+    }
+
+    let end = data_start
+        .checked_add(size_of::<u64>() + text.len() + 1)
+        .filter(|end| *end <= value.len())
+        .ok_or("device-mapper target message exceeds the buffer")?;
+
+    value[data_start..data_start + size_of::<u64>()].copy_from_slice(&sector.to_ne_bytes());
+    value[data_start + size_of::<u64>()..end - 1].copy_from_slice(text.as_bytes());
+    value[end - 1] = 0;
+
+    Ok(())
 }
 
 fn ensure_control() -> io::Result<File> {
@@ -347,59 +419,77 @@ impl DeviceMapper {
             .map_err(|error| format!("DM resume for {name} failed: {error}"))
     }
 
+    /// Resolve one active device-mapper name to its device number through the
+    /// `dm/name` sysfs attribute. No `/dev/mapper` node is required, which is
+    /// what makes this usable before Android's ueventd has run.
+    pub fn device_number(name: &str) -> Result<DeviceNumber, String> {
+        match Self::find(name)? {
+            Some((number, _)) => Ok(number),
+            None => Err(format!("device-mapper device {name} does not exist")),
+        }
+    }
+
+    /// One sysfs scan for `name`: its device number and size in sectors. An
+    /// absent device is `None`; two devices with the same name are an error.
+    fn find(name: &str) -> Result<Option<(DeviceNumber, u64)>, String> {
+        let mut found = None;
+
+        for entry in fs::read_dir("/sys/class/block")
+            .map_err(|error| format!("cannot scan device-mapper sysfs: {error}"))?
+        {
+            let path = entry
+                .map_err(|error| format!("cannot scan device-mapper sysfs: {error}"))?
+                .path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("dm-") {
+                continue;
+            }
+            let mapped = match fs::read_to_string(path.join("dm/name")) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if mapped.trim_end() != name {
+                continue;
+            }
+            if found.is_some() {
+                return Err(format!("multiple device-mapper devices are named {name}"));
+            }
+            let dev = fs::read_to_string(path.join("dev"))
+                .map_err(|error| format!("cannot read device number for {name}: {error}"))?;
+            let (major, minor) = dev
+                .trim()
+                .split_once(':')
+                .ok_or_else(|| format!("invalid device number for {name}"))?;
+            let number = DeviceNumber {
+                major: major
+                    .parse()
+                    .map_err(|_| format!("invalid major for {name}"))?,
+                minor: minor
+                    .parse()
+                    .map_err(|_| format!("invalid minor for {name}"))?,
+            };
+            let sectors: u64 = fs::read_to_string(path.join("size"))
+                .map_err(|error| format!("cannot read size for {name}: {error}"))?
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid size for {name}"))?;
+            found = Some((number, sectors));
+        }
+
+        Ok(found)
+    }
+
     fn lookup(name: &str, expected_sectors: u64) -> Result<DeviceNumber, String> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let mut found = None;
-            for entry in fs::read_dir("/sys/class/block")
-                .map_err(|error| format!("cannot scan device-mapper sysfs: {error}"))?
-            {
-                let path = entry
-                    .map_err(|error| format!("cannot scan device-mapper sysfs: {error}"))?
-                    .path();
-                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-                if !file_name.starts_with("dm-") {
-                    continue;
-                }
-                let mapped = match fs::read_to_string(path.join("dm/name")) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                if mapped.trim_end() != name {
-                    continue;
-                }
-                if found.is_some() {
-                    return Err(format!("multiple device-mapper devices are named {name}"));
-                }
-                let dev = fs::read_to_string(path.join("dev"))
-                    .map_err(|error| format!("cannot read device number for {name}: {error}"))?;
-                let (major, minor) = dev
-                    .trim()
-                    .split_once(':')
-                    .ok_or_else(|| format!("invalid device number for {name}"))?;
-                let number = DeviceNumber {
-                    major: major
-                        .parse()
-                        .map_err(|_| format!("invalid major for {name}"))?,
-                    minor: minor
-                        .parse()
-                        .map_err(|_| format!("invalid minor for {name}"))?,
-                };
-                let sectors: u64 = fs::read_to_string(path.join("size"))
-                    .map_err(|error| format!("cannot read size for {name}: {error}"))?
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("invalid size for {name}"))?;
+            if let Some((number, sectors)) = Self::find(name)? {
                 if sectors != expected_sectors {
                     return Err(format!(
                         "device-mapper device {name} has {sectors} sectors, expected {expected_sectors}"
                     ));
                 }
-                found = Some(number);
-            }
-            if let Some(number) = found {
                 return Ok(number);
             }
             if Instant::now() >= deadline {
@@ -411,7 +501,38 @@ impl DeviceMapper {
         }
     }
 
-    fn remove(&mut self, name: &str) {
+    /// Send one target message to the device named `name`.
+    ///
+    /// A target message is the only way to ask a thin-pool to create or delete a
+    /// thin device id, because that id has no LVM2 metadata entry. The message is
+    /// one `struct dm_target_msg` record: a `u64` sector followed by the
+    /// NUL-terminated text.
+    pub fn message(&mut self, name: &str, sector: u64, text: &str) -> Result<(), MessageError> {
+        self.prepare(Some(name)).map_err(message_failure)?;
+        self.header_mut().target_count = 1;
+
+        let data_start = self.header().data_start as usize;
+
+        write_target_message(self.bytes_mut(), data_start, sector, text)
+            .map_err(message_failure)?;
+
+        match self.call(DM_TARGET_MSG) {
+            Ok(()) => Ok(()),
+            // The kernel reports an already-created thin id as `EEXIST`, which
+            // is the normal outcome of a boot that re-runs the creation.
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                Err(MessageError::AlreadyExists)
+            }
+            Err(error) => Err(MessageError::Failed(error)),
+        }
+    }
+
+    /// Remove the device `name`, ignoring an absent device. A device created by
+    /// this instance is dropped from the rollback list, so `Drop` does not try
+    /// to remove it again.
+    pub fn remove(&mut self, name: &str) {
+        self.created.retain(|created| created.as_str() != name);
+
         if self.prepare(Some(name)).is_ok() {
             let _ = self.call(DM_DEV_REMOVE);
         }
@@ -477,6 +598,46 @@ mod tests {
         assert_eq!(DM_VERSION, 0xc138fd00_u32 as libc::Ioctl);
         assert_eq!(DM_TABLE_LOAD, 0xc138fd09_u32 as libc::Ioctl);
         assert_eq!(DM_TABLE_STATUS, 0xc138fd0c_u32 as libc::Ioctl);
+        assert_eq!(DM_TARGET_MSG, 0xc138fd0e_u32 as libc::Ioctl);
+    }
+
+    #[test]
+    fn target_message_is_a_sector_followed_by_nul_terminated_text() {
+        let mut buffer = vec![0_u8; BUFFER_BYTES];
+        let start = size_of::<DmIoctl>();
+
+        write_target_message(&mut buffer, start, 7, "create_thin 131073").unwrap();
+
+        assert_eq!(
+            u64::from_ne_bytes(buffer[start..start + 8].try_into().unwrap()),
+            7
+        );
+        let text = &buffer[start + 8..start + 8 + "create_thin 131073".len() + 1];
+        assert_eq!(text, b"create_thin 131073\0");
+        // Nothing beyond the record is touched.
+        assert!(
+            buffer[start + 8 + "create_thin 131073".len() + 1..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+
+    #[test]
+    fn malformed_or_unbounded_target_messages_are_refused() {
+        let mut buffer = vec![0_u8; BUFFER_BYTES];
+        let start = size_of::<DmIoctl>();
+
+        for text in ["", "create\0thin"] {
+            assert!(
+                write_target_message(&mut buffer, start, 0, text).is_err(),
+                "{text}"
+            );
+        }
+
+        // The record must fit inside the 16 KiB request buffer.
+        let oversized = "m".repeat(BUFFER_BYTES - start);
+        assert!(write_target_message(&mut buffer, start, 0, &oversized).is_err());
+        assert!(write_target_message(&mut buffer, BUFFER_BYTES, 0, "delete 1").is_err());
     }
 
     #[test]

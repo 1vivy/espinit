@@ -689,6 +689,18 @@ pub fn resolve_payload_file(
     Ok(path)
 }
 
+/// Whether a manifest entry names a kernel module.
+///
+/// A managed manifest mixes two kinds of ordered entries. A `.ko` path is a
+/// kernel module: PID 1 loads it, verifies its `/sys/module/<name>` generation
+/// and readiness, and only then runs the entry's stage script. Any other path is
+/// a userspace helper module that the entry's own `early.sh`/`recovery.sh`
+/// executes from the ESP, so PID 1 requires the payload file to exist and never
+/// treats it as a loadable object.
+pub fn is_kernel_module(entry: &ModuleEntry) -> bool {
+    entry.path.ends_with(".ko")
+}
+
 /// Load one ESP payload module through the existing relocation loader.
 ///
 /// `params` are passed to the kernel as module parameters and are never

@@ -110,6 +110,7 @@ ESP filesystem /                      # normally read-only
     ├── bin/
     │   ├── espinit
     │   ├── espinitd                  # install source, not the executed path
+    │   ├── fw-views                  # per-ROM firmware-view helper (ROM >= 2)
     │   └── busybox                   # static interpreter for ESP scripts
     ├── modules/                      # kernel payload plus explicit Android packages
     │   ├── espinit.ko
@@ -118,6 +119,7 @@ ESP filesystem /                      # normally read-only
     │   ├── gpt.ko                    # required only for managed-ROM projection
     │   ├── gpt/early.sh
     │   ├── gpt/recovery.sh
+    │   ├── fw-views/early.sh          # executes bin/fw-views between thin and gpt
     │   ├── boot-hal/module.toml       # executable + initrc, exact generation
     │   └── tiny-espsu/module.toml     # fixed helper + install script + policy mirror
     └── receipts/
@@ -197,10 +199,11 @@ and helper check its ID against `ro.boot.espinit.rom` before the HAL can start.
 | `managed` | Boolean. `true` requires successful `gpt` projection before handoff; `false` requires an empty or absent `partitions` array and leaves the partition view unchanged. |
 | `partitions` | Nonempty ordered array of tables when `managed = true`. |
 | `partitions[].name` | Unique Android-facing projected partition name; ASCII letters/digits plus `_`, `-`, maximum 36 bytes (the `gpt` ABI label size), no path separators. |
-| `partitions[].backend` | Backend in one of four documented forms, resolved only when the payload reaches the `gpt` entry: `/dev/block/by-name/<physical-name>` matched exactly against a unique sysfs `PARTNAME`; `/dev/mapper/<name>` matched exactly against a unique `/sys/class/block/dm-*/dm/name`; an existing `/dev/loopN`; or `esp-file:<relative-path>` for a preallocated regular file on the already-mounted read-only ESP, attached read-only through the standard loop-control/loop ioctls with zero offset and no size limit. A writable `esp-file:` backend is fatal, whole-LU devices are not accepted, and there is no offset, size-slicing, or extent/FIEMAP ABI. |
+| `partitions[].backend` | Backend in one of four documented forms, resolved only when the payload reaches the `gpt` entry: `/dev/block/by-name/<physical-name>` matched exactly against a unique sysfs `PARTNAME`; `/dev/mapper/<name>` matched exactly against a unique `/sys/class/block/dm-*/dm/name`; an existing `/dev/loopN`; or `esp-file:<relative-path>` for a preallocated regular file on the mounted ESP, attached through the standard loop-control/loop ioctls with zero offset and no size limit. A writable `esp-file:` backend requires a managed ROM `>= 2`; on every other payload it is fatal. Whole-LU devices are not accepted, and there is no offset, size-slicing, or extent/FIEMAP ABI. |
 | `partitions[].read_only` | Boolean, explicitly selecting read-only (`true`) or writable (`false`) projected access. A physical partition with the same `PARTNAME` is hidden but retains its native access mode so it can remain a backing PV; unrelated physical partitions retain their native visibility and access mode. |
+| `firmware_views` | Optional ordered array of tables, legal only on a managed ROM with `rom_number >= 2`. Each entry is `{ name, thin_id }`: a physical `<base>_a`/`<base>_b` `PARTNAME` whose base is not one of the seven the kernel selects from the current slot, and the reserved id `(rom_number << 16) \| index` of its 1-based position. Every view must also appear as a writable projection with the exact backend `/dev/mapper/rom<N>-fw-<name>`; `fw-views` creates that device from the shared pool before `gpt` runs. ROM 1 and unmanaged ROMs must not contain the field. |
 
-A projection spans exactly the entire backend block device; no resizing, implicit slot suffix, or offset arithmetic. Projected names must not collide with another projection. A projected name intentionally shadows every physical partition with that exact `PARTNAME`; the loader leaves all other stock partitions visible for normal platform operation. Backends must be distinct block devices, valid for the running device, and resolved without following the newly projected view. An ESP file backend is named as `esp-file:<relative-path>`, relative to the ESP mount root, and is attached by the loader itself with a fresh loop device, read-only, zero offset and no size limit, while the ESP remains read-only; a writable ESP or a writable ESP-file projection is fatal. The loop and backing-file guards are kept open until the projection has been applied, are `O_CLOEXEC`, and the loop is autoclear, so the attachment survives the APPLY close but is not inherited into Android.
+A projection spans exactly the entire backend block device; no resizing, implicit slot suffix, or offset arithmetic. Projected names must not collide with another projection. A projected name intentionally shadows every physical partition with that exact `PARTNAME`; the loader leaves all other stock partitions visible for normal platform operation. Backends must be distinct block devices, valid for the running device, and resolved without following the newly projected view. An ESP file backend is named as `esp-file:<relative-path>`, relative to the ESP mount root, and is attached by the loader itself with a fresh loop device, zero offset and no size limit: read-only below the read-only ESP for every payload, and writable only for a managed ROM `>= 2`, whose boot then holds the ESP read-write so the ROM's OTA can rewrite its own preallocated image. The loop and backing-file guards are kept open until the projection has been applied, are `O_CLOEXEC`, and the loop is autoclear, so the attachment survives the APPLY close but is not inherited into Android.
 
 ## LVM activation
 
@@ -223,6 +226,17 @@ compiled generation must exactly match the `ESPINIT_GENERATION` supplied by
 PID 1. The tool does not invoke a shell or `lvm`, mutate LVM metadata, create
 thin IDs, accept arguments, or guess another PV/VG.
 
+Managed ROMs `2..=5` also list `fw-views` between `thin` and `gpt`. That entry
+is a **userspace helper module**, not a kernel module: `modules/fw-views/early.sh`
+runs the argument-free `bin/fw-views`, which resolves the selected ROM exactly
+like PID 1 does and creates one external-origin thin device per `firmware_views`
+entry of that ROM. Unwritten blocks then read the physical firmware partition's
+bytes, the ROM's OTA writes provision private blocks in the shared pool, and
+deleting the view's reserved thin id restores the physical bytes. A ROM without
+views runs the helper as a no-op. See
+[`espinit/modules/fw-views/README.md`](espinit/modules/fw-views/README.md) for
+the schema, the authoring rule and the seal interplay.
+
 ## Generation matching and module self-check
 
 The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; `ESPINIT_GENERATION` selects it explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
@@ -239,7 +253,7 @@ app-facing control or a property-based fallback.
 
 1. Prepare the minimum early mounts/logging. When the exact opt-in `androidboot.espinit.apss_minidump=true` is active, first load the dependency closure rooted at the vendor `qcom-dload-mode.ko` through that same module directory, `modules.dep`, ordering and `finit_module` machinery, so a Qualcomm APSS minidump sink can capture a failure that happens before the ESP exists; then opportunistically retain an already-enumerated payload ESP read-only so vendor-module preload failures can still leave a receipt. Preload the applicable vendor modules with their dependencies/options, then wait up to ten seconds for storage enumeration when the ESP was not available before preload. Enumerate every GPT ESP candidate, probe each read-only, and require exactly one to contain a regular `/espinit/manifest.toml`; other firmware ESPs are allowed. Keep the selected payload ESP mounted read-only and validate its manifest plus explicitly selected per-ROM TOML without changing the partition view. No step here requires projected `/metadata`.
 2. Check payload generations, module ordering, backend configuration, and the ESP receipt directory `/espinit/receipts` (runtime `/debug_ramdisk/esp/espinit/receipts`) structurally without opening a write window. For managed boot, unavailable receipt storage is itself a hard failure; do not mount or depend on `/metadata` for this check.
-3. Load or validate `espinit.ko`, then load the remaining modules in manifest order, perform each self-check, and run each module's optional `early.sh` or `recovery.sh` through the ESP busybox with a 35-second deadline. Immediately before the `gpt` entry, and only after every earlier module and script has run, resolve each backend — by-name partition, exact `/dev/mapper/<name>`, existing `/dev/loopN`, or a read-only `esp-file:` attached to a fresh loop device on the already-mounted read-only ESP. Load `gpt`, verify its generation, enumerate physical `DEVTYPE=partition` device numbers other than the mounted ESP into `hide[]`, then issue one atomic APPLY. The ESP stays outside `hide[]` so any later hard failure can remount it for its receipt. Exact QUERY (ABI, active view, count) and readiness checks complete before the `gpt` stage script.
+3. Load or validate `espinit.ko`, then load the remaining modules in manifest order, perform each self-check, and run each module's optional `early.sh` or `recovery.sh` through the ESP busybox with a 35-second deadline. A userspace helper entry (no `.ko` path, today only `fw-views`) is never loaded into the kernel: PID 1 requires its payload file to exist and its stage script to exit zero. Immediately before the `gpt` entry, and only after every earlier module and script has run, resolve each backend — by-name partition, exact `/dev/mapper/<name>`, existing `/dev/loopN`, or an `esp-file:` attached to a fresh loop device with the access the projection requested. Load `gpt`, verify its generation, enumerate physical `DEVTYPE=partition` device numbers other than the mounted ESP into `hide[]`, then issue one atomic APPLY. The ESP stays outside `hide[]` so any later hard failure can remount it for its receipt. Exact QUERY (ABI, active view, count) and readiness checks complete before the `gpt` stage script.
 4. After kernel-stage scripts and projection, validate selected packages/source inodes and executable generation notes. Privately mount writable metadata; install the daemon, selected ROM and package set; fsync files/directories; publish with rename/exchange; retire the old snapshot under a distinct cleanup name before parent fsync/removal; then unmount. Managed boot uses projected metadata and requires writable projected bdsvars/misc for the normal HAL. Unmanaged boot resolves exactly the native metadata PARTNAME with the same bounded 10-second/100-ms enumeration retry, without projection or the HAL pair. Permanent resolution errors fail immediately; unavailable/unwritable metadata stops handoff.
 5. Detach the ESP and owned early mounts, then replace PID1 with fixed `/init`. Core installs HAL rules at `/system/bin/init second_stage`. In Android mode only it injects synchronous `on init` `exec_start` for `espinitd`'s `Stage::Early`: after ueventd coldboot, before late-fs/class early_hal. The daemon validates installed generation/ID/managed mode, extracts its existing interpreter and finishes tiny-espsu. Failure uses `reboot_on_failure`, not a warning. Unmanaged mode skips the helper. Recovery/fastbootd receives neither this service nor custom module RC; its existing ESP recovery scripts/projection remain.
 
@@ -462,14 +476,17 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ESPINIT_NDK/toolchains/llvm/p
 RUSTFLAGS="-C target-feature=+crt-static" \
   cargo +nightly-2026-08-08 build --locked --release \
   --target aarch64-linux-android -p thin-activate --bin thin-activate
+RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo +nightly-2026-08-08 build --locked --release \
+  --target aarch64-linux-android -p fw-views --bin fw-views
 cargo +nightly-2026-08-08 build --locked --release --target aarch64-linux-android \
   -p espinitd -p espinit-platform --bin espinitd --bin tiny-espsu
 bash payloads/boot-hal/build-android.sh
 ```
 
-Copy the static, interpreter-free `thin-activate` to `bin/thin-activate`,
-`espinitd` to `bin/espinitd`, and both platform outputs to the source paths
-declared by
+Copy the static, interpreter-free `thin-activate` to `bin/thin-activate` and
+`fw-views` to `bin/fw-views`, `espinitd` to `bin/espinitd`, and both platform
+outputs to the source paths declared by
 [`espinit/modules/boot-hal/module.toml`](espinit/modules/boot-hal/module.toml) and
 [`espinit/modules/tiny-espsu/module.toml`](espinit/modules/tiny-espsu/module.toml);
 stamp both package manifests with that exact generation. Ship the checked-in
@@ -500,6 +517,7 @@ The core remains licensed under **GNU GPL version 3**; [`LICENSE`](LICENSE) pres
 `payloads/boot-hal`, its vendored `varstore`, and `userspace/lvm2-meta`
 retain their **Apache-2.0** licenses and upstream provenance. The LVM parser was
 ported from the gbl-bds-rs host proof into the public runtime without changing
-its format limits or table derivation. `thin-activate`, the platform
+its format limits or table derivation. `thin-activate`, the shared
+device-mapper client (`userspace/dm`), `fw-views`, the platform
 installer, and tiny-espsu are GPL-3.0-only; their shared ELF generation-note
 source is Apache-2.0 so the HAL does not link GPL userspace code.

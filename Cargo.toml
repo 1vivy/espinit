@@ -2,15 +2,19 @@
 members = [
     "userspace/ksud",
     "userspace/ksuinit",
+    "userspace/dm",
     "userspace/lvm2-meta",
     "userspace/thin-activate",
+    "userspace/fw-views",
     "userspace/platform",
 ]
 default-members = [
     "userspace/ksud",
     "userspace/ksuinit",
+    "userspace/dm",
     "userspace/lvm2-meta",
     "userspace/thin-activate",
+    "userspace/fw-views",
 ]
 resolver = "3"
 exclude = ["payloads/boot-hal"]

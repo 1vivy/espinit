@@ -40,7 +40,16 @@ class PlatformPackaging(unittest.TestCase):
     def test_manifest_preserves_order_and_separates_android_packages(self):
         manifest, rom = assemble.configurations("release-1", "ext4", "android-a")
         value = tomllib.loads(manifest)
-        self.assertEqual([module["name"] for module in value["modules"]], ["espinit", "thin", "gpt"])
+        self.assertEqual(
+            [(module["name"], module["path"]) for module in value["modules"]],
+            [
+                ("espinit", "modules/espinit.ko"),
+                ("thin", "modules/thin.ko"),
+                # The userspace helper runs between `thin` and `gpt`.
+                ("fw-views", "bin/fw-views"),
+                ("gpt", "modules/gpt.ko"),
+            ],
+        )
         self.assertEqual(value["platform"], {"metadata_filesystem": "ext4", "packages": ["boot-hal", "tiny-espsu"], "recovery_packages": []})
         self.assertEqual(tomllib.loads(rom)["generation"], value["generation"])
         self.assertEqual(value["rom"], "roms")
@@ -56,6 +65,14 @@ class PlatformPackaging(unittest.TestCase):
         for generation, filesystem in (("../bad", "ext4"), ("x", "auto")):
             with self.assertRaises(ValueError):
                 assemble.configurations(generation, filesystem, "android-a")
+
+    def test_esp_layout_carries_both_module_scripts_and_the_helper(self):
+        self.assertIn("fw_views", assemble.PATHS)
+        self.assertIn(("fw_views", "bin/fw-views"), assemble.BINARIES)
+        self.assertIn("espinit/modules/fw-views", assemble.ESP_DIRECTORIES)
+        self.assertEqual(assemble.FW_EARLY_SCRIPT, "#!/bin/sh\nset -eu\nexec fw-views\n")
+        for name in ("thin", "fw-views"):
+            self.assertNotIn(name, [key for key, _ in assemble.MODULES])
 
     def test_packages_use_stamped_contracts_and_exact_generation(self):
         with tempfile.TemporaryDirectory() as directory:

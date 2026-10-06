@@ -1,18 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+use dm::{Mapper, Target};
 use lvm2_meta::{DeviceNumber, Devices, Layer, SegmentType, VolumeGroup};
 use std::collections::BTreeSet;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Target {
-    pub start: u64,
-    pub length: u64,
-    pub kind: String,
-    pub params: String,
-}
-
-pub trait Mapper {
-    fn activate(&mut self, name: &str, targets: &[Target]) -> Result<DeviceNumber, String>;
-}
 
 fn targets(lines: Vec<String>) -> Result<Vec<Target>, String> {
     lines

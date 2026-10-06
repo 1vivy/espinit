@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 mod block;
-mod dm;
 mod generation;
 mod plan;
 

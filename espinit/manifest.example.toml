@@ -32,13 +32,20 @@ recovery_packages = []
 # rejected, because there is no projection contract to apply. Each module must
 # pass its readiness self-check before the next entry is processed.
 #
+# An entry whose `path` ends in `.ko` is a kernel module: it is loaded, its
+# `/sys/module/<name>` generation and readiness are verified, and then its stage
+# script runs. Any other entry is a userspace helper: PID 1 requires the payload
+# file to exist exactly like a module image, never loads it into the kernel, and
+# relies on `modules/<name>/early.sh` (or `recovery.sh`) to execute it from the
+# ESP. Its exit status is the whole contract.
+#
 # Entries ordered before `gpt` run their own early/recovery scripts first; a
 # module or script that activates a logical volume (e.g. `dmsetup`) therefore
 # runs before `gpt` resolves its backends, which happens immediately before the
 # `gpt` entry. Backends are whole block devices: a by-name partition, an exact
-# `/dev/mapper/<name>`, an existing `/dev/loopN`, or a read-only
-# `esp-file:<relative-path>` on the mounted read-only ESP that the loader
-# attaches itself. Retaining the core's inherited lifecycle is intentional
+# `/dev/mapper/<name>`, an existing `/dev/loopN`, or an
+# `esp-file:<relative-path>` on the mounted ESP that the loader attaches itself.
+# Retaining the core's inherited lifecycle is intentional
 # boot-substrate reuse, not KernelSU Manager or root compatibility.
 
 [[modules]]
@@ -52,6 +59,17 @@ params = ""
 [[modules]]
 name = "thin"
 path = "modules/thin.ko"
+params = ""
+
+# Per-ROM firmware views, required only by a managed ROM that lists
+# `firmware_views`. The helper reads the selected ROM config and creates one
+# external-origin thin device per view in the pool `thin` just activated, so the
+# projection below sees `/dev/mapper/rom<N>-fw-<name>` serving the physical
+# firmware partition's bytes until that ROM's OTA writes to them. It must run
+# after `thin` and before `gpt`, and a ROM without views runs it as a no-op.
+[[modules]]
+name = "fw-views"
+path = "bin/fw-views"
 params = ""
 
 # Required only when the selected ROM config sets `managed = true`. `params`

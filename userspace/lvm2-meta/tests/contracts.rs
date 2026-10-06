@@ -271,6 +271,7 @@ fn rejects_unsupported_or_unsafe_volume_graphs() {
         ("extent_count = 4", "extent_count = 18446744073709551615"),
         ("origin = \"userdata_1\"", "origin = \"linux_snapshot\""),
         ("device_id = 2", "device_id = 1"),
+        ("device_id = 2", "device_id = 65536"),
         ("device_id = 2", "device_id = 16777216"),
         ("pe_count = 127", "pe_count = 18446744073709551615"),
         ("chunk_size = 128", "chunk_size = 127"),
@@ -293,6 +294,20 @@ fn rejects_unsupported_or_unsafe_volume_graphs() {
     assert!(matches!(
         VolumeGroup::parse(&source.replace("type = \"striped\"", "type = \"raid1\"")),
         Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn thin_device_ids_below_the_reserved_range_are_accepted() {
+    let source = original_text();
+    // 0xFFFF is the largest id LVM2 metadata may own.
+    let boundary = source.replacen("device_id = 2", "device_id = 65535", 1);
+    VolumeGroup::parse(&boundary).unwrap();
+    // 0x10000 starts the reserved per-ROM firmware-view range.
+    let reserved = source.replacen("device_id = 2", "device_id = 65536", 1);
+    assert!(matches!(
+        VolumeGroup::parse(&reserved),
+        Err(Error::Invalid(_))
     ));
 }
 #[test]

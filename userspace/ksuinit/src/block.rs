@@ -14,10 +14,12 @@
 //! * an existing `/dev/loopN` is accepted as it is, after its sysfs device
 //!   number and loop identity are verified.
 //! * `esp-file:<relative-path>` names a preallocated regular file inside the
-//!   already-mounted read-only ESP. It is attached read-only through the
-//!   standard loop-control/loop ioctls with zero offset and no size limit while
-//!   the ESP stays read-only; the loop and backing-file guards stay open until
-//!   the projection has been applied.
+//!   already-mounted ESP. It is attached through the standard
+//!   loop-control/loop ioctls with zero offset and no size limit; the loop and
+//!   backing-file guards stay open until the projection has been applied. The
+//!   read-only form keeps the ESP mounted read-only, while a managed ROM `>= 2`
+//!   may project a writable file, which requires the loader's own read-write ESP
+//!   mount so an OTA can rewrite the preallocated image for a later boot.
 //!
 //! Nothing else is accepted: no whole logical unit, no arbitrary path, no
 //! symlink, no offset or size slicing. Missing devices and sysfs entries are
@@ -25,7 +27,7 @@
 //! other failure stops boot immediately, and there is never a fallback to
 //! another device.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::ops::Range;
 use std::os::fd::AsRawFd;
@@ -36,6 +38,18 @@ use rustix::fs::{CWD, FileType, Mode, OFlags, major, makedev, minor, mknodat};
 use syscalls::{Sysno, syscall};
 
 use crate::gpt_uapi::{GPT_MAX_HIDDEN, GptDevice};
+
+/// Requested access for one resolved projection backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// The projection never writes; an `esp-file:` backend is attached through
+    /// a read-only loop below the read-only ESP mount.
+    ReadOnly,
+    /// The projection writes; an `esp-file:` backend is attached writeable
+    /// through a loop below the loader's read-write ESP mount, which only a
+    /// managed ROM `>= 2` is allowed to request.
+    Writable,
+}
 
 /// Directory holding the stable block nodes owned by espinit.
 const BACKEND_DIR: &str = "/dev/espinit/backends";
@@ -139,12 +153,12 @@ pub struct ResolvedBackend {
     /// Resolved device number; the projection identity.
     pub rdev: u64,
     /// Owned loop attachment for an `esp-file:` backend. It keeps the loop
-    /// device and its read-only backing file guarded until the projection has
-    /// been applied, and releases them afterwards.
+    /// device and its backing file guarded until the projection has been
+    /// applied, and releases them afterwards.
     pub guard: Option<LoopAttachment>,
 }
 
-/// A read-only loop attachment created by the resolver for an ESP file.
+/// A loop attachment created by the resolver for an ESP file.
 ///
 /// Both file descriptors are opened with `O_CLOEXEC` and the loop device is
 /// marked `LO_FLAGS_AUTOCLEAR`, so the attachment survives the `gpt` lower
@@ -190,7 +204,8 @@ pub fn is_supported(path: &str) -> bool {
     }
 }
 
-/// Whether `path` is the read-only ESP regular-file backend form.
+/// Whether `path` is the ESP regular-file backend form. The projection's
+/// `read_only` flag then decides which access the loader attaches.
 pub fn is_esp_file(path: &str) -> bool {
     path.starts_with(ESP_FILE_PREFIX)
 }
@@ -204,14 +219,15 @@ pub fn is_pending(error: &io::Error) -> bool {
 
 /// Resolve one backend to a stable block node. A by-name or mapper backend gets
 /// an owned node created from sysfs, an existing loop device is reused, and an
-/// `esp-file:` backend is attached read-only to a fresh loop device.
+/// `esp-file:` backend is attached to a fresh loop device with the projection's
+/// requested access.
 ///
-/// Missing, ambiguous, non-partition, malformed, unsafe or non-read-only
+/// Missing, ambiguous, non-partition, malformed, unsafe or wrongly-accessed
 /// backends are errors; there is never a fallback to another device. Only an
 /// absent device or sysfs entry is [`is_pending`], so a caller may retry it
 /// within a bounded enumeration window while every other failure stops boot
 /// immediately.
-pub fn resolve(path: &str, esp_mount: &str) -> io::Result<ResolvedBackend> {
+pub fn resolve(path: &str, esp_mount: &str, access: Access) -> io::Result<ResolvedBackend> {
     if let Some(label) = path.strip_prefix(BY_NAME_PREFIX) {
         if is_name_component(label) {
             return resolve_named(label);
@@ -222,7 +238,7 @@ pub fn resolve(path: &str, esp_mount: &str) -> io::Result<ResolvedBackend> {
         }
     } else if let Some(relative) = path.strip_prefix(ESP_FILE_PREFIX) {
         if is_safe_relative_path(relative) {
-            return attach_esp_file(esp_mount, relative);
+            return attach_esp_file(esp_mount, relative, access);
         }
     } else if is_supported(path) {
         return resolve_loop(path);
@@ -334,20 +350,38 @@ fn resolve_loop(path: &str) -> io::Result<ResolvedBackend> {
     })
 }
 
-/// Attach a preallocated ESP file to a fresh loop device, read-only, with zero
-/// offset and no size limit. The ESP must already be mounted read-only: a
-/// writable ESP is fatal and never a normal-boot window.
-fn attach_esp_file(esp_mount: &str, relative: &str) -> io::Result<ResolvedBackend> {
+/// Attach a preallocated ESP file to a fresh loop device with the projection's
+/// requested access, zero offset and no size limit. A read-only projection
+/// requires the read-only ESP mount and a `LO_FLAGS_READ_ONLY` loop; a writable
+/// projection requires the loader's read-write ESP mount (only a managed ROM
+/// `>= 2` installs one) and an `O_RDWR` backing file with a read-write loop, so
+/// the ROM's OTA can rewrite the preallocated image for a later boot.
+fn attach_esp_file(esp_mount: &str, relative: &str, access: Access) -> io::Result<ResolvedBackend> {
     let path = esp_file_path(esp_mount, relative)?;
 
     let metadata = fs::metadata(&path)?;
     usable_backing(&metadata)?;
 
-    if !mount_is_read_only(esp_mount)? {
-        return Err(invalid("ESP file backends require a read-only ESP mount"));
+    let mounted_read_only = mount_is_read_only(esp_mount)?;
+
+    match access {
+        Access::ReadOnly if !mounted_read_only => {
+            return Err(invalid(
+                "read-only ESP file backends require a read-only ESP mount",
+            ));
+        }
+        Access::Writable if mounted_read_only => {
+            return Err(invalid(
+                "writable ESP file backends require a writable ESP mount",
+            ));
+        }
+        Access::ReadOnly | Access::Writable => {}
     }
 
-    let backing = File::open(&path)?;
+    let backing = match access {
+        Access::ReadOnly => File::open(&path)?,
+        Access::Writable => OpenOptions::new().read(true).write(true).open(&path)?,
+    };
     let control = loop_open(LOOP_CONTROL)?;
     let number = ioctl(control.as_raw_fd(), LOOP_CTL_GET_FREE, 0)?;
 
@@ -365,7 +399,10 @@ fn attach_esp_file(esp_mount: &str, relative: &str) -> io::Result<ResolvedBacken
     )?;
 
     let mut info = LoopInfo64::default();
-    info.set_flags(LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR);
+    info.set_flags(match access {
+        Access::ReadOnly => LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR,
+        Access::Writable => LO_FLAGS_AUTOCLEAR,
+    });
 
     if let Err(error) = ioctl(
         device.as_raw_fd(),
@@ -376,8 +413,9 @@ fn attach_esp_file(esp_mount: &str, relative: &str) -> io::Result<ResolvedBacken
         return Err(error);
     }
 
-    // Read the status back: the projection must be a read-only loop with zero
-    // offset and no size limit, never a slice of the backing file.
+    // Read the status back: the projection must be a loop with zero offset and
+    // no size limit, never a slice of the backing file, and its access must be
+    // exactly the one the projection asked for.
     let mut applied = LoopInfo64::default();
 
     if let Err(error) = ioctl(
@@ -396,9 +434,13 @@ fn attach_esp_file(esp_mount: &str, relative: &str) -> io::Result<ResolvedBacken
         ));
     }
 
-    if applied.flags() & LO_FLAGS_READ_ONLY == 0 {
+    let read_only = applied.flags() & LO_FLAGS_READ_ONLY != 0;
+
+    if read_only != (access == Access::ReadOnly) {
         let _ = ioctl(device.as_raw_fd(), LOOP_CLR_FD, 0);
-        return Err(invalid("ESP file backend loop is not read-only"));
+        return Err(invalid(
+            "ESP file backend loop does not match the requested access",
+        ));
     }
 
     let directory = Path::new(SYS_CLASS_BLOCK).join(format!("loop{number}"));
@@ -416,7 +458,13 @@ fn attach_esp_file(esp_mount: &str, relative: &str) -> io::Result<ResolvedBacken
         }
     };
 
-    log::info!("Attached read-only ESP file backend {relative} as {node}");
+    log::info!(
+        "Attached {} ESP file backend {relative} as {node}",
+        match access {
+            Access::ReadOnly => "read-only",
+            Access::Writable => "writable",
+        }
+    );
 
     Ok(ResolvedBackend {
         path: node.clone(),
@@ -506,7 +554,8 @@ fn parse_mounts_read_only(mounts: &str, mountpoint: &str) -> bool {
     })
 }
 
-/// Prove from the live mount table that the ESP is mounted read-only.
+/// Whether the live mount table reports `mountpoint` mounted with `ro`, which
+/// is how the loader proves the ESP access mode its backends require.
 fn mount_is_read_only(mountpoint: &str) -> io::Result<bool> {
     let mounts = fs::read_to_string(MOUNTS)?;
 
@@ -755,7 +804,9 @@ mod tests {
             assert!(!is_pending(&decimal(value).unwrap_err()));
         }
         for path in ["/dev/block/sda", "/dev/loopx", "/dev/block/by-name/.."] {
-            assert!(!is_pending(&resolve(path, ESP).unwrap_err()));
+            assert!(!is_pending(
+                &resolve(path, ESP, Access::ReadOnly).unwrap_err()
+            ));
         }
         assert!(!is_pending(&invalid(
             "multiple block devices share the backend PARTNAME",

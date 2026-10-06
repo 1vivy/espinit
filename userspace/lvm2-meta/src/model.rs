@@ -195,7 +195,14 @@ fn segment(s: &Section<'_>) -> Result<Segment, Error> {
         }
         "thin" => {
             let device_id = uint(s, "device_id")?;
-            if device_id >= 1 << 24 {
+            // Thin ids below 0x10000 belong to LVM2 metadata; every id at or
+            // above it is reserved for the per-ROM firmware views that
+            // `fw-views` creates directly through the device-mapper ioctl ABI
+            // (rom_number << 16 | index). A pool that already carries one of
+            // those ids cannot be recreated from metadata, and a later
+            // metadata-driven activation would silently drop the views, so the
+            // conflicting metadata is rejected instead.
+            if device_id >= 1 << 16 {
                 return Err(Error::Invalid("thin device_id"));
             }
             SegmentType::Thin {
