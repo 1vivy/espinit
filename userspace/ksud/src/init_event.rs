@@ -38,6 +38,8 @@ impl Stage {
 pub fn on_stage(stage: Stage) -> Result<()> {
     match stage {
         Stage::Early => {
+            // Lab-only and bootconfig-armed; first, so a stall inside Early is covered.
+            crate::boot_watchdog::arm();
             // This is a mandatory synchronous prerequisite for early_hal.
             // Unlike optional later scripts, errors must reach init's
             // reboot_on_failure service, never become a warning and continue.
