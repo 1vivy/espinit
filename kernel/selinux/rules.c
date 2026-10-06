@@ -32,9 +32,6 @@ static bool apply_boot_hal_rules(struct policydb *db)
     static const char *const block_perms[] = {
         "getattr", "open", "read", "write", "ioctl", "lock",
     };
-    static const char *const config_perms[] = {
-        "getattr", "open", "read",
-    };
     size_t i;
 
     if (!ksu_type(db, "gblbds_hal_exec", NULL) || !ksu_type(db, "gblbds_bdsvars_block_device", NULL))
@@ -47,15 +44,6 @@ static bool apply_boot_hal_rules(struct policydb *db)
     /* The source adapter takes flock(LOCK_EX); its original CIL omitted lock. */
     for (i = 0; i < ARRAY_SIZE(block_perms); ++i) {
         if (!ksu_allow(db, "hal_bootctl_default", "gblbds_bdsvars_block_device", "blk_file", block_perms[i]))
-            return false;
-    }
-    /* The HAL cross-checks the staged /metadata/espinit/rom.toml (metadata_file)
-     * against its Slot record before registering; without these it refuses to
-     * start and vold's checkpointed /data mount waits for IBootControl forever. */
-    if (!ksu_allow(db, "hal_bootctl_default", "metadata_file", "dir", "search"))
-        return false;
-    for (i = 0; i < ARRAY_SIZE(config_perms); ++i) {
-        if (!ksu_allow(db, "hal_bootctl_default", "metadata_file", "file", config_perms[i]))
             return false;
     }
     return ksu_allow(db, "gblbds_hal_exec", "labeledfs", "filesystem", "associate") &&
