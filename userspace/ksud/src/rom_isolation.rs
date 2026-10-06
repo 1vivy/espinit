@@ -178,7 +178,55 @@ pub fn early(rom: &RomConfig) -> Result<()> {
     } else if rom.managed {
         info!("credential store not shared: {SHARED_PARTITION} is not projected");
     }
+    if rom.managed && rom.rom_number >= 2 {
+        deny_ufs_bsg_writes()?;
+    }
 
+    Ok(())
+}
+
+/// Deny UFS boot-LUN writes from ROMs without physical firmware authority.
+/// A missing node or an unreadable label is recorded as an explicit gap; a
+/// failed policy update is fatal, rather than booting under a false seal.
+#[cfg(target_os = "android")]
+fn deny_ufs_bsg_writes() -> Result<()> {
+    let node = Path::new("/dev/ufs-bsg0");
+    let label = match crate::restorecon::lgetfilecon(node) {
+        Ok(label) => label,
+        Err(error) => {
+            report(&format!(
+                "UFS BSG write deny skipped for {}: {error}",
+                node.display()
+            ));
+            return Ok(());
+        }
+    };
+    let mut fields = label.trim_end_matches('\0').split(':');
+    let (Some("u"), Some("object_r"), Some(kind), Some(_level), None) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        report(&format!(
+            "UFS BSG write deny skipped: invalid SELinux label {label:?}"
+        ));
+        return Ok(());
+    };
+    if kind.is_empty()
+        || !kind
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        report(&format!(
+            "UFS BSG write deny skipped: invalid SELinux type {kind:?}"
+        ));
+        return Ok(());
+    }
+    crate::sepolicy::apply_strict(&format!("deny * {kind} chr_file {{ write ioctl }}"))
+        .context("cannot deny UFS BSG write/ioctl for secondary ROM")?;
+    info!("UFS BSG write/ioctl denied for SELinux type {kind}");
     Ok(())
 }
 
