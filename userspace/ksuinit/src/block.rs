@@ -32,7 +32,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{CWD, FileType, Mode, OFlags, makedev, mknodat};
+use rustix::fs::{CWD, FileType, Mode, OFlags, major, makedev, minor, mknodat};
 use syscalls::{Sysno, syscall};
 
 use crate::gpt_uapi::{GPT_MAX_HIDDEN, GptDevice};
@@ -234,49 +234,14 @@ pub fn resolve(path: &str, esp_mount: &str) -> io::Result<ResolvedBackend> {
 }
 
 /// Resolve a named partition through sysfs and create its stable node.
+///
+/// The sysfs lookup itself is shared with the Android-side firmware views
+/// ([`espinit_platform::block::partition_by_name`]); only the owned node below
+/// is PID 1's business.
 fn resolve_named(label: &str) -> io::Result<ResolvedBackend> {
-    let mut found: Option<(PathBuf, String)> = None;
-
-    for entry in fs::read_dir(SYS_CLASS_BLOCK)? {
-        let directory = entry?.path();
-        let uevent = match fs::read_to_string(directory.join("uevent")) {
-            Ok(uevent) => uevent,
-            Err(error) if is_pending(&error) => continue,
-            Err(error) => return Err(error),
-        };
-
-        if field(&uevent, "PARTNAME") == Some(label) {
-            if found.is_some() {
-                return Err(invalid("multiple block devices share the backend PARTNAME"));
-            }
-            found = Some((directory, uevent));
-        }
-    }
-
-    let (directory, uevent) = found.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "no block device has the backend PARTNAME",
-        )
-    })?;
-
-    if field(&uevent, "DEVTYPE") != Some("partition") {
-        return Err(invalid("named backend is not a partition"));
-    }
-
-    let number = fs::read_to_string(directory.join("partition"))?;
-    if decimal(number.trim())? == 0 {
-        return Err(invalid("named backend has an invalid partition number"));
-    }
-
-    let rdev = read_device(&directory)?;
-    let name = field(&uevent, "DEVNAME").ok_or_else(|| invalid("backend has no DEVNAME"))?;
-
-    if !is_name_component(name) {
-        return Err(invalid("backend DEVNAME is not a plain device name"));
-    }
-
-    let node = create_node(name, rdev)?;
+    let rdev = espinit_platform::block::partition_by_name(label)?;
+    let name = format!("{}-{}", major(rdev), minor(rdev));
+    let node = create_node(&name, rdev)?;
 
     Ok(ResolvedBackend {
         path: node,

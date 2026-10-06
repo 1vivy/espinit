@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Shared ESP package contract. Kernel-module loading remains in manifest.modules.
+pub mod block;
 pub mod core;
 pub mod generation;
 pub mod staging;
