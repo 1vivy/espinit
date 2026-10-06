@@ -2,6 +2,7 @@
 //! Shared ESP package contract. Kernel-module loading remains in manifest.modules.
 pub mod block;
 pub mod core;
+pub mod efivars;
 pub mod generation;
 pub mod staging;
 pub mod tiny;
