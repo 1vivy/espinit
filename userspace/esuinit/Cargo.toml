@@ -7,6 +7,7 @@ edition.workspace = true
 
 [dependencies]
 esu-platform = { path = "../esu-platform" }
+esu-config = { path = "../esu-config" }
 
 # for elf parsing
 goblin = "0.10"

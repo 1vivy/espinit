@@ -183,31 +183,11 @@ impl Drop for LoopAttachment {
     }
 }
 
-/// Whether `path` is one of the four accepted backend forms. Only the shape is
-/// checked here; the device itself is resolved by [`resolve`].
+/// Whether `path` is one of the four accepted backend forms, exactly as the
+/// shared configuration crate classifies them. Only the shape is checked here;
+/// the device itself is resolved by [`resolve`].
 pub fn is_supported(path: &str) -> bool {
-    if let Some(label) = path.strip_prefix(BY_NAME_PREFIX) {
-        return is_name_component(label);
-    }
-
-    if let Some(name) = path.strip_prefix(MAPPER_PREFIX) {
-        return is_name_component(name);
-    }
-
-    if let Some(relative) = path.strip_prefix(ESP_FILE_PREFIX) {
-        return is_safe_relative_path(relative);
-    }
-
-    match path.strip_prefix(LOOP_PREFIX) {
-        Some(number) => !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
-        None => false,
-    }
-}
-
-/// Whether `path` is the ESP regular-file backend form. The projection's
-/// `read_only` flag then decides which access the loader attaches.
-pub fn is_esp_file(path: &str) -> bool {
-    path.starts_with(ESP_FILE_PREFIX)
+    esu_config::parse_backend(path).is_ok()
 }
 
 /// Only absent devices or sysfs entries can become available during

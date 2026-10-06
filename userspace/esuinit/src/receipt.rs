@@ -85,6 +85,20 @@ impl Failure {
     }
 }
 
+impl From<esu_config::Error> for Failure {
+    /// Classify a shared-schema rejection: the crate's component is the
+    /// attributable subject (empty when unattributed) and its own rendering of
+    /// code and component stays the bounded diagnostic.
+    fn from(error: esu_config::Error) -> Self {
+        Failure::at(
+            Stage::Configuration,
+            (!error.component.is_empty()).then_some(error.component.as_str()),
+            error.code,
+            error.to_string(),
+        )
+    }
+}
+
 /// Options needed to persist a receipt: the retained ESP and diagnostic build ID.
 #[derive(Default)]
 pub struct ReceiptState {

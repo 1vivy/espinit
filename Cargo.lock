@@ -438,6 +438,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "esu-config"
+version = "2.0.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "esu-platform"
 version = "0.1.0"
 dependencies = [
@@ -456,6 +464,7 @@ dependencies = [
  "clap",
  "const_format",
  "derive-new",
+ "esu-config",
  "esu-platform",
  "esuinit",
  "extattr",
@@ -477,6 +486,7 @@ name = "esuinit"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "esu-config",
  "esu-platform",
  "goblin",
  "kernlog",

@@ -22,6 +22,7 @@ tempfile = "3"
 
 [dependencies]
 esu-platform = { path = "../esu-platform" }
+esu-config = { path = "../esu-config" }
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 const_format = "0.2"

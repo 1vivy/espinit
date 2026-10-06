@@ -284,7 +284,7 @@ fn require_esp_file_lifecycle(rom: &RomConfig) -> Result<(), Failure> {
     let Some(partition) = rom
         .partitions
         .iter()
-        .find(|partition| block::is_esp_file(&partition.backend))
+        .find(|partition| matches!(partition.backend(), Ok(config::Backend::EspFile(_))))
     else {
         return Ok(());
     };

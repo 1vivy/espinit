@@ -1,0 +1,13 @@
+[package]
+name = "esu-config"
+version = "2.0.0"
+edition.workspace = true
+license = "Apache-2.0"
+
+# Pinned copy of gbl-bds-rs `crates/esu-config`; see PROVENANCE.md. Only this
+# manifest is adapted to espinit: the `src/` and `tests/` trees are byte-identical
+# to the source crate.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }

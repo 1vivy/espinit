@@ -7,6 +7,7 @@ members = [
     "userspace/thin-activate",
     "userspace/fw-views",
     "userspace/esu-platform",
+    "userspace/esu-config",
 ]
 default-members = [
     "userspace/esud",
@@ -15,6 +16,7 @@ default-members = [
     "userspace/lvm2-meta",
     "userspace/thin-activate",
     "userspace/fw-views",
+    "userspace/esu-config",
 ]
 resolver = "3"
 exclude = ["payloads/boot-hal"]

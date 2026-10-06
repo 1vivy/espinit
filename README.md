@@ -139,4 +139,4 @@ The explicit `androidboot.mode=recovery` plus `androidboot.esu.recovery_passthro
 
 ## License and provenance
 
-This fork retains KernelSU history and copyright notices. The core remains GPL-3.0; [`LICENSE`](LICENSE) is unchanged. `thin` and `gpt` are separate GPL-2.0-only modules with their own provenance. The Boot HAL, vendored varstore and lvm2-meta retain Apache-2.0; the daemon, PID-1, helpers and shared platform code retain their subtree licenses. See [`SECURITY.md`](SECURITY.md).
+This fork retains KernelSU history and copyright notices. The core remains GPL-3.0; [`LICENSE`](LICENSE) is unchanged. `thin` and `gpt` are separate GPL-2.0-only modules with their own provenance. The Boot HAL, vendored varstore, lvm2-meta and esu-config retain Apache-2.0 (esu-config is vendored from gbl-bds-rs, see [`userspace/esu-config/PROVENANCE.md`](userspace/esu-config/PROVENANCE.md)); the daemon, PID-1, helpers and shared platform code retain their subtree licenses. See [`SECURITY.md`](SECURITY.md).

@@ -13,8 +13,8 @@ use android_bootimg::cpio::{Cpio, CpioEntry};
 use android_bootimg::parser::BootImage;
 use android_bootimg::patcher::BootImagePatchOption;
 use anyhow::{Context, Result, ensure};
+use esu_config as config;
 use esu_platform as platform;
-use esuinit::config;
 use goblin::elf::{Elf, header, program_header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -331,7 +331,17 @@ fn check_binary(path: &Path, machine: u16, linkage: Linkage) -> Result<()> {
 fn configs(payload: &Path, id: &str) -> Result<(config::Manifest, config::RomConfig, String)> {
     let manifest = config::parse_manifest(&fs::read_to_string(payload.join("manifest.toml"))?)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let rom_path = config::rom_path(&manifest, id).map_err(|error| anyhow::anyhow!("{error}"))?;
+    // The id names the file below the manifest's ROM directory. Only an
+    // identifier may do so, and the rejection keeps the shared schema's
+    // `RomIdInvalid` classification, so a traversal or an over-long id never
+    // reaches a read.
+    ensure!(config::rom_id(id), "RomIdInvalid: {id:?}");
+    let rom_path = config::rom_config_path(&manifest, id);
+    ensure!(
+        rom_path.len() <= config::MAX_PATH_BYTES,
+        "PathTooLong: manifest ROM path is {} bytes",
+        rom_path.len()
+    );
     let rom = config::parse_selected_rom(&fs::read_to_string(payload.join(&rom_path))?, id)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     config::validate_managed(&manifest, &rom).map_err(|error| anyhow::anyhow!("{error}"))?;
