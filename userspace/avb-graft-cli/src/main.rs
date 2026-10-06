@@ -40,7 +40,7 @@ fn image_size(file: &File) -> Result<u64> {
     );
     let mut size = 0_u64;
     // SAFETY: BLKGETSIZE64 writes one u64 to a live, aligned output pointer.
-    let result = unsafe { libc::ioctl(file.as_raw_fd(), 0x80081272 as libc::Ioctl, &mut size) };
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), 0x80081272u32 as _, &mut size) };
     ensure!(
         result == 0,
         "BLKGETSIZE64: {}",
