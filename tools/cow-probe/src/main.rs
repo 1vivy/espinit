@@ -439,8 +439,18 @@ fn write_raw(device: &Path, extents: &[Extent], nonce: u32) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Drop cached pages first, so a comparison sees what reached the media.
+fn uncached(file: &File) -> io::Result<()> {
+    // SAFETY: `file` is open for the duration of the call.
+    match unsafe { ioctl::drop_cache(file.as_raw_fd()) } {
+        0 => Ok(()),
+        error => Err(io::Error::from_raw_os_error(error)),
+    }
+}
+
 fn read_raw(device: &Path, extents: &[Extent]) -> io::Result<Vec<u8>> {
     let file = File::open(device)?;
+    uncached(&file)?;
     let mut bytes = Vec::new();
     for extent in extents {
         let mut buffer = vec![0u8; extent.length as usize];
@@ -451,6 +461,7 @@ fn read_raw(device: &Path, extents: &[Extent]) -> io::Result<Vec<u8>> {
 }
 
 fn read_file(file: &File, extents: &[Extent]) -> io::Result<Vec<u8>> {
+    uncached(file)?;
     let mut bytes = Vec::new();
     for extent in extents {
         let mut buffer = vec![0u8; extent.length as usize];

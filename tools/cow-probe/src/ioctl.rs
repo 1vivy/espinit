@@ -19,6 +19,7 @@ pub const fn ioc(direction: u32, kind: u8, number: u8, size: u32) -> u64 {
 unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn fallocate(fd: c_int, mode: c_int, offset: i64, len: i64) -> c_int;
+    fn posix_fadvise(fd: c_int, offset: i64, len: i64, advice: c_int) -> c_int;
 }
 
 /// `ioctl(2)` with one pointer argument.
@@ -40,4 +41,18 @@ pub unsafe fn allocate(fd: c_int, length: u64) -> c_int {
     // SAFETY: the caller supplies an open descriptor; mode 0 allocates without
     // reading the length back.
     unsafe { fallocate(fd, 0, 0, length as i64) }
+}
+
+/// `POSIX_FADV_DONTNEED` from `linux/fadvise.h`.
+const POSIX_FADV_DONTNEED: c_int = 4;
+
+/// Drop the clean page-cache pages of the whole file or block device, so the
+/// next read comes from the media instead of an earlier cached read.
+///
+/// # Safety
+/// `fd` must be an open file descriptor.
+pub unsafe fn drop_cache(fd: c_int) -> c_int {
+    // SAFETY: the caller supplies an open descriptor; offset 0 with length 0
+    // covers the whole object and the advice only discards clean pages.
+    unsafe { posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED) }
 }
