@@ -77,10 +77,11 @@ pub const DELETE_ALL_KEYS_PROP: &str = "ro.crypto.metadata_init_delete_all_keys.
 pub const ESP_FLAGS: libc::c_ulong =
     libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RELATIME;
 
-/// vfat mount data of the session ESP: fixed ownership, no access for anyone
-/// else, and the payload label.
-pub const ESP_DATA: &str =
-    "uid=0,gid=0,fmask=0077,dmask=0077,context=u:object_r:espinit_file:s0,utf8";
+/// vfat mount data of the session ESP: fixed ownership and no access for
+/// anyone else. There is no `context=`: relabelling the mount needs
+/// `filesystem associate` from the new type to `vfat`, which the payload policy
+/// does not grant, and nothing executes from the ESP, so its genfs label stands.
+pub const ESP_DATA: &str = "uid=0,gid=0,fmask=0077,dmask=0077,utf8";
 
 /// Shared credential store flags: writable state that can never execute and
 /// carries no device nodes.
@@ -525,10 +526,7 @@ mod tests {
                 | libc::MS_NOEXEC
                 | libc::MS_RELATIME
         );
-        assert_eq!(
-            ESP_DATA,
-            "uid=0,gid=0,fmask=0077,dmask=0077,context=u:object_r:espinit_file:s0,utf8"
-        );
+        assert_eq!(ESP_DATA, "uid=0,gid=0,fmask=0077,dmask=0077,utf8");
 
         assert_eq!(
             SHARED_FLAGS,

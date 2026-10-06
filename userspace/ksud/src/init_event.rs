@@ -65,7 +65,14 @@ pub fn on_stage(stage: Stage) -> Result<()> {
                     .context("start tiny-espsu")?;
                 anyhow::ensure!(status.success(), "tiny-espsu failed: {status}");
             }
-            crate::rom_isolation::early(&rom).context("ROM isolation early stage")?;
+            if let Err(error) = crate::rom_isolation::early(&rom) {
+                // The service is reboot_on_failure: leave the reason in the
+                // state root before init reboots, or the boot ends silently.
+                crate::rom_isolation::report(&format!(
+                    "ROM isolation early stage failed: {error:#}"
+                ));
+                return Err(error.context("ROM isolation early stage"));
+            }
             run_stage(
                 stage.name(),
                 ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT),
