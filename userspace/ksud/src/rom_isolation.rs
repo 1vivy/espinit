@@ -418,15 +418,17 @@ mod tests {
     use super::*;
 
     fn rom(managed: bool, rom_number: u32, partitions: &[&str]) -> RomConfig {
-        let projections: String = partitions
-            .iter()
-            .map(|name| {
-                format!(
-                    "[[partitions]]\nname = \"{name}\"\n\
-                     backend = \"/dev/block/by-name/{name}\"\nread_only = false\n"
-                )
-            })
-            .collect();
+        use std::fmt::Write as _;
+
+        let mut projections = String::new();
+        for name in partitions {
+            write!(
+                projections,
+                "[[partitions]]\nname = \"{name}\"\n\
+                 backend = \"/dev/block/by-name/{name}\"\nread_only = false\n"
+            )
+            .unwrap();
+        }
         let text = format!(
             "schema_version = 1\ngeneration = \"release-1\"\nid = \"rom1\"\n\
              managed = {managed}\nrom_number = {rom_number}\n{projections}"
@@ -437,7 +439,8 @@ mod tests {
 
     #[test]
     fn the_property_table_follows_the_rom_number() {
-        assert!(session(&rom(false, 1, &[])).properties.is_empty());
+        let nothing: Vec<(&'static str, String)> = Vec::new();
+        assert_eq!(session(&rom(false, 1, &[])).properties, nothing);
 
         assert_eq!(
             session(&rom(true, 1, &["metadata"])).properties,
