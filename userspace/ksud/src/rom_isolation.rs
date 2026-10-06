@@ -186,7 +186,10 @@ pub fn early(rom: &RomConfig) -> Result<()> {
     Ok(())
 }
 
-/// Deny UFS boot-LUN writes from ROMs without physical firmware authority.
+/// Deny UFS boot-LUN writes to the boot-control HALs of ROMs without physical
+/// firmware authority. Only the `hal_bootctl` attribute loses `write`/`ioctl`:
+/// the TEE listener reaches RPMB through the same node (stock policy grants it
+/// `tee_*`), so a wildcard deny would cut KeyMint/Weaver/DeviceInfo storage.
 /// A missing node or an unreadable label is recorded as an explicit gap; a
 /// failed policy update is fatal, rather than booting under a false seal.
 #[cfg(target_os = "android")]
@@ -225,9 +228,11 @@ fn deny_ufs_bsg_writes() -> Result<()> {
         ));
         return Ok(());
     }
-    crate::sepolicy::apply_strict(&format!("deny * {kind} chr_file {{ write ioctl }}"))
-        .context("cannot deny UFS BSG write/ioctl for secondary ROM")?;
-    info!("UFS BSG write/ioctl denied for SELinux type {kind}");
+    crate::sepolicy::apply_strict(&format!(
+        "deny hal_bootctl {kind} chr_file {{ write ioctl }}"
+    ))
+    .context("cannot deny UFS BSG write/ioctl to the boot HAL of a secondary ROM")?;
+    info!("UFS BSG write/ioctl denied to hal_bootctl for SELinux type {kind}");
     Ok(())
 }
 
