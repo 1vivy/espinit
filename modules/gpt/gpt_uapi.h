@@ -3,10 +3,12 @@
 #define ESPINIT_GPT_UAPI_H
 #include <linux/types.h>
 #include <linux/ioctl.h>
-#define GPT_ABI_VERSION 1U
-#define GPT_MAX_PROJECTIONS 64U
+#define GPT_ABI_VERSION 2U
+#define GPT_MAX_PROJECTIONS 128U
 #define GPT_MAX_HIDDEN 256U
 #define GPT_LABEL_BYTES 36U
+/* APPLY flag: seal physical storage this view does not project. */
+#define GPT_APPLY_FLAG_SEAL 0x1U
 struct gpt_projection {
 	__u32 major;
 	__u32 minor;

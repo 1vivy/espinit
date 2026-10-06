@@ -7,16 +7,19 @@
 //! compile time, so the Rust view cannot silently drift from the header.
 
 /// ABI version carried by both APPLY and QUERY.
-pub const GPT_ABI_VERSION: u32 = 1;
+pub const GPT_ABI_VERSION: u32 = 2;
 
 /// Maximum projections carried by one APPLY.
-pub const GPT_MAX_PROJECTIONS: usize = 64;
+pub const GPT_MAX_PROJECTIONS: usize = 128;
 
 /// Maximum hidden physical partitions carried by one APPLY.
 pub const GPT_MAX_HIDDEN: usize = 256;
 
 /// Projected label bytes without the terminating NUL.
 pub const GPT_LABEL_BYTES: usize = 36;
+
+/// APPLY flag: seal physical storage this view does not project.
+pub const GPT_APPLY_FLAG_SEAL: u32 = 0x1;
 
 /// One projected device: backend `major:minor`, explicit access mode and label.
 #[repr(C)]
@@ -106,7 +109,7 @@ pub const GPT_IOCTL_APPLY: u32 = ioc(1, 1, std::mem::size_of::<GptApply>());
 /// `GPT_IOCTL_QUERY` (`_IOR('G', 2, struct gpt_query)`).
 pub const GPT_IOCTL_QUERY: u32 = ioc(2, 2, std::mem::size_of::<GptQuery>());
 
-const _: () = assert!(GPT_IOCTL_APPLY == 0x5610_4701);
+const _: () = assert!(GPT_IOCTL_APPLY == 0x6410_4701);
 const _: () = assert!(GPT_IOCTL_QUERY == 0x8010_4702);
 
 /// Copy one validated projection label into the fixed-size ABI field, leaving
@@ -158,7 +161,7 @@ mod tests {
     fn abi_sizes_and_offsets_match_the_kernel_header() {
         assert_eq!(std::mem::size_of::<GptProjection>(), 56);
         assert_eq!(std::mem::size_of::<GptDevice>(), 8);
-        assert_eq!(std::mem::size_of::<GptApply>(), 5648);
+        assert_eq!(std::mem::size_of::<GptApply>(), 9232);
         assert_eq!(std::mem::size_of::<GptQuery>(), 16);
         assert_eq!(std::mem::align_of::<GptApply>(), 4);
 
@@ -175,7 +178,7 @@ mod tests {
         );
         assert_eq!(
             std::ptr::addr_of!(apply.hide) as usize - base + GPT_MAX_HIDDEN * 8,
-            5648
+            9232
         );
 
         let projection = GptProjection::default();
@@ -197,7 +200,7 @@ mod tests {
     #[test]
     fn request_numbers_match_the_c_macros() {
         // _IOW('G', 1, struct gpt_apply) and _IOR('G', 2, struct gpt_query).
-        assert_eq!(GPT_IOCTL_APPLY, 0x5610_4701);
+        assert_eq!(GPT_IOCTL_APPLY, 0x6410_4701);
         assert_eq!(GPT_IOCTL_QUERY, 0x8010_4702);
     }
 
