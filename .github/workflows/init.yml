@@ -1,4 +1,4 @@
-name: Build espinit
+name: Build esuinit
 
 on:
   workflow_call:
@@ -35,7 +35,7 @@ jobs:
         workspaces: . -> target
         cache-targets: false
 
-    - name: Build espinit and phone LVM activator
+    - name: Build esuinit and phone LVM activator
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       run: |
@@ -43,17 +43,17 @@ jobs:
         BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
         test -f "$BUILTINS"
         export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo build --package espinit --package thin-activate --target=aarch64-linux-android --release
+        cargo build --package esuinit --package thin-activate --target=aarch64-linux-android --release
 
-    - name: Upload espinit artifacts
+    - name: Upload esuinit artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: espinit-aarch64
+        name: esuinit-aarch64
         path: |
-          target/aarch64-linux-android/release/espinit
+          target/aarch64-linux-android/release/esuinit
           target/aarch64-linux-android/release/thin-activate
 
-    - name: Build espinit x64
+    - name: Build esuinit x64
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       run: |
@@ -61,13 +61,13 @@ jobs:
         BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64-android.a"
         test -f "$BUILTINS"
         export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo build --package espinit --target=x86_64-linux-android --release
+        cargo build --package esuinit --target=x86_64-linux-android --release
 
-    - name: Upload x64 espinit artifact
+    - name: Upload x64 esuinit artifact
       uses: actions/upload-artifact@v7
       with:
-        name: espinit-x86_64
-        path: target/x86_64-linux-android/release/espinit
+        name: esuinit-x86_64
+        path: target/x86_64-linux-android/release/esuinit
 
   build-riscv64:
     runs-on: ${{ inputs.os }}
@@ -89,17 +89,17 @@ jobs:
         workspaces: . -> target
         cache-targets: false
 
-    - name: Build RISC-V espinit
+    - name: Build RISC-V esuinit
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       run: |
         source .github/scripts/setup-rust-build.sh riscv64-linux-android 35
         BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-riscv64-android.a"
         export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo +nightly-2026-09-23 build --config .github/riscv64-cargo.toml -Z build-std=std,panic_abort --package espinit --target=riscv64-linux-android --release
+        cargo +nightly-2026-09-23 build --config .github/riscv64-cargo.toml -Z build-std=std,panic_abort --package esuinit --target=riscv64-linux-android --release
 
-    - name: Upload RISC-V espinit artifact
+    - name: Upload RISC-V esuinit artifact
       uses: actions/upload-artifact@v7
       with:
-        name: espinit-riscv64
-        path: target/riscv64-linux-android/release/espinit
+        name: esuinit-riscv64
+        path: target/riscv64-linux-android/release/esuinit

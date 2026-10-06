@@ -1,17 +1,17 @@
 //! cow-probe: prove data-backed copy-on-write on a thin projected `/data`.
 //!
 //! Device-only diagnostic from the multi-ROM isolation plan (step 7). It is
-//! never shipped in the ESP and never run by espinit: an operator runs it once
+//! never shipped in the ESP and never run by esu: an operator runs it once
 //! from a root shell against a booted managed ROM.
 //!
 //! It writes exactly one preallocated, pinned file and reads/writes exactly two
-//! raw block devices: the `espinit-gpt*` projection behind `/data` and the
+//! raw block devices: the `esu-gpt*` projection behind `/data` and the
 //! `sda15` LVM physical volume that projection must diverge from. Raw writes
 //! never leave the extents of its own file.
 //!
 //! `cow-probe [DIR] [SIZE_MIB]`
 //!
-//! * `DIR` - probe directory, default `/data/gsi/espinit-cow-probe`.
+//! * `DIR` - probe directory, default `/data/gsi/esu-cow-probe`.
 //! * `SIZE_MIB` - probe file size in MiB, default 256.
 //!
 //! With one argument, a plain integer is `SIZE_MIB`, anything else is `DIR`.
@@ -33,7 +33,7 @@ use std::process::ExitCode;
 
 use extents::Extent;
 
-const DEFAULT_DIR: &str = "/data/gsi/espinit-cow-probe";
+const DEFAULT_DIR: &str = "/data/gsi/esu-cow-probe";
 const DEFAULT_SIZE_MIB: u64 = 256;
 const MAX_SIZE_MIB: u64 = 16 * 1024;
 
@@ -258,10 +258,10 @@ fn probe(args: &Args, checks: &mut Checks, report: &mut Report) -> Res<()> {
     }
     let slave = slaves[0].clone();
     report.slave = Some(slave.clone());
-    if !slave.starts_with("espinit-gpt") {
+    if !slave.starts_with("esu-gpt") {
         return Err(failure(
             "slave_is_projection",
-            format!("expected an espinit-gpt projection, got {slave}"),
+            format!("expected an esu-gpt projection, got {slave}"),
         ));
     }
     checks.ok("slave_is_projection", slave.clone());

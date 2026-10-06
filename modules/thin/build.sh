@@ -10,7 +10,7 @@
 # Module.symvers are required: modules_prepare alone cannot supply ABI CRCs.
 #
 # JOBS (default 13, maximum 13) is forwarded to the shared recipe; architecture
-# comes from the exact target config. ESPINIT_GENERATION is
+# comes from the exact target config. ESU_GENERATION is
 # forwarded when set; the Makefile derives it from this repository's Git HEAD
 # otherwise and rejects any value that is not 1-63 ASCII letters/digits/._-
 # before compiling.
@@ -21,18 +21,18 @@ KERNEL_OUT=${KERNEL_OUT:-}
 KERNEL_CONFIG=${KERNEL_CONFIG:-}
 
 if [ -z "$KERNEL_SRC" ] || [ -z "$KERNEL_OUT" ] || [ -z "$KERNEL_CONFIG" ]; then
-	echo "espinit thin: KERNEL_SRC, KERNEL_OUT and KERNEL_CONFIG are required" >&2
+	echo "esu thin: KERNEL_SRC, KERNEL_OUT and KERNEL_CONFIG are required" >&2
 	echo "usage: KERNEL_SRC=<exact source> KERNEL_OUT=<exact output> KERNEL_CONFIG=<phone config capture> [JOBS=1..13] $0" >&2
 	exit 2
 fi
 
 if [ ! -d "$KERNEL_SRC" ]; then
-	echo "espinit thin: KERNEL_SRC is not a directory: $KERNEL_SRC" >&2
+	echo "esu thin: KERNEL_SRC is not a directory: $KERNEL_SRC" >&2
 	exit 2
 fi
 
 if [ ! -f "$KERNEL_SRC/Makefile" ]; then
-	echo "espinit thin: KERNEL_SRC does not look like a kernel source tree: $KERNEL_SRC" >&2
+	echo "esu thin: KERNEL_SRC does not look like a kernel source tree: $KERNEL_SRC" >&2
 	exit 2
 fi
 
@@ -42,4 +42,4 @@ make -C "$MODULE_DIR" \
 	KERNEL_SRC="$KERNEL_SRC" KERNEL_OUT="$KERNEL_OUT" KERNEL_CONFIG="$KERNEL_CONFIG" \
 	JOBS="${JOBS:-13}" modules
 
-echo "espinit thin: built $MODULE_DIR/thin.ko"
+echo "esu thin: built $MODULE_DIR/thin.ko"

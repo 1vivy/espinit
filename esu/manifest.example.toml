@@ -1,0 +1,82 @@
+# esu manifest
+#
+# Deployed path: /debug_ramdisk/esp/esu/manifest.toml
+# All relative paths are resolved from the ESP subtree /esu, and may not
+# be absolute or traverse symlinks or `..`.
+#
+# The manifest, selected roms/<id>.toml, PID-1 binary, esud, and every listed module
+# must all carry the same `generation` value.
+#
+# The ESP is normally mounted read-only. Early hard-failure receipts use ESP
+# /esu/receipts/failure.json, never unprojected /metadata. On failure only,
+# use a bounded RW remount: temporary file + fsync + atomic rename + directory
+# fsync, then sync the ESP and remount RO. Storage errors still stop handoff.
+# After projection, PID1 atomically stages Android packages on projected metadata.
+
+schema_version = 1
+generation = "release-1"
+# The bootconfig/cmdline androidboot.esu.rom selects <id>.toml in this directory.
+rom = "roms"
+
+# Separate from the ordered kernel-module list below. These package manifests
+# live at modules/<id>/module.toml and must use this exact generation.
+[platform]
+metadata_filesystem = "ext4"
+packages = ["boot-hal", "tiny-espsu"]
+# Recovery keeps its own scripts/projection, but does not install the normal HAL.
+recovery_packages = []
+
+# Modules load strictly in document order. The first entry must be the core
+# module, named `esu`. A managed ROM additionally requires `gpt` after it
+# and before real-init handoff; an unmanaged manifest that lists `gpt` is
+# rejected, because there is no projection contract to apply. Each module must
+# pass its readiness self-check before the next entry is processed.
+#
+# An entry whose `path` ends in `.ko` is a kernel module: it is loaded, its
+# `/sys/module/<name>` generation and readiness are verified, and then its stage
+# script runs. Any other entry is a userspace helper: PID 1 requires the payload
+# file to exist exactly like a module image, never loads it into the kernel, and
+# relies on `modules/<name>/early.sh` (or `recovery.sh`) to execute it from the
+# ESP. Its exit status is the whole contract.
+#
+# Entries ordered before `gpt` run their own early/recovery scripts first; a
+# module or script that activates a logical volume (e.g. `dmsetup`) therefore
+# runs before `gpt` resolves its backends, which happens immediately before the
+# `gpt` entry. Backends are whole block devices: a by-name partition, an exact
+# `/dev/mapper/<name>`, an existing `/dev/loopN`, or an
+# `esp-file:<relative-path>` on the mounted ESP that the loader attaches itself.
+# Retaining the core's inherited lifecycle is intentional
+# boot-substrate reuse, not KernelSU Manager or root compatibility.
+
+[[modules]]
+name = "kernelesp"
+path = "modules/kernelesp.ko"
+params = ""
+
+# Managed storage loads the private thin target, then runs
+# modules/thin/early.sh. The activator reads the single userdata PV's checked
+# LVM2 metadata and recreates the exact rom VG tables before projection.
+[[modules]]
+name = "thin"
+path = "modules/thin.ko"
+params = ""
+
+# Per-ROM firmware views, required only by a managed ROM that lists
+# `firmware_views`. The helper reads the selected ROM config and creates one
+# external-origin thin device per view in the pool `thin` just activated, so the
+# projection below sees `/dev/mapper/rom<N>-fw-<name>` serving the physical
+# firmware partition's bytes until that ROM's OTA writes to them. It must run
+# after `thin` and before `gpt`, and a ROM without views runs it as a no-op.
+[[modules]]
+name = "fw-views"
+path = "bin/fw-views"
+params = ""
+
+# Required only when the selected ROM config sets `managed = true`. `params`
+# is passed to the kernel as module parameters and is never evaluated by a
+# shell. The loader applies the complete projection and requires an exact
+# QUERY match before the gpt early/recovery script runs.
+[[modules]]
+name = "gpt"
+path = "modules/gpt.ko"
+params = ""

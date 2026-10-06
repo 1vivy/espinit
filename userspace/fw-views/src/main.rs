@@ -13,12 +13,12 @@
 //! The origin partitions are resolved before the projection runs, so the views
 //! read the physical `PARTNAME` sysfs name rather than a hidden or projected
 //! one, and the kernel opens them read-only. No argument is accepted; the
-//! selection is the same `androidboot.espinit.rom` PID 1 used.
+//! selection is the same `androidboot.esu.rom` PID 1 used.
 
 use dm::{DeviceMapper, DeviceNumber, Mapper, MessageError};
-use espinit::config;
-use espinit::esp::{ESP_MOUNT_POINT, payload_root};
-use espinit_platform::generation;
+use esu_platform::generation;
+use esuinit::config;
+use esuinit::esp::{ESP_MOUNT_POINT, payload_root};
 use fw_views::plan;
 use std::fs;
 use std::path::Path;
@@ -33,14 +33,14 @@ fn read_text(path: &Path) -> Result<String, String> {
 }
 
 /// The payload generation this binary was built for. The note is the shared
-/// Apache-2.0 source of `espinit-platform`, which is the same one `espinitd`
+/// Apache-2.0 source of `esu-platform`, which is the same one `esud`
 /// carries, so this binary must not link a second copy of it.
 fn check_generation() -> Result<(), String> {
-    let expected = std::env::var("ESPINIT_GENERATION")
-        .map_err(|_| "ESPINIT_GENERATION is missing or non-UTF-8".to_owned())?;
+    let expected = std::env::var("ESU_GENERATION")
+        .map_err(|_| "ESU_GENERATION is missing or non-UTF-8".to_owned())?;
 
     if expected != generation::generation() {
-        return Err("compiled generation does not match ESPINIT_GENERATION".to_owned());
+        return Err("compiled generation does not match ESU_GENERATION".to_owned());
     }
 
     Ok(())
@@ -109,7 +109,7 @@ fn run() -> Result<(), String> {
     let mut mapper = DeviceMapper::open()?;
 
     for view in &views {
-        let origin = espinit_platform::block::partition_by_name(&view.origin)
+        let origin = esu_platform::block::partition_by_name(&view.origin)
             .map_err(|error| format!("cannot resolve physical {}: {error}", view.origin))?;
         let origin = number(origin)?;
         let sectors = device_sectors(origin)?;

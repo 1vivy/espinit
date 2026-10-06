@@ -14,7 +14,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "selinux/selinux.h"
 #include "policy/feature.h"
-#include "runtime/ksud_boot.h"
+#include "runtime/esud_boot.h"
 #include "ksu.h"
 
 static bool ksu_kernel_umount_enabled = true;

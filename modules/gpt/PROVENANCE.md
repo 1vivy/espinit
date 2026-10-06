@@ -1,13 +1,13 @@
 # Provenance and licensing
 
 `gpt.c`, `gpt_uapi.h`, `Makefile` and the module documentation are newly authored
-for espinit's single in-memory GPT projection contract. This is not a fork of a
+for esu's single in-memory GPT projection contract. This is not a fork of a
 GPT rewriting module or a physical block-I/O firewall. All files in this subtree
 are GPL-2.0-only; `LICENSE` supplies the full GPL v2 text and fixes the license to
 version 2 only.
 
 The generation derivation and literal-safe ASCII token validation in `Makefile`
-reuse espinit's existing `kernel/Kbuild` convention; the identity is compiled
+reuse esu's existing `kernel/Kbuild` convention; the identity is compiled
 into static storage and cannot be changed by a load-time parameter.
 
 Public Linux v6.12 interfaces consulted during implementation:

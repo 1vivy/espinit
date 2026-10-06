@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn parses_partname() {
-        let entries = parse_uevent("MAJOR=259\nMINOR=3\nDEVNAME=espinit-gpt3\nPARTNAME=userdata\n");
+        let entries = parse_uevent("MAJOR=259\nMINOR=3\nDEVNAME=esu-gpt3\nPARTNAME=userdata\n");
         assert_eq!(partname(&entries), Some("userdata"));
     }
 

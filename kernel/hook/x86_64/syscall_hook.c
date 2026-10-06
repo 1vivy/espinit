@@ -206,7 +206,7 @@ bool ksu_has_syscall_hook(int nr)
 // https://github.com/torvalds/linux/commit/1e3ad78334a69b36e107232e337f9d693dcc9df2
 // harden syscall table was introduced in 6.9, but it was backported to almost
 // all of GKI kernel except 5.10
-#ifdef CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER
+#ifdef CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
 static void *x64_sys_call_patch_addr;
 static char x64_sys_call_patch_orig_insn[14];
 
@@ -304,7 +304,7 @@ void __init __nocfi ksu_syscall_hook_init(void)
     if (!ksu_syscall_table)
         return;
 
-#ifdef CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER
+#ifdef CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
     patch_abs_jump("x64_sys_call", &x64_sys_call_patch_addr, my_x64_sys_call, x64_sys_call_patch_orig_insn);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
     syscall_enter_from_user_mode_fn = find_kernel_symbol_exact("syscall_enter_from_user_mode");
@@ -332,7 +332,7 @@ void __exit ksu_syscall_hook_exit(void)
 {
     int i;
 
-#ifdef CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER
+#ifdef CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
     int ret;
     if (x64_sys_call_patch_addr) {
         ret = ksu_patch_text((void *)x64_sys_call_patch_addr, x64_sys_call_patch_orig_insn,

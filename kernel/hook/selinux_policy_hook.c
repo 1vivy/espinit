@@ -20,7 +20,7 @@ static atomic_t policy_state = ATOMIC_INIT(POLICY_WAITING_LOAD);
 
 static void apply_rules_work(struct work_struct *work)
 {
-    int error = apply_espinit_rules();
+    int error = apply_esu_rules();
 
     if (error) {
         pr_err("post-exec SELinux rule application failed: %d\n", error);

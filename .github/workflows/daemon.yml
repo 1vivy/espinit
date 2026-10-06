@@ -1,4 +1,4 @@
-name: Build espinitd
+name: Build esud
 on:
   workflow_call:
     inputs:
@@ -36,20 +36,20 @@ jobs:
       with:
         ndk-version: r29
 
-    - name: Build espinitd
+    - name: Build esud
       env:
         ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
       run: |
         if [ "${{ inputs.target }}" = riscv64-linux-android ]; then
           source .github/scripts/setup-rust-build.sh riscv64-linux-android 35
-          cargo +nightly-2026-09-23 build --config .github/riscv64-cargo.toml -Z build-std=std,panic_abort --package espinitd --target "$TRIPLE" --release
+          cargo +nightly-2026-09-23 build --config .github/riscv64-cargo.toml -Z build-std=std,panic_abort --package esud --target "$TRIPLE" --release
         else
           source .github/scripts/setup-rust-build.sh ${{ inputs.target }} 26
-          cargo build --package espinitd --target "$TRIPLE" --release
+          cargo build --package esud --target "$TRIPLE" --release
         fi
 
-    - name: Upload espinitd artifact
+    - name: Upload esud artifact
       uses: actions/upload-artifact@v7
       with:
-        name: espinitd-${{ inputs.target }}
-        path: target/${{ inputs.target }}/release/espinitd
+        name: esud-${{ inputs.target }}
+        path: target/${{ inputs.target }}/release/esud

@@ -16,7 +16,7 @@ KernelSU is a kernel-based root solution for Android with a kernel module, Rust 
 
 ```bash
 /kernel/                      # Kernel module - C code for Linux kernel integration
-/userspace/ksud/              # Userspace daemon - Rust binary for userspace-kernel communication
+/userspace/esud/              # Userspace daemon - Rust binary for userspace-kernel communication
 /userspace/meta-overlayfs/    # Meta-overlay filesystem implementation - Rust binary + scripts
 /manager/                     # Android manager app - Kotlin/Jetpack Compose UI
 /website/                     # Documentation website - VitePress
@@ -27,11 +27,11 @@ KernelSU is a kernel-based root solution for Android with a kernel module, Rust 
 
 ## Core Concepts
 
-- **supercall**: Kernel-side IOCTL interface exposed by the `[ksu_driver]` anon-inode and installed via the reboot kprobe hook in `kernel/supercalls.c`. It maps commands like allowlist/app-profile management, feature toggles, and sepolicy changes. Rust userspace reaches it through `userspace/ksud/src/ksucalls.rs` (scans or installs the FD, wraps IOCTLs), while the Manager JNI bridge mirrors the same IOCTLs in `manager/app/src/main/cpp/ksu.cc`.
-- **module**: A flashable ZIP unpacked by `userspace/ksud/src/module.rs` into `/data/adb/modules/` (`userspace/ksud/src/defs.rs`), with lifecycle scripts (`post-fs-data.sh`, `service.sh`, etc.) executed by ksud init events (`userspace/ksud/src/init_event.rs`). The Android Manager surfaces module state from ksud in `manager/app/src/main/java/me/weishu/kernelsu/ui/viewmodel/ModuleViewModel.kt`.
-- **metamodule**: A special module marked by `metamodule=1` in `module.prop` (see `userspace/meta-overlayfs/metamodule/module.prop`). ksud enforces a single active metamodule, creates `/data/adb/metamodule -> /data/adb/modules/<id>` symlink, and delegates mounting/meta install hooks via `userspace/ksud/src/metamodule.rs`; metamodule scripts run before regular modules in `userspace/ksud/src/init_event.rs`. The Manager UI highlights metamodules and warns on uninstall (`manager/app/src/main/java/me/weishu/kernelsu/ui/screen/Module.kt`).
-- **app profile**: Per-app policy struct defined in `kernel/app_profile.h` and validated/persisted in `kernel/allowlist.c` to control root grants and non-root behavior (e.g., cumulative umount policy). supercall IOCTLs `KSU_IOCTL_GET/SET_APP_PROFILE` live in `kernel/supercalls.c` and are consumed by ksud/Manager via the JNI bridge (`manager/app/src/main/cpp/ksu.cc`) and Kotlin model `Natives.Profile` (`manager/app/src/main/java/me/weishu/kernelsu/Natives.kt`).
-- **sucompat**: Exec/FS compatibility layer that reroutes `/system/bin/su` to ksud for allowed UIDs, keeping legacy “call su to root” flows working. The hooks live in `kernel/sucompat.c` and are registered by the syscall hook manager; feature toggle `KSU_FEATURE_SU_COMPAT` is exposed through supercalls and surfaced to the Manager via `manager/app/src/main/cpp/ksu.cc` (`is_su_enabled` / `set_su_enabled`).
+- **supercall**: Kernel-side IOCTL interface exposed by the `[ksu_driver]` anon-inode and installed via the reboot kprobe hook in `kernel/supercalls.c`. It maps commands like allowlist/app-profile management, feature toggles, and sepolicy changes. Rust userspace reaches it through `userspace/esud/src/ksucalls.rs` (scans or installs the FD, wraps IOCTLs), while the Manager JNI bridge mirrors the same IOCTLs in `manager/app/src/main/cpp/ksu.cc`.
+- **module**: A flashable ZIP unpacked by `userspace/esud/src/module.rs` into `/data/adb/modules/` (`userspace/esud/src/defs.rs`), with lifecycle scripts (`post-fs-data.sh`, `service.sh`, etc.) executed by esud init events (`userspace/esud/src/init_event.rs`). The Android Manager surfaces module state from esud in `manager/app/src/main/java/me/weishu/kernelsu/ui/viewmodel/ModuleViewModel.kt`.
+- **metamodule**: A special module marked by `metamodule=1` in `module.prop` (see `userspace/meta-overlayfs/metamodule/module.prop`). esud enforces a single active metamodule, creates `/data/adb/metamodule -> /data/adb/modules/<id>` symlink, and delegates mounting/meta install hooks via `userspace/esud/src/metamodule.rs`; metamodule scripts run before regular modules in `userspace/esud/src/init_event.rs`. The Manager UI highlights metamodules and warns on uninstall (`manager/app/src/main/java/me/weishu/kernelsu/ui/screen/Module.kt`).
+- **app profile**: Per-app policy struct defined in `kernel/app_profile.h` and validated/persisted in `kernel/allowlist.c` to control root grants and non-root behavior (e.g., cumulative umount policy). supercall IOCTLs `KSU_IOCTL_GET/SET_APP_PROFILE` live in `kernel/supercalls.c` and are consumed by esud/Manager via the JNI bridge (`manager/app/src/main/cpp/ksu.cc`) and Kotlin model `Natives.Profile` (`manager/app/src/main/java/me/weishu/kernelsu/Natives.kt`).
+- **sucompat**: Exec/FS compatibility layer that reroutes `/system/bin/su` to esud for allowed UIDs, keeping legacy “call su to root” flows working. The hooks live in `kernel/sucompat.c` and are registered by the syscall hook manager; feature toggle `KSU_FEATURE_SU_COMPAT` is exposed through supercalls and surfaced to the Manager via `manager/app/src/main/cpp/ksu.cc` (`is_su_enabled` / `set_su_enabled`).
 - **allowlist**: Kernel-managed list of UIDs permitted for root, persisted at `/data/adb/ksu/.allowlist` with default root/non-root profiles. Core logic is in `kernel/allowlist.c` (bitmap storage, persistence, default profile caching) and is initialized from `kernel/ksu.c`; supercall handlers in `kernel/supercalls.c` expose getters, deny-list checks, and “should umount modules” decisions. Manager reads and edits it through the JNI calls in `manager/app/src/main/cpp/ksu.cc` and Kotlin `Natives` façade.
 
 ## Component Workflows
@@ -39,11 +39,11 @@ KernelSU is a kernel-based root solution for Android with a kernel module, Rust 
 ### Kernel (`kernel/`)
 
 - Kernel changes are C-only; keep interfaces aligned with supercall and allowlist expectations in userspace/Manager.
-- If you alter IOCTLs or profiles, update the corresponding wrappers in ksud (`ksucalls.rs`) and Manager JNI (`manager/app/src/main/cpp/ksu.cc`).
+- If you alter IOCTLs or profiles, update the corresponding wrappers in esud (`ksucalls.rs`) and Manager JNI (`manager/app/src/main/cpp/ksu.cc`).
 
-### Userspace Rust (`userspace/ksud`, `userspace/meta-overlayfs`)
+### Userspace Rust (`userspace/esud`, `userspace/meta-overlayfs`)
 
-For Rust projects in `userspace/ksud` and `userspace/meta-overlayfs`, ALWAYS run these commands in sequence after making code changes:
+For Rust projects in `userspace/esud` and `userspace/meta-overlayfs`, ALWAYS run these commands in sequence after making code changes:
 
 1. `cargo ndk -t arm64-v8a check` (verify compilation)
 2. `cargo ndk -t arm64-v8a clippy` (lints and warnings)
@@ -54,15 +54,15 @@ For Rust projects in `userspace/ksud` and `userspace/meta-overlayfs`, ALWAYS run
 
 ```bash
 cd manager
-# Must have ksud binaries first!
+# Must have esud binaries first!
 mkdir -p app/src/main/jniLibs/arm64-v8a
-cp ../userspace/ksud/target/aarch64-linux-android/release/ksud app/src/main/jniLibs/arm64-v8a/libksud.so
+cp ../userspace/esud/target/aarch64-linux-android/release/esud app/src/main/jniLibs/arm64-v8a/libesud.so
 
 # Then build
 ./gradlew clean assembleRelease
 ```
 
-Important: Manager build REQUIRES ksud binaries to be present in `jniLibs` before building.
+Important: Manager build REQUIRES esud binaries to be present in `jniLibs` before building.
 
 ### Website (`website/`)
 
@@ -79,14 +79,14 @@ bun run docs:build  # Production build
 
 ## Common Pitfalls
 
-- Only one metamodule can be active; keep meta hooks in sync with ksud expectations.
-- Manager JNI mirrors every supercall; kernel or ksud API changes must be reflected there to avoid runtime drift.
+- Only one metamodule can be active; keep meta hooks in sync with esud expectations.
+- Manager JNI mirrors every supercall; kernel or esud API changes must be reflected there to avoid runtime drift.
 - Do not skip the `cargo ndk` steps; plain `cargo check` will not validate Android targets.
-- Manager builds fail if `libksud.so` is missing; create it before any Gradle command.
+- Manager builds fail if `libesud.so` is missing; create it before any Gradle command.
 
 ## Git Commit
 
-- Mirror existing history style: `<scope>: <summary>` with a short lowercase scope tied to the touched area (e.g., `kernel`, `ksud`, `manager`, `meta-overlayfs`, `docs`, `scripts`). Keep the summary concise, sentence case, and avoid trailing period.
+- Mirror existing history style: `<scope>: <summary>` with a short lowercase scope tied to the touched area (e.g., `kernel`, `esud`, `manager`, `meta-overlayfs`, `docs`, `scripts`). Keep the summary concise, sentence case, and avoid trailing period.
 - Prefer one scope; if multiple areas change, pick the primary one rather than chaining scopes. For doc-only changes use `docs:`; for multi-lang string updates use `translations:` if that matches log history.
 - Keep subject lines brief (target ≤72 chars), no body unless necessary. If referencing a PR/issue, append `(#1234)` at the end as seen in history.
 - Before committing, glance at recent `git log --oneline` to stay consistent with current prefixes and capitalization used in this repo.

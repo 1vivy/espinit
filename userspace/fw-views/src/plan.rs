@@ -8,7 +8,7 @@
 //! config so they can be tested without a kernel.
 
 use dm::{DeviceNumber, Target};
-use espinit::config::RomConfig;
+use esuinit::config::RomConfig;
 
 /// Device-mapper name of the pool layer `thin-activate` creates from the VG
 /// `rom`'s own LVM2 metadata before the `gpt` entry resolves its backends.
@@ -74,7 +74,7 @@ pub fn table(origin: DeviceNumber, sectors: u64, thin_id: u32, pool: DeviceNumbe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use espinit::config::parse_rom;
+    use esuinit::config::parse_rom;
 
     const ROM: &str = r#"
 schema_version = 1

@@ -1,4 +1,4 @@
-name: Build espinit.ko
+name: Build kernelesp.ko
 on:
   workflow_call:
   workflow_dispatch:

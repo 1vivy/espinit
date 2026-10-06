@@ -12,7 +12,7 @@
 #include "policy/feature.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
-#include "runtime/ksud_boot.h"
+#include "runtime/esud_boot.h"
 #include "feature/kernel_umount.h"
 #include "selinux/selinux.h"
 #include "infra/file_wrapper.h"
@@ -22,15 +22,15 @@
 
 /*
  * Build generation of the core module. kernel/Kbuild derives it from
- * ESPINIT_GENERATION or from the full Git HEAD hash and fails the build for a
+ * ESU_GENERATION or from the full Git HEAD hash and fails the build for a
  * missing, oversized or non-ASCII value, so the copy below can never silently
  * truncate: a Kbuild regression becomes a compile error instead.
  */
-#ifndef ESPINIT_GENERATION
-#error "ESPINIT_GENERATION is not defined: kernel/Kbuild must define it"
+#ifndef ESU_GENERATION
+#error "ESU_GENERATION is not defined: kernel/Kbuild must define it"
 #endif
 
-static const char ksu_build_generation[] = ESPINIT_GENERATION;
+static const char ksu_build_generation[] = ESU_GENERATION;
 
 /*
  * Core readiness.
@@ -47,8 +47,8 @@ static bool ksu_core_ready(void)
     return THIS_MODULE->state == MODULE_STATE_LIVE;
 #else
     /*
-     * Built-in espinit runs its initcall before any userspace process exists,
-     * and the only way to obtain the espinit fd is the reboot hook registered
+     * Built-in esu runs its initcall before any userspace process exists,
+     * and the only way to obtain the esu fd is the reboot hook registered
      * by that same initcall, so a reachable ioctl implies that normal
      * initialization completed.
      */
@@ -67,11 +67,11 @@ static int do_get_info(void __user *arg)
 #endif
 
     cmd.features = KSU_FEATURE_MAX;
-    cmd.boot_mode = espinit_get_platform_boot_mode();
-    cmd.uapi_version = ESPINIT_UAPI_VERSION;
+    cmd.boot_mode = esu_get_platform_boot_mode();
+    cmd.uapi_version = ESU_UAPI_VERSION;
 
     if (ksu_core_ready()) {
-        cmd.state |= ESPINIT_STATE_READY;
+        cmd.state |= ESU_STATE_READY;
     }
 
     /*
@@ -96,7 +96,7 @@ static int do_set_boot_mode(void __user *arg)
     if (copy_from_user(&mode, arg, sizeof(mode)))
         return -EFAULT;
 
-    return espinit_set_platform_boot_mode(mode);
+    return esu_set_platform_boot_mode(mode);
 }
 
 static int do_get_info_legacy(void __user *arg)
@@ -499,7 +499,7 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .perm_check = always_allow
     },
     {
-        .cmd = ESPINIT_IOCTL_SET_BOOT_MODE,
+        .cmd = ESU_IOCTL_SET_BOOT_MODE,
         .name = "SET_BOOT_MODE",
         .handler = do_set_boot_mode,
         .perm_check = only_root
@@ -583,15 +583,15 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
 {
     int i;
 
-#ifdef CONFIG_ESPINIT_DEBUG
-    pr_info("espinit ioctl: cmd=0x%x from uid=%d\n", cmd, current_uid().val);
+#ifdef CONFIG_KERNELESP_DEBUG
+    pr_info("esu ioctl: cmd=0x%x from uid=%d\n", cmd, current_uid().val);
 #endif
 
     for (i = 0; ksu_ioctl_handlers[i].handler; i++) {
         if (cmd == ksu_ioctl_handlers[i].cmd) {
             // Check permission first
             if (ksu_ioctl_handlers[i].perm_check && !ksu_ioctl_handlers[i].perm_check()) {
-                pr_warn("espinit ioctl: permission denied for cmd=0x%x uid=%d\n", cmd, current_uid().val);
+                pr_warn("esu ioctl: permission denied for cmd=0x%x uid=%d\n", cmd, current_uid().val);
                 return -EPERM;
             }
             // Execute handler
@@ -599,14 +599,14 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
         }
     }
 
-    pr_warn("espinit ioctl: unsupported command 0x%x\n", cmd);
+    pr_warn("esu ioctl: unsupported command 0x%x\n", cmd);
     return -ENOTTY;
 }
 
 void __init ksu_supercall_dump_commands(void)
 {
     int i;
-    pr_info("espinit IOCTL Commands:\n");
+    pr_info("esu IOCTL Commands:\n");
     for (i = 0; ksu_ioctl_handlers[i].handler; i++) {
         pr_info("  %-18s = 0x%08x\n", ksu_ioctl_handlers[i].name, ksu_ioctl_handlers[i].cmd);
     }

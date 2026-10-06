@@ -84,10 +84,10 @@ static bool apply_daemon_identity_rules(struct policydb *db)
     return ksu_allow(db, "init", KERNEL_SU_DOMAIN, "process2", "nosuid_transition");
 }
 
-static int mutate_espinit_policy(struct policydb *db)
+static int mutate_esu_policy(struct policydb *db)
 {
     if (!apply_daemon_identity_rules(db)) {
-        pr_err("required espinit daemon identity rules failed\n");
+        pr_err("required esu daemon identity rules failed\n");
         return -EINVAL;
     }
     if (!apply_boot_hal_rules(db)) {
@@ -97,11 +97,11 @@ static int mutate_espinit_policy(struct policydb *db)
     return 0;
 }
 
-int apply_espinit_rules(void)
+int apply_esu_rules(void)
 {
     if (!getenforce())
         pr_info("SELinux permissive or disabled, applying rules\n");
-    return espinit_policy_apply_once(mutate_espinit_policy);
+    return esu_policy_apply_once(mutate_esu_policy);
 }
 
 #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)
@@ -458,7 +458,7 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
-    espinit_policy_reset_avc();
+    esu_policy_reset_avc();
     ret = success_cmd_count;
     goto out_unlock;
 

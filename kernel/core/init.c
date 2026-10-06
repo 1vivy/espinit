@@ -13,8 +13,8 @@
 #include "hook/syscall_hook_manager.h"
 #include "hook/lsm_hook.h"
 #include "hook/selinux_policy_hook.h"
-#include "runtime/ksud.h"
-#include "runtime/ksud_boot.h"
+#include "runtime/esud.h"
+#include "runtime/esud_boot.h"
 #include "selinux/selinux.h"
 #include "hook/syscall_hook.h"
 #include "feature/selinux_hide.h"
@@ -22,7 +22,7 @@
 #include "infra/symbol_resolver.h"
 #include "supercall/supercall.h"
 
-#if defined(__x86_64__) && !defined(CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER)
+#if defined(__x86_64__) && !defined(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER)
 #include <asm/cpufeature.h>
 #include <linux/version.h>
 #ifndef X86_FEATURE_INDIRECT_SAFE
@@ -33,7 +33,7 @@
 // workaround for A12-5.10 kernel
 // Some third-party kernel (e.g. linegaeOS) uses wrong toolchain, which supports
 // CC_HAVE_STACKPROTECTOR_SYSREG while gki's toolchain doesn't.
-// Therefore, espinit lkm, which uses gki toolchain, requires this __stack_chk_guard,
+// Therefore, esu lkm, which uses gki toolchain, requires this __stack_chk_guard,
 // while those third-party kernel can't provide.
 // Thus, we manually provide it instead of using kernel's:
 #if defined(CONFIG_STACKPROTECTOR) &&                                                                                  \
@@ -42,7 +42,7 @@
 #include <linux/random.h>
 unsigned long __stack_chk_guard __ro_after_init __attribute__((visibility("hidden")));
 
-__attribute__((no_stack_protector)) void __init espinit_setup_stack_chk_guard()
+__attribute__((no_stack_protector)) void __init esu_setup_stack_chk_guard()
 {
     unsigned long canary;
 
@@ -53,12 +53,12 @@ __attribute__((no_stack_protector)) void __init espinit_setup_stack_chk_guard()
     __stack_chk_guard = canary;
 }
 
-__attribute__((naked)) int __init espinit_init_early(void)
+__attribute__((naked)) int __init esu_init_early(void)
 {
     asm("mov x19, x30;\n"
-        "bl espinit_setup_stack_chk_guard;\n"
+        "bl esu_setup_stack_chk_guard;\n"
         "mov x30, x19;\n"
-        "b espinit_init;\n");
+        "b esu_init;\n");
 }
 #define NEED_OWN_STACKPROTECTOR 1
 #else
@@ -70,17 +70,17 @@ struct cred *ksu_cred;
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
-int __init espinit_init(void)
+int __init esu_init(void)
 {
     int error;
-#if defined(__x86_64__) && !defined(CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER)
+#if defined(__x86_64__) && !defined(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
         pr_alert("*************************************************************");
         pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
         pr_alert("**                                                         **");
         pr_alert("**        X86_FEATURE_INDIRECT_SAFE is not enabled!        **");
-        pr_alert("**       espinit will abort initialization to prevent      **");
+        pr_alert("**       esu will abort initialization to prevent      **");
         pr_alert("**                     kernel panic.                       **");
         pr_alert("**                                                         **");
         pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
@@ -91,21 +91,21 @@ int __init espinit_init(void)
 
 #ifdef MODULE
     /*
-     * espinit hooks the boot path, so espinit.ko must be loaded by init
+     * esu hooks the boot path, so kernelesp.ko must be loaded by init
      * (PID 1) during early boot. A later load would leave the device in a
      * partially initialized state, so refuse it before any side effect.
      */
     if (current->pid != 1) {
-        pr_err("espinit can only be loaded by init (pid 1), refusing load from pid %d\n", current->pid);
+        pr_err("esu can only be loaded by init (pid 1), refusing load from pid %d\n", current->pid);
         return -EPERM;
     }
 #endif
 
-#ifdef CONFIG_ESPINIT_DEBUG
+#ifdef CONFIG_KERNELESP_DEBUG
     pr_alert("*************************************************************");
     pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
     pr_alert("**                                                         **");
-    pr_alert("**          You are running espinit in DEBUG mode          **");
+    pr_alert("**          You are running esu in DEBUG mode          **");
     pr_alert("**                                                         **");
     pr_alert("**     NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE    **");
     pr_alert("*************************************************************");
@@ -133,19 +133,19 @@ int __init espinit_init(void)
 
     ksu_syscall_hook_manager_init();
 
-    ksu_ksud_init();
+    ksu_esud_init();
 
     ksu_file_wrapper_init();
 
 #ifdef MODULE
-#ifndef CONFIG_ESPINIT_DEBUG
+#ifndef CONFIG_KERNELESP_DEBUG
     kobject_del(&THIS_MODULE->mkobj.kobj);
 #endif
 #endif
     return 0;
 }
 
-void __exit espinit_exit(void)
+void __exit esu_exit(void)
 {
     // Phase 1: Stop all hooks first to prevent new callbacks
     ksu_selinux_policy_hook_exit();
@@ -153,7 +153,7 @@ void __exit espinit_exit(void)
 
     ksu_supercalls_exit();
 
-    ksu_ksud_exit();
+    ksu_esud_exit();
 
     // Wait for any in-flight RCU readers
     synchronize_rcu();
@@ -167,15 +167,15 @@ void __exit espinit_exit(void)
 }
 
 #if NEED_OWN_STACKPROTECTOR
-module_init(espinit_init_early);
+module_init(esu_init_early);
 #else
-module_init(espinit_init);
+module_init(esu_init);
 #endif
-module_exit(espinit_exit);
+module_exit(esu_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("weishu");
-MODULE_DESCRIPTION("espinit early-boot substrate");
+MODULE_DESCRIPTION("kernelesp early-boot substrate");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 #else

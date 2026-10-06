@@ -1,16 +1,16 @@
 [workspace]
 members = [
-    "userspace/ksud",
-    "userspace/ksuinit",
+    "userspace/esud",
+    "userspace/esuinit",
     "userspace/dm",
     "userspace/lvm2-meta",
     "userspace/thin-activate",
     "userspace/fw-views",
-    "userspace/platform",
+    "userspace/esu-platform",
 ]
 default-members = [
-    "userspace/ksud",
-    "userspace/ksuinit",
+    "userspace/esud",
+    "userspace/esuinit",
     "userspace/dm",
     "userspace/lvm2-meta",
     "userspace/thin-activate",
@@ -36,5 +36,5 @@ lto = true
 opt-level = "z"
 panic = "abort"
 
-[profile.release.package.espinitd]
+[profile.release.package.esud]
 codegen-units = 1

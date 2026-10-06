@@ -7,7 +7,7 @@ license = "GPL-3.0-only"
 description = "Device probe proving data-backed copy-on-write on a thin projected /data"
 
 # Deliberately detached from the root workspace: this is a device-only
-# diagnostic, never shipped in the ESP and never run by espinit. The build
+# diagnostic, never shipped in the ESP and never run by esu. The build
 # mirrors payloads/boot-hal (own manifest, own lockfile, NDK Android target).
 [workspace]
 

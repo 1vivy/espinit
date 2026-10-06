@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Build tools/cow-probe as the AArch64 Android diagnostic the operator pushes to
-# a booted managed ROM. This is not a payload artifact: nothing in espinit ships
+# a booted managed ROM. This is not a payload artifact: nothing in esu ships
 # or runs it, and no generation note is embedded.
 #
-#   ESPINIT_NDK=/path/to/android-ndk-r29 tools/cow-probe/build-android.sh
+#   ESU_NDK=/path/to/android-ndk-r29 tools/cow-probe/build-android.sh
 #
 # Output: tools/cow-probe/target/aarch64-linux-android/release/cow-probe
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-: "${ESPINIT_NDK:?Set ESPINIT_NDK to an Android NDK with API 35}"
-ndk=$ESPINIT_NDK
+: "${ESU_NDK:?Set ESU_NDK to an Android NDK with API 35}"
+ndk=$ESU_NDK
 llvm="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
 test -x "$llvm/bin/aarch64-linux-android35-clang"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$llvm/bin/aarch64-linux-android35-clang"

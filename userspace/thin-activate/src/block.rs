@@ -7,7 +7,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 const SYS_CLASS_BLOCK: &str = "/sys/class/block";
-const NODE: &str = "/dev/espinit/lvm-pv";
+const NODE: &str = "/dev/esu/lvm-pv";
 
 pub struct PhysicalVolume {
     pub file: File,
@@ -46,7 +46,7 @@ fn device_number(value: &str) -> io::Result<DeviceNumber> {
 }
 
 fn ensure_node(number: DeviceNumber) -> io::Result<File> {
-    fs::create_dir_all("/dev/espinit")?;
+    fs::create_dir_all("/dev/esu")?;
     let path = Path::new(NODE);
     let expected = libc::makedev(number.major, number.minor);
     match fs::symlink_metadata(path) {

@@ -5,8 +5,8 @@
 #include <linux/printk.h>
 
 #include "klog.h" // IWYU pragma: keep
-#include "runtime/ksud_boot.h"
-#include "runtime/ksud.h"
+#include "runtime/esud_boot.h"
+#include "runtime/esud.h"
 
 bool ksu_module_mounted __read_mostly = false;
 bool ksu_boot_completed __read_mostly = false;

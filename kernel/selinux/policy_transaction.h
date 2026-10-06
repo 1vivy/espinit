@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-#ifndef ESPINIT_POLICY_TRANSACTION_H
-#define ESPINIT_POLICY_TRANSACTION_H
+#ifndef ESU_POLICY_TRANSACTION_H
+#define ESU_POLICY_TRANSACTION_H
 
 struct policydb;
 
-typedef int (*espinit_policy_mutator_t)(struct policydb *db);
+typedef int (*esu_policy_mutator_t)(struct policydb *db);
 
-int espinit_policy_apply_once(espinit_policy_mutator_t mutate);
-void espinit_policy_reset_avc(void);
+int esu_policy_apply_once(esu_policy_mutator_t mutate);
+void esu_policy_reset_avc(void);
 
 #endif

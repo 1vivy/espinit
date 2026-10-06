@@ -343,7 +343,7 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
                     hook->list.head = head;
                     hook->list.list.next = NULL;
                     hook->list.list.pprev = &head->first;
-                    hook->list.lsm = "espinit";
+                    hook->list.lsm = "esu";
                     *(void **)((char *)selected_entry + hook->hook_offset) = hook->replacement;
                     selected_slot = (void **)&head->first;
                     selected_origin = NULL;

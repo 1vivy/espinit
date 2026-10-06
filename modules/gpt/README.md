@@ -5,13 +5,13 @@ kernel output and exported-symbol metadata used by the payload:
 
 ```sh
 make -C modules/gpt KERNEL_SRC=/path/to/exact/source KERNEL_OUT=/path/to/exact/output \
-    KERNEL_CONFIG=/path/to/captured-phone.config ESPINIT_GENERATION=payload-generation
+    KERNEL_CONFIG=/path/to/captured-phone.config ESU_GENERATION=payload-generation
 ```
 
 Load `gpt.ko` without a generation override. `/dev/gptctl` is a root-only misc
 device; both ioctls also require `CAP_SYS_ADMIN`. `generation`, `ready` and
 `sealed` are read-only sysfs parameters. The generation is compiled from
-`ESPINIT_GENERATION`
+`ESU_GENERATION`
 (1–63 ASCII letters/digits/._-), or the full 40-byte lowercase Git HEAD when unset,
 using the same validation as `kernel/Kbuild`. Size assertions pin its storage;
 load-time parameters that change the compiled identity are rejected. Loading
@@ -30,7 +30,7 @@ trailing bytes. Projection names and backend device numbers must each be unique;
 hidden device numbers must be unique within hide[]. A physical partition may
 appear in both arrays, intentionally.
 
-Open backends and prepare all metadata before creating `espinit-gpt` with the
+Open backends and prepare all metadata before creating `esu-gpt` with the
 block core's dynamic device numbering. Its initial `device_add_disk` scan reads
 the RAM-backed protective MBR and primary/backup GPT headers and entry arrays.
 Headers and arrays carry independent standard CRC32 checksums. The logical

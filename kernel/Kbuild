@@ -1,48 +1,48 @@
-espinit-objs := core/init.o
+kernelesp-objs := core/init.o
 
-espinit-objs += feature/kernel_umount.o
-espinit-objs += feature/selinux_hide.o
+kernelesp-objs += feature/kernel_umount.o
+kernelesp-objs += feature/selinux_hide.o
 
-espinit-objs += hook/lsm_hook.o
-espinit-objs += hook/selinux_policy_hook.o
-espinit-objs += hook/setuid_hook.o
-espinit-objs += hook/syscall_event_bridge.o
-espinit-objs += hook/syscall_hook_manager.o
-espinit-objs += hook/tp_marker.o
+kernelesp-objs += hook/lsm_hook.o
+kernelesp-objs += hook/selinux_policy_hook.o
+kernelesp-objs += hook/setuid_hook.o
+kernelesp-objs += hook/syscall_event_bridge.o
+kernelesp-objs += hook/syscall_hook_manager.o
+kernelesp-objs += hook/tp_marker.o
 ifeq ($(CONFIG_ARM64),y)
-espinit-objs += hook/arm64/patch_memory.o
-espinit-objs += hook/arm64/syscall_hook.o
+kernelesp-objs += hook/arm64/patch_memory.o
+kernelesp-objs += hook/arm64/syscall_hook.o
 else ifeq ($(CONFIG_X86_64),y)
-espinit-objs += hook/x86_64/patch_memory.o
-espinit-objs += hook/x86_64/syscall_hook.o
+kernelesp-objs += hook/x86_64/patch_memory.o
+kernelesp-objs += hook/x86_64/syscall_hook.o
 else ifeq ($(CONFIG_RISCV),y)
-espinit-objs += hook/riscv64/patch_memory.o
-espinit-objs += hook/riscv64/syscall_hook.o
+kernelesp-objs += hook/riscv64/patch_memory.o
+kernelesp-objs += hook/riscv64/syscall_hook.o
 endif
 
-espinit-objs += infra/file_wrapper.o
-espinit-objs += infra/symbol_resolver.o
+kernelesp-objs += infra/file_wrapper.o
+kernelesp-objs += infra/symbol_resolver.o
 
-espinit-objs += policy/feature.o
+kernelesp-objs += policy/feature.o
 
-espinit-objs += runtime/boot_event.o
-espinit-objs += runtime/ksud_integration.o
+kernelesp-objs += runtime/boot_event.o
+kernelesp-objs += runtime/esud_integration.o
 
-espinit-objs += selinux/selinux.o
-espinit-objs += selinux/policy_transaction.o
-espinit-objs += selinux/rules.o
-espinit-objs += selinux/sepolicy.o
+kernelesp-objs += selinux/selinux.o
+kernelesp-objs += selinux/policy_transaction.o
+kernelesp-objs += selinux/rules.o
+kernelesp-objs += selinux/sepolicy.o
 
-espinit-objs += supercall/dispatch.o
-espinit-objs += supercall/perm.o
-espinit-objs += supercall/supercall.o
+kernelesp-objs += supercall/dispatch.o
+kernelesp-objs += supercall/perm.o
+kernelesp-objs += supercall/supercall.o
 
 ifdef KBUILD_EXTMOD
-ifeq ($(CONFIG_ESPINIT_DEBUG),y)
-ccflags-y += -DCONFIG_ESPINIT_DEBUG=1
+ifeq ($(CONFIG_KERNELESP_DEBUG),y)
+ccflags-y += -DCONFIG_KERNELESP_DEBUG=1
 endif
-ifeq ($(CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER),y)
-ccflags-y += -DCONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER=1
+ifeq ($(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER),y)
+ccflags-y += -DCONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=1
 endif
 endif
 
@@ -65,7 +65,7 @@ endif
 
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
 
-obj-$(CONFIG_ESPINIT) += espinit.o
+obj-$(CONFIG_KERNELESP) += kernelesp.o
 
 MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -83,64 +83,64 @@ ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
 $(shell cd $(GIT_ROOT) && [ -f .git/shallow ] && $(GIT) fetch --unshallow 2>/dev/null || true)
 KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(GIT) rev-list --count HEAD 2>/dev/null)
 KSU_GIT_VERSION_VALID := 1
-$(info -- espinit: Git repo detected at $(GIT_ROOT))
+$(info -- esu: Git repo detected at $(GIT_ROOT))
 endif
 endif
 else
-$(warning -- espinit: Git not detected, make sure git is installed in your PATH!)
+$(warning -- esu: Git not detected, make sure git is installed in your PATH!)
 endif
 
 
 # Build generation identity
 #
 # The generation string identifies one complete, coordinated ESP payload: the
-# PID-1 stage, this core module, the espinitd daemon and every ESP module must
-# report the exact same value. It is taken from ESPINIT_GENERATION when set,
+# PID-1 stage, this core module, the esud daemon and every ESP module must
+# report the exact same value. It is taken from ESU_GENERATION when set,
 # otherwise from the full 40-byte lowercase Git HEAD hash of this repository,
 # and it must be a nonempty ASCII token so it can be embedded into C and Rust
 # string literals unescaped.
 #
-# Keep this logic in sync with userspace/ksud/build.rs and
-# userspace/ksuinit/build.rs.
+# Keep this logic in sync with userspace/esud/build.rs and
+# userspace/esuinit/build.rs.
 # Capture the raw value once: environment/command-line values must not be
 # expanded as Make expressions. Single-quote escaping below also keeps them
 # data, not shell source, while validating.
-ifneq ($(origin ESPINIT_GENERATION),undefined)
-ESPINIT_GENERATION_VALUE := $(value ESPINIT_GENERATION)
-ESPINIT_GENERATION_SOURCE := environment
+ifneq ($(origin ESU_GENERATION),undefined)
+ESU_GENERATION_VALUE := $(value ESU_GENERATION)
+ESU_GENERATION_SOURCE := environment
 else
-ESPINIT_GENERATION_SOURCE := git HEAD
+ESU_GENERATION_SOURCE := git HEAD
 ifeq ($(GIT),)
-$(error espinit: cannot derive the build generation: ESPINIT_GENERATION is unset and git was not found in PATH. Set ESPINIT_GENERATION explicitly when building from a source tarball.)
+$(error esu: cannot derive the build generation: ESU_GENERATION is unset and git was not found in PATH. Set ESU_GENERATION explicitly when building from a source tarball.)
 endif
-ESPINIT_GENERATION_VALUE := $(shell cd '$(subst ','"'"',$(MDIR))' && '$(subst ','"'"',$(GIT))' rev-parse HEAD 2>/dev/null)
-ESPINIT_GENERATION_GIT_VALID := $(shell generation='$(subst ','"'"',$(ESPINIT_GENERATION_VALUE))'; LC_ALL=C; export LC_ALL; invalid=`printf '%s' "$$generation" | tr -d '0-9a-f'`; if [ "$${#generation}" -eq 40 ] && [ -z "$$invalid" ]; then echo yes; else echo no; fi)
-ifneq ($(ESPINIT_GENERATION_GIT_VALID),yes)
-$(error espinit: cannot derive the build generation: ESPINIT_GENERATION is unset and git rev-parse HEAD failed or did not return 40 lowercase hex bytes. Set ESPINIT_GENERATION explicitly when building from a source tarball.)
+ESU_GENERATION_VALUE := $(shell cd '$(subst ','"'"',$(MDIR))' && '$(subst ','"'"',$(GIT))' rev-parse HEAD 2>/dev/null)
+ESU_GENERATION_GIT_VALID := $(shell generation='$(subst ','"'"',$(ESU_GENERATION_VALUE))'; LC_ALL=C; export LC_ALL; invalid=`printf '%s' "$$generation" | tr -d '0-9a-f'`; if [ "$${#generation}" -eq 40 ] && [ -z "$$invalid" ]; then echo yes; else echo no; fi)
+ifneq ($(ESU_GENERATION_GIT_VALID),yes)
+$(error esu: cannot derive the build generation: ESU_GENERATION is unset and git rev-parse HEAD failed or did not return 40 lowercase hex bytes. Set ESU_GENERATION explicitly when building from a source tarball.)
 endif
 endif
 
 # Do not rely on export reaching $(shell ...): Make does not export newly
 # assigned variables to that expansion on all supported versions. Validate a
 # safely quoted literal, and reject every invalid byte (including newlines).
-ESPINIT_GENERATION_VALID := $(shell generation='$(subst ','"'"',$(ESPINIT_GENERATION_VALUE))'; LC_ALL=C; export LC_ALL; invalid=`printf '%s' "$$generation" | tr -d 'A-Za-z0-9._-'`; if [ -n "$$generation" ] && [ "$${#generation}" -le 63 ] && [ -z "$$invalid" ]; then echo yes; else echo no; fi)
-ifneq ($(ESPINIT_GENERATION_VALID),yes)
-$(error espinit: invalid ESPINIT_GENERATION: expected 1-63 ASCII letters/digits/._-; unset it to derive the full Git HEAD hash)
+ESU_GENERATION_VALID := $(shell generation='$(subst ','"'"',$(ESU_GENERATION_VALUE))'; LC_ALL=C; export LC_ALL; invalid=`printf '%s' "$$generation" | tr -d 'A-Za-z0-9._-'`; if [ -n "$$generation" ] && [ "$${#generation}" -le 63 ] && [ -z "$$invalid" ]; then echo yes; else echo no; fi)
+ifneq ($(ESU_GENERATION_VALID),yes)
+$(error esu: invalid ESU_GENERATION: expected 1-63 ASCII letters/digits/._-; unset it to derive the full Git HEAD hash)
 endif
 
-$(info -- espinit generation: $(ESPINIT_GENERATION_VALUE) (from $(ESPINIT_GENERATION_SOURCE)))
-ccflags-y += -DESPINIT_GENERATION=\"$(ESPINIT_GENERATION_VALUE)\"
+$(info -- esu generation: $(ESU_GENERATION_VALUE) (from $(ESU_GENERATION_SOURCE)))
+ccflags-y += -DESU_GENERATION=\"$(ESU_GENERATION_VALUE)\"
 
 
 # Calculate version if git version is available
 ifdef KSU_GIT_VERSION_VALID
 # ksu_version: major * 10000 + git version + 200 for historical reasons
 $(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION)))
-$(info -- espinit version: $(KSU_VERSION))
+$(info -- esu version: $(KSU_VERSION))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 else
 # If there is no .git directory, use default version
-$(warning "KSU_GIT_VERSION not defined! It is better to make espinit a git repository!")
+$(warning "KSU_GIT_VERSION not defined! It is better to make esu a git repository!")
 ccflags-y += -DKSU_VERSION=16
 endif
 

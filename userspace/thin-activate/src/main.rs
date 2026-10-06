@@ -19,9 +19,9 @@ impl ReadAt for Source {
 fn check_generation(expected: Option<&std::ffi::OsStr>, built: &str) -> Result<(), String> {
     let expected = expected
         .and_then(std::ffi::OsStr::to_str)
-        .ok_or("ESPINIT_GENERATION is missing or non-UTF-8")?;
+        .ok_or("ESU_GENERATION is missing or non-UTF-8")?;
     if expected != built {
-        return Err("compiled generation does not match ESPINIT_GENERATION".to_owned());
+        return Err("compiled generation does not match ESU_GENERATION".to_owned());
     }
     Ok(())
 }
@@ -31,7 +31,7 @@ fn run() -> Result<(), String> {
         return Err("thin-activate accepts no arguments".to_owned());
     }
     check_generation(
-        std::env::var_os("ESPINIT_GENERATION").as_deref(),
+        std::env::var_os("ESU_GENERATION").as_deref(),
         generation::generation(),
     )?;
     let physical = block::open_userdata()

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- * thin-activate - espinit Cuttlefish thin-pool activator.
+ * thin-activate - esu Cuttlefish thin-pool activator.
  *
  * This is the Cuttlefish integration lane's boot helper and nothing more: it
  * defines no general LVM abstraction, never runs a shell, never calls dmsetup
@@ -8,7 +8,7 @@
  * `modules/thin/early.sh` only executes this binary from PATH, and every value
  * comes from the tuple
  *
- *   androidboot.espinit.thin=<PARTUUID>:<metadata-sectors>:<data-sectors>:<thin-id>:<volume-sectors>
+ *   androidboot.esu.thin=<PARTUUID>:<metadata-sectors>:<data-sectors>:<thin-id>:<volume-sectors>
  *
  * read from /proc/cmdline or /proc/bootconfig. The backing GPT partition is
  * resolved by its exact PARTUUID from /sys/class/block, and the whole stack is
@@ -22,7 +22,7 @@
  * `skip_block_zeroing` is mandatory: the forked dm-thin in modules/thin refuses
  * to create a pool that would zero newly provisioned blocks, because projected
  * userdata carries encrypted content. `userdata_lp` is the device-mapper name
- * the espinit `gpt` backend resolver looks up in /sys/class/block/dm-N/dm/name.
+ * the esu `gpt` backend resolver looks up in /sys/class/block/dm-N/dm/name.
  *
  * An existing thin id is not an error: dm-thin reopens the internal device, so
  * the helper is idempotent across a reboot of an unchanged pool. Any other
@@ -78,7 +78,7 @@ _Static_assert(sizeof(struct dm_target_msg) == 8, "dm_target_msg layout");
 #define DM_IFACE_MINOR 0
 #define DM_IFACE_PATCH 0
 
-#define KEY_TUPLE "androidboot.espinit.thin"
+#define KEY_TUPLE "androidboot.esu.thin"
 
 #define NAME_META "userdata_thin_meta"
 #define NAME_DATA "userdata_thin_data"
@@ -619,7 +619,7 @@ static bool is_plain_name(const char *name)
 
 /*
  * Find the single partition whose GPT PARTUUID matches, exactly like the
- * espinit by-name resolver scans sysfs. 0 means "not enumerated yet" and is
+ * esu by-name resolver scans sysfs. 0 means "not enumerated yet" and is
  * retried; more than one match, a whole-disk match, or an unusable device name
  * is a hard failure.
  */
@@ -1199,7 +1199,7 @@ static int activate(struct dm *dm, int index, const char *type, uint64_t length,
 }
 
 /*
- * Convenience only. The espinit resolver reads the device-mapper name from
+ * Convenience only. The esu resolver reads the device-mapper name from
  * sysfs and builds its own node, and after handoff ueventd publishes
  * /dev/block/mapper/<name> from the device-mapper uevent. A missing or
  * read-only /dev therefore only warns; a node that exists with the wrong

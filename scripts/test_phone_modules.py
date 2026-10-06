@@ -134,10 +134,10 @@ class PhoneModuleCompatibility(unittest.TestCase):
             _ = self.verify(elf_file(sections, symbols), "thin")
 
     def test_core_exports_require_matching_crc_section_count(self) -> None:
-        self.assertEqual(self.verify(module_file("espinit", exports=True), "espinit")["exports"], 1)
+        self.assertEqual(self.verify(module_file("kernelesp", exports=True), "kernelesp")["exports"], 1)
         for crc in (b"", bytes(8)):
             with self.subTest(crc=crc), self.assertRaisesRegex(compat.CompatibilityError, "export-crcs"):
-                _ = self.verify(module_file("espinit", exports=True, extra={"__kcrctab_gpl": crc}), "espinit")
+                _ = self.verify(module_file("kernelesp", exports=True, extra={"__kcrctab_gpl": crc}), "kernelesp")
 
     def test_missing_import_crc_and_unresolved_non_kmi_fail(self) -> None:
         with self.assertRaisesRegex(compat.CompatibilityError, "missing CRC for known"):
@@ -197,7 +197,7 @@ class PhoneModuleCompatibility(unittest.TestCase):
 
     def test_assembler_rejects_before_creating_payload_output(self) -> None:
         from tools.cuttlefish import assemble
-        _ = self.module.write_bytes(module_file("espinit", exports=True, crc=False))
+        _ = self.module.write_bytes(module_file("kernelesp", exports=True, crc=False))
         argv = [item for name in assemble.PATHS for item in ("--" + name.replace("_", "-"), str(self.module))]
         destination = self.root / "payload"
         argv += ["--kernel-src", str(self.source), "--kernel-out", str(self.output), "--kernel-config", str(self.target),

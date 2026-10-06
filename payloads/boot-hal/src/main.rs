@@ -1,6 +1,6 @@
 #[cfg(target_os = "android")]
 mod android;
-#[path = "../../../userspace/platform/src/generation.rs"]
+#[path = "../../../userspace/esu-platform/src/generation.rs"]
 mod generation;
 
 fn main() {

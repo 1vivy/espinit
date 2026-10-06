@@ -11,7 +11,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "hook/tp_marker.h"
 #include "hook/setuid_hook.h"
-#include "runtime/ksud.h"
+#include "runtime/esud.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 
@@ -33,7 +33,7 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 
     path[sizeof(path) - 1] = '\0';
     if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
-        pr_info("hook_manager: escape to root for init executing espinitd: %d\n", current->pid);
+        pr_info("hook_manager: escape to root for init executing esud: %d\n", current->pid);
         escape_to_root_for_init();
     } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
                       strstr(path, "/stub_zygote") == NULL)) {
@@ -44,11 +44,11 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
     return 0;
 }
 
-DEFINE_STATIC_KEY_TRUE(ksud_execve_key);
+DEFINE_STATIC_KEY_TRUE(esud_execve_key);
 
-void ksu_stop_ksud_execve_hook()
+void ksu_stop_esud_execve_hook()
 {
-    static_branch_disable(&ksud_execve_key);
+    static_branch_disable(&esud_execve_key);
 }
 
 static long __nocfi ksu_hook_execve_common(int orig_nr, const struct pt_regs *regs, bool execveat)
@@ -57,11 +57,11 @@ static long __nocfi ksu_hook_execve_common(int orig_nr, const struct pt_regs *re
         execveat ? (const char __user **)&PT_REGS_PARM2(regs) : (const char __user **)&PT_REGS_SYSCALL_PARM1(regs);
     bool current_is_init = is_init(current_cred());
 
-    if (static_branch_unlikely(&ksud_execve_key)) {
+    if (static_branch_unlikely(&esud_execve_key)) {
         if (execveat) {
-            ksu_execveat_hook_ksud(regs);
+            ksu_execveat_hook_esud(regs);
         } else {
-            ksu_execve_hook_ksud(regs);
+            ksu_execve_hook_esud(regs);
         }
     }
 

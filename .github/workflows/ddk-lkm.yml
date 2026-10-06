@@ -1,4 +1,4 @@
-name: Build espinit Kernel Module
+name: Build esu Kernel Module
 
 on:
   workflow_call:
@@ -14,8 +14,8 @@ on:
         type: string
 
 jobs:
-  build-espinit-ko:
-    name: Build espinit.ko for ${{ inputs.kmi }}
+  build-esu-ko:
+    name: Build kernelesp.ko for ${{ inputs.kmi }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
@@ -25,15 +25,15 @@ jobs:
     - name: Checkout source code
       uses: actions/checkout@v7
 
-    - name: Build espinit.ko
+    - name: Build kernelesp.ko
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
         cd kernel
 
-        echo "=== Building espinit.ko for KMI: ${{ inputs.kmi }} ==="
+        echo "=== Building kernelesp.ko for KMI: ${{ inputs.kmi }} ==="
 
-        CONFIG_ESPINIT=m CC=clang make
+        CONFIG_KERNELESP=m CC=clang make
 
         echo "=== Build completed ==="
 
@@ -42,8 +42,8 @@ jobs:
         mkdir -p $OUT_DIR
 
         # Copy with KMI-specific naming
-        OUTPUT_NAME="${{ inputs.kmi }}_espinit.ko"
-        cp espinit.ko "$OUT_DIR/$OUTPUT_NAME"
+        OUTPUT_NAME="${{ inputs.kmi }}_kernelesp.ko"
+        cp kernelesp.ko "$OUT_DIR/$OUTPUT_NAME"
 
         echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
         ls -la "$OUT_DIR/$OUTPUT_NAME"
@@ -51,13 +51,13 @@ jobs:
         llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
         echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
 
-    - name: Upload espinit.ko artifact
+    - name: Upload kernelesp.ko artifact
       uses: actions/upload-artifact@v7
       with:
-        name: aarch64-${{ inputs.kmi }}-espinit-lkm
-        path: /github/workspace/out/aarch64/${{ inputs.kmi }}_espinit.ko
+        name: aarch64-${{ inputs.kmi }}-esu-lkm
+        path: /github/workspace/out/aarch64/${{ inputs.kmi }}_kernelesp.ko
 
-    - name: Build espinit.ko for x64
+    - name: Build kernelesp.ko for x64
       run: |
         cd kernel
         make clean
@@ -91,14 +91,14 @@ jobs:
         make O=$KDIR security/selinux/built-in.a
         popd
 
-        echo "=== Building x64 espinit.ko for KMI: ${{ inputs.kmi }} ==="
+        echo "=== Building x64 kernelesp.ko for KMI: ${{ inputs.kmi }} ==="
 
         MDIR=$(realpath .)
 
         if [ "$kmi" == "android17-6.18" ]; then
-          make -C $KDIR M=$MDIR MO=$MDIR compile_commands.json modules CONFIG_ESPINIT=m CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER=y
+          make -C $KDIR M=$MDIR MO=$MDIR compile_commands.json modules CONFIG_KERNELESP=m CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=y
         else
-          make -C $KDIR M=$MDIR src=$MDIR compile_commands.json modules CONFIG_ESPINIT=m CONFIG_ESPINIT_X86_PATCH_SYSCALL_DISPATCHER=y
+          make -C $KDIR M=$MDIR src=$MDIR compile_commands.json modules CONFIG_KERNELESP=m CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=y
         fi
 
         echo "=== Build completed ==="
@@ -108,8 +108,8 @@ jobs:
         mkdir -p $OUT_DIR
 
         # Copy with KMI-specific naming
-        OUTPUT_NAME="${{ inputs.kmi }}_espinit.ko"
-        cp espinit.ko "$OUT_DIR/$OUTPUT_NAME"
+        OUTPUT_NAME="${{ inputs.kmi }}_kernelesp.ko"
+        cp kernelesp.ko "$OUT_DIR/$OUTPUT_NAME"
 
         echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
         ls -la "$OUT_DIR/$OUTPUT_NAME"
@@ -117,8 +117,8 @@ jobs:
         llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
         echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
 
-    - name: Upload x64 espinit.ko artifact
+    - name: Upload x64 kernelesp.ko artifact
       uses: actions/upload-artifact@v7
       with:
-        name: x86_64-${{ inputs.kmi }}-espinit-lkm
-        path: /github/workspace/out/x86_64/${{ inputs.kmi }}_espinit.ko
+        name: x86_64-${{ inputs.kmi }}-esu-lkm
+        path: /github/workspace/out/x86_64/${{ inputs.kmi }}_kernelesp.ko

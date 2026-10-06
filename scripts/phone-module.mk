@@ -3,8 +3,8 @@ KERNEL_SRC ?=
 KERNEL_OUT ?=
 KERNEL_CONFIG ?=
 JOBS ?= 13
-ifneq ($(origin ESPINIT_GENERATION),undefined)
-export ESPINIT_GENERATION
+ifneq ($(origin ESU_GENERATION),undefined)
+export ESU_GENERATION
 endif
 PHONE_VERIFIER := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/phone_modules.py)
 

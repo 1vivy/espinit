@@ -1,4 +1,4 @@
-name: Build espinitd with cross
+name: Build esud with cross
 on:
   workflow_call:
     inputs:
@@ -37,11 +37,11 @@ jobs:
       run: |
         RUSTFLAGS="" cargo install cross --git https://github.com/cross-rs/cross --rev 66845c1
 
-    - name: Build espinitd
-      run: CROSS_NO_WARNINGS=0 cross build --package espinitd --target ${{ inputs.target }} --release
+    - name: Build esud
+      run: CROSS_NO_WARNINGS=0 cross build --package esud --target ${{ inputs.target }} --release
 
-    - name: Upload espinitd artifact
+    - name: Upload esud artifact
       uses: actions/upload-artifact@v7
       with:
-        name: espinitd-${{ inputs.target }}
-        path: target/${{ inputs.target }}/release/espinitd${{ contains(inputs.target, '-windows-') && '.exe' || '' }}
+        name: esud-${{ inputs.target }}
+        path: target/${{ inputs.target }}/release/esud${{ contains(inputs.target, '-windows-') && '.exe' || '' }}

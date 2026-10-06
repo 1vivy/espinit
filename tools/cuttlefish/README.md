@@ -1,7 +1,7 @@
-# Cuttlefish integration lane (espinit)
+# Cuttlefish integration lane (esu)
 
-This directory is the **Cuttlefish-only** integration lane for espinit: it
-produces the payload the lab consumes through `--espinit-payload`, plus the
+This directory is the **Cuttlefish-only** integration lane for esu: it
+produces the payload the lab consumes through `--esu-payload`, plus the
 `thin-activate` boot helper that builds the thin-provisioned `userdata_lp`
 device the `gpt` backend projection expects.
 
@@ -26,18 +26,18 @@ Required inputs, all explicit paths (`--flag` above each file):
 | --- | --- |
 | `--stock-init-boot` | stock AVB-signed Cuttlefish `init_boot.img`; its size is preserved |
 | `--avbtool`, `--avb-key` | pinned AVB tool and RSA-4096 key that verify the stock image and sign its replacement |
-| `--espinit` | static PID-1 binary, installed as `/espinit` in the initramfs |
-| `--espinitd` | daemon binary, installed as `espinit/bin/espinitd` (install source, not the executed path) |
+| `--esu` | static PID-1 binary, installed as `/esu` in the initramfs |
+| `--esud` | daemon binary, installed as `esu/bin/esud` (install source, not the executed path) |
 | `--boot-hal` | generation-noted boot HAL executable, packaged under `modules/boot-hal/` |
 | `--tiny-espsu` | same-generation narrow bind/label helper, packaged under `modules/tiny-espsu/` |
 | `--metadata-filesystem` | explicit `ext4` or `f2fs` for the projected metadata mount; no filesystem fallback |
-| `--busybox` | static interpreter for ESP scripts, `espinit/bin/busybox` |
-| `--thin-activate` | output of `build-thin-activate.sh`, `espinit/bin/thin-activate` |
-| `--fw-views` | `fw-views` payload helper built for the CF guest's x86_64 Android: a clean r29 NDK (a `libc.a` bundling Rust std members, e.g. the local r30 or a contaminated install, fails the static link) plus `-C link-arg=$NDK/.../libclang_rt.builtins-x86_64-android.a`, `espinit/bin/fw-views` |
-| `--core-module`, `--thin-module`, `--gpt-module` | `espinit.ko`, `thin.ko`, `gpt.ko` built for the session kernel |
+| `--busybox` | static interpreter for ESP scripts, `esu/bin/busybox` |
+| `--thin-activate` | output of `build-thin-activate.sh`, `esu/bin/thin-activate` |
+| `--fw-views` | `fw-views` payload helper built for the CF guest's x86_64 Android: a clean r29 NDK (a `libc.a` bundling Rust std members, e.g. the local r30 or a contaminated install, fails the static link) plus `-C link-arg=$NDK/.../libclang_rt.builtins-x86_64-android.a`, `esu/bin/fw-views` |
+| `--core-module`, `--thin-module`, `--gpt-module` | `kernelesp.ko`, `thin.ko`, `gpt.ko` built for the session kernel |
 | `--kernel-src`, `--kernel-out`, `--kernel-config` | exact source/output and independent target config; shared LKM admission requires MODVERSIONS, matching imports/export CRCs, vermagic/BTF, and build receipts |
 | `--generation` | one identifier, `[A-Za-z0-9._-]{1,63}`, written into every generation-bearing artifact |
-| `--rom-id` | required catalogue ID matching `androidboot.espinit.rom`; generates `espinit/roms/<id>.toml` with matching `id`, not a global/default ROM config |
+| `--rom-id` | required catalogue ID matching `androidboot.esu.rom`; generates `esu/roms/<id>.toml` with matching `id`, not a global/default ROM config |
 | `--output-dir` | target directory; must be empty (or hold only previous artifacts with `--overwrite`) |
 | `--esp-size-mib` | optional ESP image size in MiB (default 64). The lab lane copies this exact file over the pinned disposable `cuttlefish_example_custom.img` and regenerates that GPT entry from the file size, so any size the payload needs is acceptable |
 | `--overwrite` | replace `init_boot.img`, `esp.img`, `payload.json` in an output directory that holds them |
@@ -47,15 +47,15 @@ tools/cuttlefish/assemble.py \
     --stock-init-boot  <pinned stock init_boot.img> \
     --avbtool          <pinned avbtool> \
     --avb-key          <matching Cuttlefish AVB key> \
-    --espinit          <espinit PID-1> \
-    --espinitd         <espinitd> \
+    --esuinit          <esu PID-1> \
+    --esud         <esud> \
     --boot-hal         <gblbds-boot-hal> \
     --tiny-espsu       <tiny-espsu> \
     --metadata-filesystem ext4 \
     --busybox          <static busybox> \
     --thin-activate    <thin-activate> \
     --fw-views         <fw-views> \
-    --core-module      <espinit.ko> \
+    --core-module      <kernelesp.ko> \
     --thin-module      <thin.ko> \
     --gpt-module       <gpt.ko> \
     --kernel-src       <exact kernel source> \
@@ -83,40 +83,40 @@ place only after every step succeeded.
 ### Output contract
 
 `init_boot.img` - the stock image with the static PID-1 binary installed as
-root member `/espinit` (mode 0755). The ramdisk keeps its original compression
+root member `/esu` (mode 0755). The ramdisk keeps its original compression
 (legacy LZ4, gzip or uncompressed are preserved; a frame-format LZ4 ramdisk is
 refused, because the lane kernel's `lib/decompress_unlz4.c` accepts only the
-legacy magic) and every stock archive byte-for-byte, followed by the `/espinit`
+legacy magic) and every stock archive byte-for-byte, followed by the `/esu`
 archive. `kernel_size`, `header_version`, `header_size`, `cmdline`,
 `os_version`/`os_patch_level` and the page layout are unchanged. The supplied
 AVB key must verify the stock image; the replacement receives a
 `SHA256_RSA4096` `init_boot` hash footer, is verified with the same key, and is
 padded by `avbtool` to the exact stock partition size.
 
-`esp.img` - a FAT image (VFAT long names, volume label `ESPINIT`) containing
+`esp.img` - a FAT image (VFAT long names, volume label `ESU`) containing
 exactly:
 
 ```
-/espinit/manifest.toml              schema_version = 1, the supplied generation,
-                                    rom = "roms", modules espinit, thin, fw-views, gpt
-/espinit/roms/<id>.toml             selected managed placeholder, replaced by the lab
-/espinit/bin/busybox                static interpreter
-/espinit/bin/thin-activate          x86_64 Android static helper
-/espinit/bin/fw-views               per-ROM firmware-view helper
-/espinit/bin/espinitd               daemon install source
-/espinit/modules/espinit.ko
-/espinit/modules/thin.ko
-/espinit/modules/gpt.ko
-/espinit/modules/thin/early.sh      #!/bin/sh, set -eu, exec thin-activate
-/espinit/modules/fw-views/early.sh  #!/bin/sh, set -eu, exec fw-views
-/espinit/modules/boot-hal/module.toml
-/espinit/modules/boot-hal/android.hardware.boot-service.gblbds
-/espinit/modules/boot-hal/boot-gblbds.rc
-/espinit/modules/tiny-espsu/module.toml
-/espinit/modules/tiny-espsu/tiny-espsu
-/espinit/modules/tiny-espsu/install.sh
-/espinit/modules/tiny-espsu/policy.cil
-/espinit/receipts/                  directory; a missing receipt store is a
+/esu/manifest.toml              schema_version = 1, the supplied generation,
+                                    rom = "roms", modules esu, thin, fw-views, gpt
+/esu/roms/<id>.toml             selected managed placeholder, replaced by the lab
+/esu/bin/busybox                static interpreter
+/esu/bin/thin-activate          x86_64 Android static helper
+/esu/bin/fw-views               per-ROM firmware-view helper
+/esu/bin/esud               daemon install source
+/esu/modules/kernelesp.ko
+/esu/modules/thin.ko
+/esu/modules/gpt.ko
+/esu/modules/thin/early.sh      #!/bin/sh, set -eu, exec thin-activate
+/esu/modules/fw-views/early.sh  #!/bin/sh, set -eu, exec fw-views
+/esu/modules/boot-hal/module.toml
+/esu/modules/boot-hal/android.hardware.boot-service.gblbds
+/esu/modules/boot-hal/boot-gblbds.rc
+/esu/modules/tiny-espsu/module.toml
+/esu/modules/tiny-espsu/tiny-espsu
+/esu/modules/tiny-espsu/install.sh
+/esu/modules/tiny-espsu/policy.cil
+/esu/receipts/                  directory; a missing receipt store is a
                                     hard managed-boot failure
 ```
 
@@ -125,11 +125,11 @@ supplied generation and matching `id`, `managed = true`, one projection) but its
 deliberately impossible, so an un-replaced payload fails closed instead of
 booting with a guessed partition view. The lab writes the real file with the
 same ID and generation before paused assembly, and supplies
-`androidboot.espinit.rom=<id>` when booting. Missing, duplicate or conflicting
+`androidboot.esu.rom=<id>` when booting. Missing, duplicate or conflicting
 boot selections fail; no global-file alias is accepted.
 
 The assembler stamps the checked-in package manifests with the supplied
-generation and validates the ELF generation notes of espinitd, boot HAL and
+generation and validates the ELF generation notes of esud, boot HAL and
 tiny-espsu without executing them. PID1 repeats that validation and installs
 files with the exact modes in `module.toml`, independent of FAT modes. A real
 normal ROM config must project writable metadata, bdsvars and misc. Recovery
@@ -140,12 +140,12 @@ runtime-compatible HAL target merely because the assembler accepts its ELF.
 Do not guess another bind destination. See the root README's platform contract.
 
 Executable intent: the initramfs copy of the PID-1 binary is the only member
-that carries a POSIX mode (root `/espinit`, 0755, written by `cpio` with
+that carries a POSIX mode (root `/esu`, 0755, written by `cpio` with
 `--owner=0:0`). A FAT image stores no POSIX modes at all, and it does not need
 them: PID 1 runs each ESP script explicitly through the ESP busybox
 (`busybox sh <payload>/modules/<name>/early.sh`), so `bin/` and
 `modules/thin/early.sh` are ordinary FAT members. `mmd` creates
-`/espinit/receipts` as a real directory, because espinit treats a missing
+`/esu/receipts` as a real directory, because esu treats a missing
 receipt store as a hard managed-boot failure.
 
 `payload.json` - `{"schema_version": 1, "generation": "<generation>",
@@ -168,7 +168,7 @@ The helper reads exactly one key, from `/proc/cmdline` or `/proc/bootconfig`
 (disagreement is fatal):
 
 ```
-androidboot.espinit.thin=<PARTUUID>:<metadata sectors>:<data sectors>:<thin id>:<volume sectors>
+androidboot.esu.thin=<PARTUUID>:<metadata sectors>:<data sectors>:<thin id>:<volume sectors>
 ```
 
 with the pinned lab tuple `...:131072:16646144:1:16777216`, meaning:
@@ -196,7 +196,7 @@ device-mapper target, an ioctl error, and a pre-existing `userdata_thin_meta`,
 or parameter string is not exactly this stack. Devices created by a failed run
 are removed again; a pre-existing matching stack is reused, so a reboot of an
 unchanged pool is idempotent. `/dev/mapper/userdata_lp` is published best
-effort: espinit resolves the backend name from
+effort: esu resolves the backend name from
 `/sys/class/block/dm-*/dm/name`, and Android's ueventd creates the node after
 handoff.
 

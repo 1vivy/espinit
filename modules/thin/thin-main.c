@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * espinit thin.ko entry point.
+ * esu thin.ko entry point.
  *
  * Brings up the vendored dm-thin family in one module and exposes exactly the
- * two read-only parameters the espinit PID-1 self-check reads:
+ * two read-only parameters the esu PID-1 self-check reads:
  *
  *   generation  build generation compiled into this module; it must equal the
- *               payload generation derived from ESPINIT_GENERATION or the Git
+ *               payload generation derived from ESU_GENERATION or the Git
  *               HEAD of this repository.
  *   ready       "Y" only after every subsystem and both device-mapper targets
  *               initialized, and "N" again as soon as unload teardown starts.
@@ -19,17 +19,17 @@
 #include <linux/module.h>
 #include <linux/string.h>
 
-#ifndef ESPINIT_GENERATION
-#error "ESPINIT_GENERATION must be defined by modules/thin/Makefile"
+#ifndef ESU_GENERATION
+#error "ESU_GENERATION must be defined by modules/thin/Makefile"
 #endif
 
 
-static char generation[] = ESPINIT_GENERATION;
+static char generation[] = ESU_GENERATION;
 
 static_assert(sizeof(generation) > 1 && sizeof(generation) <= 64,
 	      "generation must be a nonempty value of at most 63 bytes");
 module_param_string(generation, generation, sizeof(generation), 0444);
-MODULE_PARM_DESC(generation, "espinit build generation (read-only)");
+MODULE_PARM_DESC(generation, "esu build generation (read-only)");
 
 static bool ready;
 module_param(ready, bool, 0444);
@@ -52,7 +52,7 @@ static int __init thinpool_private_init(void)
 	int r;
 
 	ready = false;
-	if (strcmp(generation, ESPINIT_GENERATION))
+	if (strcmp(generation, ESU_GENERATION))
 		return -EINVAL;
 
 	r = thinpool_private_dm_io_init();
@@ -106,6 +106,6 @@ static void __exit thinpool_private_exit(void)
 module_init(thinpool_private_init);
 module_exit(thinpool_private_exit);
 
-MODULE_DESCRIPTION("espinit thin provisioning targets (thin-pool, thin)");
-MODULE_AUTHOR("espinit");
+MODULE_DESCRIPTION("esu thin provisioning targets (thin-pool, thin)");
+MODULE_AUTHOR("esu");
 MODULE_LICENSE("GPL v2");

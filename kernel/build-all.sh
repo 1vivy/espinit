@@ -15,11 +15,11 @@ mv .ddk-version .ddk-version.bak 2> /dev/null || true
 for kmi in $KMIS; do
     echo "========== Building $kmi =========="
     ODIR="$(realpath .)/out/$kmi"
-    if ddk build "$kmi" "ODIR=$ODIR" -e CONFIG_ESPINIT=m; then
-        if [ -f "$ODIR/espinit.ko" ]; then
-            cp "$ODIR/espinit.ko" "espinit-${kmi}.ko"
-            llvm-strip -d "espinit-${kmi}.ko"
-            echo "✓ Built espinit-${kmi}.ko"
+    if ddk build "$kmi" "ODIR=$ODIR" -e CONFIG_KERNELESP=m; then
+        if [ -f "$ODIR/kernelesp.ko" ]; then
+            cp "$ODIR/kernelesp.ko" "esu-${kmi}.ko"
+            llvm-strip -d "esu-${kmi}.ko"
+            echo "✓ Built esu-${kmi}.ko"
         fi
     else
         echo "✗ Build failed for $kmi"
@@ -30,4 +30,4 @@ done
 mv .ddk-version.bak .ddk-version 2> /dev/null || true
 
 echo "========== Final output =========="
-ls -l espinit-*.ko
+ls -l esu-*.ko

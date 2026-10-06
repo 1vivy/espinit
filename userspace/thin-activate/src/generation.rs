@@ -4,14 +4,14 @@ const fn note() -> [u8; 84] {
     let mut bytes = [0; 84];
     bytes[0] = 8; // namesz, little endian
     bytes[4] = 64; // descsz
-    bytes[8] = 1; // espinit generation note version
-    let name = b"ESPINIT\0";
+    bytes[8] = 1; // esu generation note version
+    let name = b"ESU\0";
     let mut i = 0;
     while i < name.len() {
         bytes[12 + i] = name[i];
         i += 1;
     }
-    let generation = env!("ESPINIT_GENERATION").as_bytes();
+    let generation = env!("ESU_GENERATION").as_bytes();
     i = 0;
     while i < generation.len() {
         bytes[20 + i] = generation[i];
@@ -21,12 +21,12 @@ const fn note() -> [u8; 84] {
 }
 
 #[used]
-#[unsafe(link_section = ".note.espinit")]
+#[unsafe(link_section = ".note.esu")]
 static GENERATION_NOTE: [u8; 84] = note();
 
 pub fn generation() -> &'static str {
     // The live reference keeps the note through linker garbage collection/LTO.
     let bytes = std::hint::black_box(&GENERATION_NOTE);
-    std::str::from_utf8(&bytes[20..20 + env!("ESPINIT_GENERATION").len()])
+    std::str::from_utf8(&bytes[20..20 + env!("ESU_GENERATION").len()])
         .expect("build.rs validates ASCII generation")
 }

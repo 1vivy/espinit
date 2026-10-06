@@ -1,6 +1,6 @@
-# espinit
+# esu
 
-espinit is an early-boot substrate forked from [KernelSU](https://github.com/tiann/KernelSU), not an Android root product. It retains KernelSU's kernel-module lifecycle, hook design, Rust PID-1/daemon split, and aarch64, x86_64, and riscv64 build shape where applicable. App-facing root grants, the Manager APK, and Manager-dependent packaging are outside the product.
+esu is an early-boot substrate forked from [KernelSU](https://github.com/tiann/KernelSU), not an Android root product. It retains KernelSU's kernel-module lifecycle, hook design, Rust PID-1/daemon split, and aarch64, x86_64, and riscv64 build shape where applicable. App-facing root grants, the Manager APK, and Manager-dependent packaging are outside the product.
 
 **Status:** the public identity/source baseline, managed PID-1 loader, `thin.ko`, and `gpt.ko` are implemented. Host checks and an isolated Cuttlefish-kernel smoke prove module load/readiness, APPLY/QUERY, projected naming and I/O, read-only and metadata-write rejection, flush, and unload. Both modules build against the phone-matched kernel; `gpt.ko`'s five non-KMI imports are verified against its exact `vmlinux`. GBL packaging and physical-phone validation remain incomplete; this is not yet a supported installation procedure.
 
@@ -8,24 +8,24 @@ The Platform modules phase is implemented in source as described below; its
 new host tests, Android artifacts, policy and boot ordering await verification.
 The `androidboot.init_fatal_panic=true` opt-in is implemented against the AOSP
 init control but is not device-proven: on a kernel with no usable
-`/proc/sysrq-trigger` or pstore/minidump capture, a fatal espinit failure still
+`/proc/sysrq-trigger` or pstore/minidump capture, a fatal esu failure still
 degrades to the existing ESP receipt and reboot. The companion
-`androidboot.espinit.apss_minidump=true` opt-in is implemented in source too — it
+`androidboot.esu.apss_minidump=true` opt-in is implemented in source too — it
 preloads the vendor `qcom-dload-mode.ko` dependency closure before the ESP mount —
-and is likewise not device-proven. The lab-only `androidboot.espinit.probe=<stage>`
+and is likewise not device-proven. The lab-only `androidboot.esu.probe=<stage>`
 checkpoint opt-in below is implemented in source and also not device-proven: it needs
 a boot that actually reaches the named stage before it can be read as a timing.
 
 ## Architecture and identity
 
-- `espinit` is the early PID-1 binary; it prepares the managed boot and eventually transfers control to Android's real init without changing PID.
-- `espinit.ko` is the core kernel module. Retaining the inherited lifecycle and existing direct syscall-table hook facilities is intentional reuse of the boot substrate, not KernelSU Manager or root-product compatibility; do not introduce a second hook framework.
-- `espinitd` is the Android-side daemon, not a `su` replacement or an application privilege broker. It is installed under the mutable state root and executed by Android init as `/metadata/espinit/espinitd`; the ESP holds only its read-only payload copy.
-- `/debug_ramdisk/esp/espinit` is the runtime ESP payload root; `/metadata/espinit` is the persistent Android working root after successful handoff. Early failure receipts use the ESP, not projected metadata. Do not use KernelSU's `/data/adb/ksu` state.
-- The SELinux domain/type are `espinit`/`espinit_file` (`u:r:espinit:s0`, `u:object_r:espinit_file:s0`); `espinitd` keeps `espinit_file` on its own binary. Staged package inodes start as `metadata_file`; tiny-espsu applies the dedicated HAL and bdsvars labels before use. Public module, ioctl/install magic, anonymous-inode, and socket identities are distinct from KernelSU: the anonymous inodes are `[espinit]` and `[espinit_fdwrapper]`, and the info surface reports only the LKM flag. Private `ksu_` implementation prefixes remain internal, not compatibility interfaces.
+- `esuinit` is the early PID-1 binary; it prepares the managed boot and eventually transfers control to Android's real init without changing PID.
+- `kernelesp.ko` is the core kernel module. Retaining the inherited lifecycle and existing direct syscall-table hook facilities is intentional reuse of the boot substrate, not KernelSU Manager or root-product compatibility; do not introduce a second hook framework.
+- `esud` is the Android-side daemon, not a `su` replacement or an application privilege broker. It is installed under the mutable state root and executed by Android init as `/metadata/esu/esud`; the ESP holds only its read-only payload copy.
+- `/debug_ramdisk/esp/esu` is the runtime ESP payload root; `/metadata/esu` is the persistent Android working root after successful handoff. Early failure receipts use the ESP, not projected metadata. Do not use KernelSU's `/data/adb/ksu` state.
+- The SELinux domain/type are `esu`/`esu_file` (`u:r:esu:s0`, `u:object_r:esu_file:s0`); `esud` keeps `esu_file` on its own binary. Staged package inodes start as `metadata_file`; tiny-espsu applies the dedicated HAL and bdsvars labels before use. Public module, ioctl/install magic, anonymous-inode, and socket identities are distinct from KernelSU: the anonymous inodes are `[esu]` and `[esu_fdwrapper]`, and the info surface reports only the LKM flag. Private `ksu_` implementation prefixes remain internal, not compatibility interfaces.
 - `gpt.ko` is a later, separate ESP module, never another name for the core module.
 
-A real KernelSU installation must not be detected as an espinit module, satisfy an espinit self-check, or share espinit state/control endpoints. SELinux policy installation does not depend on retaining syscall-table ownership: PID 1's successful policy load arms an explicit post-exec state machine, and rules are published only after the second-stage exec has completed competing pre-exec hooks. Policy construction returns errors, publication is transactional and idempotent, and a failed post-exec application rearms rather than consuming its trigger. The inherited exec hook remains a fallback. Other simultaneous hook ownership still requires integration testing; this is not a general coexistence promise.
+A real KernelSU installation must not be detected as an esu module, satisfy an esu self-check, or share esu state/control endpoints. SELinux policy installation does not depend on retaining syscall-table ownership: PID 1's successful policy load arms an explicit post-exec state machine, and rules are published only after the second-stage exec has completed competing pre-exec hooks. Policy construction returns errors, publication is transactional and idempotent, and a failed post-exec application rearms rather than consuming its trigger. The inherited exec hook remains a fallback. Other simultaneous hook ownership still requires integration testing; this is not a general coexistence promise.
 
 ### Non-goals
 
@@ -42,7 +42,7 @@ These are dependency stages, not claims of device compatibility. Cuttlefish and 
 
 ## Build notes
 
-Every shipped phone LKM (`espinit.ko`, `thin.ko`, `gpt.ko`) uses one contract:
+Every shipped phone LKM (`kernelesp.ko`, `thin.ko`, `gpt.ko`) uses one contract:
 [`scripts/phone_modules.py`](scripts/phone_modules.py), shared by the three
 Makefiles and the payload assembler. Supply **the exact source and complete
 output tree**, plus an independently captured full phone config. A defconfig,
@@ -53,12 +53,12 @@ an ABI match.
 export KERNEL_SRC=/path/to/exact/kernel/source
 export KERNEL_OUT=/path/to/exact/kernel/output
 export KERNEL_CONFIG=/path/to/captured-phone.config
-export ESPINIT_GENERATION=<coordinated-payload-generation>
+export ESU_GENERATION=<coordinated-payload-generation>
 make -C kernel phone JOBS=13
 make -C modules/thin JOBS=13
 make -C modules/gpt JOBS=13
 python3 scripts/phone_modules.py verify \
-    --espinit kernel/espinit.ko --thin modules/thin/thin.ko --gpt modules/gpt/gpt.ko
+    --esuinit kernel/kernelesp.ko --thin modules/thin/thin.ko --gpt modules/gpt/gpt.ko
 ```
 
 The recipes fail closed before compiling unless `.config` matches the capture,
@@ -95,27 +95,27 @@ config/toolchain/release provenance matches that capture. Do not silently
 substitute them. Host regression tests: `python3 -m unittest
 scripts.test_phone_modules tools.cuttlefish.test_assemble`.
 
-The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--espinit-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. The assembler re-signs the modified `init_boot` with the explicitly supplied key after proving that key verifies the pinned stock image. That lane is packaging and boot plumbing only; it proves no boot by itself.
+The Cuttlefish integration lane lives in [`tools/cuttlefish/`](tools/cuttlefish/README.md): `assemble.py` packs `init_boot.img`, `esp.img` and `payload.json` for the harness `--esu-payload` input, and `thin-activate.c` (built by `build-thin-activate.sh`) creates the thin `userdata_lp` device from the bootconfig tuple. The assembler re-signs the modified `init_boot` with the explicitly supplied key after proving that key verifies the pinned stock image. That lane is packaging and boot plumbing only; it proves no boot by itself.
 
 ## Exact ESP and runtime layout
 
-The filesystem mounted as the ESP carries the espinit payload and is normally mounted read-only. Mounting it at `/debug_ramdisk/esp` yields the runtime root below; configuration paths are relative to `/espinit` on that filesystem, not to `/metadata` or the host checkout. The ESP's only write window is the bounded failure-receipt replacement described below; runtime staging writes the separately mounted metadata filesystem.
+The filesystem mounted as the ESP carries the esu payload and is normally mounted read-only. Mounting it at `/debug_ramdisk/esp` yields the runtime root below; configuration paths are relative to `/esu` on that filesystem, not to `/metadata` or the host checkout. The ESP's only write window is the bounded failure-receipt replacement described below; runtime staging writes the separately mounted metadata filesystem.
 
 ```text
 ESP filesystem /                      # normally read-only
-└── espinit/
+└── esu/
     ├── manifest.toml
     ├── roms/
-    │   └── android-a.toml            # selected by androidboot.espinit.rom
+    │   └── android-a.toml            # selected by androidboot.esu.rom
     ├── bin/
-    │   ├── espinit
-    │   ├── espinitd                  # install source, not the executed path
+    │   ├── esuinit
+    │   ├── esud                      # install source, not the executed path
     │   ├── fw-views                  # per-ROM firmware-view helper (ROM >= 2)
     │   └── busybox                   # static interpreter for ESP scripts
     ├── modules/                      # kernel payload plus explicit Android packages
-    │   ├── espinit.ko
-    │   ├── espinit/early.sh
-    │   ├── espinit/recovery.sh
+    │   ├── kernelesp.ko
+    │   ├── esu/early.sh
+    │   ├── esu/recovery.sh
     │   ├── gpt.ko                    # required only for managed-ROM projection
     │   ├── gpt/early.sh
     │   ├── gpt/recovery.sh
@@ -126,13 +126,13 @@ ESP filesystem /                      # normally read-only
         └── failure.json              # last failed early managed boot
 ```
 
-The mutable state root `/metadata/espinit/` is separate from the ESP. After successful projection, PID1 privately mounts the projected metadata device, stages and fsyncs a complete runtime snapshot, atomically publishes it, and unmounts metadata before handoff. It is never an early failure-receipt dependency. Normal Android boot must mount that same metadata in first stage, before parsing init.rc. Recovery/fastbootd receives no injected platform RC and need not mount metadata in its first stage.
+The mutable state root `/metadata/esu/` is separate from the ESP. After successful projection, PID1 privately mounts the projected metadata device, stages and fsyncs a complete runtime snapshot, atomically publishes it, and unmounts metadata before handoff. It is never an early failure-receipt dependency. Normal Android boot must mount that same metadata in first stage, before parsing init.rc. Recovery/fastbootd receives no injected platform RC and need not mount metadata in its first stage.
 
 ```text
-/metadata/espinit/
-├── espinitd                          # installed daemon executed by init.rc
+/metadata/esu/
+├── esud                          # installed daemon executed by init.rc
 ├── bin/
-│   ├── espinitd                      # helper link to the installed daemon
+│   ├── esud                      # helper link to the installed daemon
 │   └── busybox, resetprop            # extracted userspace helpers
 ├── modules/                          # selected generation's explicit ESP packages
 ├── modules_update/                   # retained internal machinery, not a ZIP product
@@ -147,11 +147,11 @@ The mutable state root `/metadata/espinit/` is separate from the ESP. After succ
 
 Kernel `.ko` loading remains exclusively controlled by `manifest.modules` in document order. Android package selection is exclusively `manifest.platform.packages` (or `recovery_packages`), with each `modules/<id>/module.toml` describing that package. The installed files are not a second boot source: every boot replaces executable/package/RC state from the selected ESP generation. Existing `log`, `receipts`, `module_configs` and `.feature_config` data are retained without copying their file contents; obsolete executables and package trees are not retained. `initrc/modules.rc` is generated before handoff, not deferred until post-fs-data.
 
-The host packager derives each ROM archive from that ROM's stock `init_boot`: it emits a legacy-LZ4 overlay that installs the matching static binary as `/init` and preserves the effective prior init as `/init.espinit`. Firmware appends the overlay after stock ramdisks and supplies only `androidboot.espinit.rom=<id>`; no `rdinit` is used. On success espinit executes the fixed saved path with the kernel-provided argv/envp and PID 1. A manifest cannot choose another init. This KernelSU-style takeover preserves an existing KernelSU wrapper, whose own `/init.real` remains in the stock archive. No generation fallback or implicit module discovery exists. `espinitd` starts through Android init only after successful handoff.
+The host packager derives each ROM archive from that ROM's stock `init_boot`: it emits a legacy-LZ4 overlay that installs the matching static binary as `/init` and preserves the effective prior init as `/init.real`. Firmware appends the overlay after stock ramdisks and supplies only `androidboot.esu.rom=<id>`; no `rdinit` is used. On success esu executes the fixed saved path with the kernel-provided argv/envp and PID 1. A manifest cannot choose another init. This KernelSU-style takeover preserves an existing KernelSU wrapper, whose own `/init.real` remains in the stock archive. No generation fallback or implicit module discovery exists. `esud` starts through Android init only after successful handoff.
 
 Recovery has one explicit rescue path that is separate from normal managed
 recovery. When bootconfig contains exactly one `androidboot.mode=recovery` and
-exactly one `androidboot.espinit.recovery_passthrough=true`, PID 1 tears down
+exactly one `androidboot.esu.recovery_passthrough=true`, PID 1 tears down
 only the minimal mounts it created and executes the real recovery init before
 ESP discovery, vendor or payload module loading, projection, scripts, or
 platform staging. Either key alone, command-line-only requests, duplicate keys,
@@ -160,36 +160,36 @@ opt-in and retains the managed projected storage view.
 
 ## Manifest
 
-See [`espinit/manifest.example.toml`](espinit/manifest.example.toml). TOML is used directly; no templating or executable configuration.
+See [`esu/manifest.example.toml`](esu/manifest.example.toml). TOML is used directly; no templating or executable configuration.
 
 | Field | Type and meaning |
 | --- | --- |
 | `schema_version` | Integer `1`; other versions fail validation. |
 | `generation` | Nonempty release identifier, case-sensitive ASCII letters/digits plus `.`, `_`, `-`; maximum 63 bytes. It identifies one complete, coordinated payload, not a kernel version. |
-| `rom` | Relative directory of per-ROM configurations, e.g. `roms`; PID1 reads only `<rom>/<androidboot.espinit.rom>.toml`. No global-file/default-ROM compatibility path. |
+| `rom` | Relative directory of per-ROM configurations, e.g. `roms`; PID1 reads only `<rom>/<androidboot.esu.rom>.toml`. No global-file/default-ROM compatibility path. |
 | `modules` | Nonempty array of tables, processed strictly in document order. |
-| `modules[].name` | Unique logical module name, identical to the loaded module name without `.ko`. The first entry must be `espinit`. |
-| `modules[].path` | Relative regular-file path of the module file, written in full and rooted at the ESP `/espinit` subtree (e.g. `modules/espinit.ko`); no absolute paths, empty components, `.`/`..`, or symlink traversal. |
+| `modules[].name` | Unique logical module name, identical to the loaded module name without `.ko`. The first entry must be `esu`. |
+| `modules[].path` | Relative regular-file path of the module file, written in full and rooted at the ESP `/esu` subtree (e.g. `modules/kernelesp.ko`); no absolute paths, empty components, `.`/`..`, or symlink traversal. |
 | `modules[].params` | String of Linux module parameters, passed as module parameters, never evaluated by a shell. Empty string means no parameters. |
 | `platform.metadata_filesystem` | Explicit `ext4` or `f2fs`, required for every payload; no probing/fallback filesystem. |
 | `platform.packages` | Unique IDs of normal Android packages; managed normal boot requires `boot-hal` and `tiny-espsu`. These two are excluded in unmanaged mode. Other selected packages remain mandatory. Unrelated to kernel load order. |
 | `platform.recovery_packages` | Optional list (default empty), staged only for recovery. The two normal HAL packages are forbidden here. |
 
-All entries are required; there are no optional loads, discovery, retries with another generation, or sorting by filename. Unknown fields, duplicate entries/keys, missing fields, and incorrect types are errors. A managed ROM requires `gpt` after `espinit` and before real-init handoff; an unmanaged manifest that lists `gpt` is rejected, because there is no projection contract to apply. Other modules must obey the same generation and readiness requirements; dependencies must precede dependents.
+All entries are required; there are no optional loads, discovery, retries with another generation, or sorting by filename. Unknown fields, duplicate entries/keys, missing fields, and incorrect types are errors. A managed ROM requires `gpt` after `esu` and before real-init handoff; an unmanaged manifest that lists `gpt` is rejected, because there is no projection contract to apply. Other modules must obey the same generation and readiness requirements; dependencies must precede dependents.
 
 ## ROM configuration
 
-See [`espinit/rom.example.toml`](espinit/rom.example.toml). The loader validates and consumes this file: it resolves each backend, applies the complete projection through the `gpt` APPLY ioctl, and requires an exact QUERY match before accepting `gpt` readiness. The file selects projected names and their existing whole block-device backends; it does not contain a new physical partition table. Backends are resolved only when the ordered payload reaches the `gpt` entry, after every earlier module and its scripts have run, so a logical volume, mapper device, loop or ESP file those entries publish can be a backend.
+See [`esu/rom.example.toml`](esu/rom.example.toml). The loader validates and consumes this file: it resolves each backend, applies the complete projection through the `gpt` APPLY ioctl, and requires an exact QUERY match before accepting `gpt` readiness. The file selects projected names and their existing whole block-device backends; it does not contain a new physical partition table. Backends are resolved only when the ordered payload reaches the `gpt` entry, after every earlier module and its scripts have run, so a logical volume, mapper device, loop or ESP file those entries publish can be a backend.
 
-`androidboot.espinit.rom` must explicitly select an ASCII ID of 1..59 letters,
+`androidboot.esu.rom` must explicitly select an ASCII ID of 1..59 letters,
 digits, `.`, `_`, or `-`, excluding `.` and `..`. The 59-byte bound keeps the
 selected `<id>.toml` path component within the platform's 64-byte limit. PID1
 accepts the bootconfig or
 kernel-command-line spelling; duplicate keys or disagreement between the two
 sources are fatal. The selected file's required `id` must match exactly. Multiple
 `roms/<id>.toml` files can coexist; PID1 never consults a global source `rom.toml`.
-The selected snapshot alone becomes `/metadata/espinit/rom.toml`, and the daemon
-and helper check its ID against `ro.boot.espinit.rom` before the HAL can start.
+The selected snapshot alone becomes `/metadata/esu/rom.toml`, and the daemon
+and helper check its ID against `ro.boot.esu.rom` before the HAL can start.
 
 | Field | Type and meaning |
 | --- | --- |
@@ -224,7 +224,7 @@ the `-tpool` layer, and every visible non-skipped LV through the
 device-mapper ioctl ABI. Tables come only from the checked on-disk metadata.
 An existing name is accepted only when every active target exactly matches;
 devices created by a failed invocation are removed in reverse order. The
-compiled generation must exactly match the `ESPINIT_GENERATION` supplied by
+compiled generation must exactly match the `ESU_GENERATION` supplied by
 PID 1. The tool does not invoke a shell or `lvm`, mutate LVM metadata, create
 thin IDs, accept arguments, or guess another PV/VG.
 
@@ -237,14 +237,14 @@ entry of that ROM. Unwritten blocks then read the physical firmware partition's
 bytes, the ROM's OTA writes provision private blocks in the shared pool, and
 deleting the view's reserved thin id restores the physical bytes. A ROM without
 views runs the helper as a no-op. See
-[`espinit/modules/fw-views/README.md`](espinit/modules/fw-views/README.md) for
+[`esu/modules/fw-views/README.md`](esu/modules/fw-views/README.md) for
 the schema, the authoring rule and the seal interplay.
 
 ## Generation matching and module self-check
 
-The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; `ESPINIT_GENERATION` selects it explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
+The manifest, ROM configuration, PID-1 binary, daemon, core module, and every listed ESP module must carry the **same generation**. Each executable/module carries a build-time generation; `ESU_GENERATION` selects it explicitly, otherwise builds derive the full 40-character lowercase Git HEAD hash. A filename or successful `finit_module` alone is not proof of compatibility. Linux module architecture/vermagic checks still apply. Generation equality is a consistency check, not a signature or authenticity guarantee; trusted boot must protect the payload separately.
 
-Before loading dependent modules, PID 1 queries the espinit-specific UAPI v3 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose matching `generation` and `ready` parameters before the next entry proceeds. For `gpt`, generation is checked before APPLY can publish or hide anything; readiness is checked afterwards in the projection failure stage and diagnostics include the validated requested partition/mode counts.
+Before loading dependent modules, PID 1 queries the esu-specific UAPI v3 control ioctl and verifies core identity, ABI compatibility, exact generation, and completed initialization. A preloaded core is acceptable only if it passes the same checks; the presence of KernelSU is not success. Each subsequent module must expose matching `generation` and `ready` parameters before the next entry proceeds. For `gpt`, generation is checked before APPLY can publish or hide anything; readiness is checked afterwards in the projection failure stage and diagnostics include the validated requested partition/mode counts.
 
 After core validation PID1 sets its stable boot classification through the
 PID1-only, write-once control ioctl (`1` Android, `2` recovery/fastbootd), then
@@ -254,15 +254,15 @@ app-facing control or a property-based fallback.
 
 ## Boot ordering and hard-failure receipt
 
-1. Prepare the minimum early mounts/logging. When the exact opt-in `androidboot.espinit.apss_minidump=true` is active, first load the dependency closure rooted at the vendor `qcom-dload-mode.ko` through that same module directory, `modules.dep`, ordering and `finit_module` machinery, so a Qualcomm APSS minidump sink can capture a failure that happens before the ESP exists; then opportunistically retain an already-enumerated payload ESP read-only so vendor-module preload failures can still leave a receipt. Preload the applicable vendor modules with their dependencies/options, then wait up to ten seconds for storage enumeration when the ESP was not available before preload. Enumerate every GPT ESP candidate, probe each read-only, and require exactly one to contain a regular `/espinit/manifest.toml`; other firmware ESPs are allowed. Keep the selected payload ESP mounted read-only and validate its manifest plus explicitly selected per-ROM TOML without changing the partition view. No step here requires projected `/metadata`.
-2. Check payload generations, module ordering, backend configuration, and the ESP receipt directory `/espinit/receipts` (runtime `/debug_ramdisk/esp/espinit/receipts`) structurally without opening a write window. For managed boot, unavailable receipt storage is itself a hard failure; do not mount or depend on `/metadata` for this check.
-3. Load or validate `espinit.ko`, then load the remaining modules in manifest order, perform each self-check, and run each module's optional `early.sh` or `recovery.sh` through the ESP busybox with a 35-second deadline. A userspace helper entry (no `.ko` path, today only `fw-views`) is never loaded into the kernel: PID 1 requires its payload file to exist and its stage script to exit zero. Immediately before the `gpt` entry, and only after every earlier module and script has run, resolve each backend — by-name partition, exact `/dev/mapper/<name>`, existing `/dev/loopN`, or an `esp-file:` attached to a fresh loop device with the access the projection requested. Load `gpt`, verify its generation, enumerate physical `DEVTYPE=partition` device numbers other than the mounted ESP into `hide[]`, then issue one atomic APPLY. The ESP stays outside `hide[]` so any later hard failure can remount it for its receipt. Exact QUERY (ABI, active view, count) and readiness checks complete before the `gpt` stage script.
+1. Prepare the minimum early mounts/logging. When the exact opt-in `androidboot.esu.apss_minidump=true` is active, first load the dependency closure rooted at the vendor `qcom-dload-mode.ko` through that same module directory, `modules.dep`, ordering and `finit_module` machinery, so a Qualcomm APSS minidump sink can capture a failure that happens before the ESP exists; then opportunistically retain an already-enumerated payload ESP read-only so vendor-module preload failures can still leave a receipt. Preload the applicable vendor modules with their dependencies/options, then wait up to ten seconds for storage enumeration when the ESP was not available before preload. Enumerate every GPT ESP candidate, probe each read-only, and require exactly one to con…
+2. Check payload generations, module ordering, backend configuration, and the ESP receipt directory `/esu/receipts` (runtime `/debug_ramdisk/esp/esu/receipts`) structurally without opening a write window. For managed boot, unavailable receipt storage is itself a hard failure; do not mount or depend on `/metadata` for this check.
+3. Load or validate `kernelesp.ko`, then load the remaining modules in manifest order, perform each self-check, and run each module's optional `early.sh` or `recovery.sh` through the ESP busybox with a 35-second deadline. A userspace helper entry (no `.ko` path, today only `fw-views`) is never loaded into the kernel: PID 1 requires its payload file to exist and its stage script to exit zero. Immediately before the `gpt` entry, and only after every earlier module and script has run, resolve each backend — by-name partition, exact `/dev/mapper/<name>`, existing `/dev/loopN`, or an `esp-file:` attached to a fresh loop device with the access the projection requested. Load `gpt`, verify its generation, enumerate physical `DEVTYPE=partition` device numbers other tha…
 4. After kernel-stage scripts and projection, validate selected packages/source inodes and executable generation notes. Privately mount writable metadata; install the daemon, selected ROM and package set; fsync files/directories; publish with rename/exchange; retire the old snapshot under a distinct cleanup name before parent fsync/removal; then unmount. Managed boot uses projected metadata and requires writable projected bdsvars/misc for the normal HAL. Unmanaged boot resolves exactly the native metadata PARTNAME with the same bounded 10-second/100-ms enumeration retry, without projection or the HAL pair. Permanent resolution errors fail immediately; unavailable/unwritable metadata stops handoff.
-5. Detach the ESP and owned early mounts, then replace PID1 with fixed `/init`. Core installs HAL rules at `/system/bin/init second_stage`. In Android mode only it injects synchronous `on init` `exec_start` for `espinitd`'s `Stage::Early`: after ueventd coldboot, before late-fs/class early_hal. The daemon validates installed generation/ID/managed mode, extracts its existing interpreter and finishes tiny-espsu. Failure uses `reboot_on_failure`, not a warning. Unmanaged mode skips the helper. Recovery/fastbootd receives neither this service nor custom module RC; its existing ESP recovery scripts/projection remain.
+5. Detach the ESP and owned early mounts, then replace PID1 with fixed `/init`. Core installs HAL rules at `/system/bin/init second_stage`. In Android mode only it injects synchronous `on init` `exec_start` for `esud`'s `Stage::Early`: after ueventd coldboot, before late-fs/class early_hal. The daemon validates installed generation/ID/managed mode, extracts its existing interpreter and finishes tiny-espsu. Failure uses `reboot_on_failure`, not a warning. Unmanaged mode skips the helper. Recovery/fastbootd receives neither this service nor custom module RC; its existing ESP recovery scripts/projection remain.
 
 A selected managed ROM has **no stock-ROM fallback**. Any parse, generation, load, self-check, backend, projection, or handoff failure must stop normal Android handoff. Invalid/unreadable configuration must not be interpreted as `managed = false`; only an explicitly valid unmanaged configuration permits an unchanged partition view. Do not silently skip a module or leave a partially projected boot running.
 
-Before entering the platform's fatal-boot stop path, persist ESP `/espinit/receipts/failure.json` (runtime `/debug_ramdisk/esp/espinit/receipts/failure.json`) as a UTF-8 JSON object with these required fields:
+Before entering the platform's fatal-boot stop path, persist ESP `/esu/receipts/failure.json` (runtime `/debug_ramdisk/esp/esu/receipts/failure.json`) as a UTF-8 JSON object with these required fields:
 
 - `schema_version`: integer `1`;
 - `generation`: selected generation string, or JSON `null` if it could not be validated;
@@ -276,7 +276,7 @@ Keep the ESP read-only during normal boot. On failure only, use one bounded read
 ### Fatal panic capture
 
 The fatal-boot stop is a reboot by default. When the boot configuration carries
-the exact AOSP opt-in `androidboot.init_fatal_panic=true`, espinit writes the
+the exact AOSP opt-in `androidboot.init_fatal_panic=true`, esu writes the
 failure receipt first and then requests the same sysrq crash AOSP init uses, by
 writing `c` to `/proc/sysrq-trigger`, so the failure can be captured through
 pstore/minidump instead of only rebooting. Only the exact key with the exact
@@ -285,15 +285,15 @@ kernel command line only when the boot configuration is silent for that key:
 case variants, key prefixes, malformed quote pairs and every other value stay
 non-opt-in, and there is no OEM- or vendor-specific spelling. If the trigger is
 unavailable, the write fails, or the write returns without panicking the
-kernel, espinit falls back to the unchanged sync/reboot/park path, so a failing
-opt-in can never strand PID 1. The opt-in covers only espinit's own failures
+kernel, esu falls back to the unchanged sync/reboot/park path, so a failing
+opt-in can never strand PID 1. The opt-in covers only esu's own failures
 before the real `/init` starts; it does not extend to a later boot failure and
 records nothing when the kernel does not panic.
 
 ### Stage checkpoint probe (lab-only)
 
 When there is no working durable sink, the only remaining question about a very early
-failure is *how far the boot got*. `androidboot.espinit.probe=<stage>` is a
+failure is *how far the boot got*. `androidboot.esu.probe=<stage>` is a
 bootconfig-only, lab-only checkpoint opt-in that answers it with time instead of text:
 the kernel's own panic delay is visible in the reset timing even when nothing
 survives the reset.
@@ -318,19 +318,19 @@ reading:
   with APSS minidump, it captures Android first-stage logs that would otherwise
   be lost to a clean fatal reboot.
 - `proc-mounted` is the earliest runtime-selected checkpoint possible. `/proc` is mounted
-  before the probe can be read at all, so reaching this checkpoint proves that `/espinit`
+  before the probe can be read at all, so reaching this checkpoint proves that `/esu`
   really executed *and* that procfs mounted. It is followed by `sys-mounted` after sysfs,
   `dev-mounted` after devtmpfs (or its tmpfs fallback), and `minimal-mounted` after the
   device nodes — the boundary the whole minimal setup kept before. A boot that returns to
   the bootloader almost immediately instead of waiting ~30 seconds at a `proc-mounted`
-  probe proves neither: either `/espinit` never executed, or it could not mount proc.
+  probe proves neither: either `/esu` never executed, or it could not mount proc.
   A 30-second delay proves both. This is the discriminator when a `minimal-mounted` probe
   resets immediately and the two halves of minimal setup cannot otherwise be told apart.
 - `apss-loaded` is the boundary *after* the optional APSS minidump preload step of the
-  same boot. Without `androidboot.espinit.apss_minidump=true` that step is skipped, so
+  same boot. Without `androidboot.esu.apss_minidump=true` that step is skipped, so
   the checkpoint is reached as soon as the decision is made; a profile that means to
   bisect the APSS preload must carry the APSS opt-in itself, and the neutral
-  `espinit-stage-minimal.txt` profile does not.
+  `esu-stage-minimal.txt` profile does not.
 - `esp-retained` proves a mount that was actually **retained** before vendor-module
   preload. An enumeration-pending miss (`EspNotFound`, `EspPayloadNotFound`,
   `EspSysfsUnavailable`, `EspPartitionMissing`) retains nothing and reaches no
@@ -338,13 +338,13 @@ reading:
   `vendor-loaded` or `esp-ready`.
 
 A triggered pre-handoff checkpoint is terminal and does not continue boot:
-espinit writes decimal `30` to `/proc/sys/kernel/panic`, then requests the same
+esu writes decimal `30` to `/proc/sys/kernel/panic`, then requests the same
 sysrq crash as the fatal-panic path (`c` to `/proc/sysrq-trigger`). The profile's
 own `panic=5` is untouched, so a boot that fails naturally *before* the named
 checkpoint still waits 5 seconds — a longer, ~30-second wait means the checkpoint
 was reached. A checkpoint writes no failure receipt: it is not a failure, it is
 a measurement. If the panic-delay write or the crash request fails or returns
-without panicking, espinit enters the unchanged fatal-boot stop path (sync,
+without panicking, esu enters the unchanged fatal-boot stop path (sync,
 reboot, PID-1 park) rather than continuing to later boot steps, so a matched
 checkpoint can never be mistaken for a successful boot.
 
@@ -354,9 +354,9 @@ The fatal-panic stop above makes a panic happen, but a panic is only durable if
 something consumes it before the reset. The ramoops backend on this phone does not
 survive the observed `HARD_RESET` cold-boot class, so the smallest early capture
 path is the Qualcomm APSS minidump. When the exact opt-in
-`androidboot.espinit.apss_minidump=true` is active — the same bootconfig-first,
+`androidboot.esu.apss_minidump=true` is active — the same bootconfig-first,
 command-line-fallback, exact-lowercase-`true` rule as the fatal-panic opt-in, with
-no OEM- or vendor-specific spelling — espinit loads the dependency closure rooted
+no OEM- or vendor-specific spelling — esu loads the dependency closure rooted
 at the vendor `/lib/modules/qcom-dload-mode.ko` immediately after its minimal
 mounts and unlimited kmsg, and **before** it mounts the ESP.
 
@@ -375,12 +375,12 @@ cannot abort the preload on a device whose stock init loads through it anyway.
 
 Without the exact opt-in this path does not run at all: a normal boot never
 touches the module loader early and is unchanged. A preload failure is an ordinary
-bounded espinit failure and enters the same fatal-boot stop; because it happens
+bounded esu failure and enters the same fatal-boot stop; because it happens
 before the ESP is mounted, its failure receipt can only be written when the ESP
 was already available, so the durable evidence for this path is the crash capture
 itself, matching where the failure occurs.
 
-The Android-side `espinitd` fatal path writes its complete error chain directly
+The Android-side `esud` fatal path writes its complete error chain directly
 to `/dev/kmsg`. When the standard `ro.boot.init_fatal_panic=true` projection of
 the same diagnostic bootconfig opt-in is present, it then requests the same
 sysrq crash before init's `reboot_on_failure` can discard that evidence.
@@ -393,7 +393,7 @@ The module never writes disk GPT headers, entries, CRCs, or partition metadata a
 
 ## Platform package contract
 
-Each selected `/espinit/modules/<id>/module.toml` is strict TOML with required
+Each selected `/esu/modules/<id>/module.toml` is strict TOML with required
 `schema_version = 1`, `generation`, `id` and nonempty `[[files]]`. Each file has
 only `source`, `destination`, `mode` and `kind`. Paths are normal relative paths
 inside that package, ASCII letters/digits plus `._-/`, with no empty, dot,
@@ -406,23 +406,23 @@ files and mismatched generations are fatal. Destinations `module.toml`,
 writable executable modes are accepted. Init RC destinations must be directly
 under `initrc/` and end in `.rc`.
 
-`binary` entries and `bin/espinitd` must contain exactly one retained ELF64
+`binary` entries and `bin/esud` must contain exactly one retained ELF64
 `.note.espinit` generation note matching the manifest; PID1 checks this without
 executing Android binaries. Files and RC fragments install in sorted destination
 order, independently of package/file input order. Manifests and the selected ROM
 config are copied into the same transaction. Publication uses a sibling
-`.espinit-staging` tree and `renameat2` NOREPLACE/EXCHANGE, never an in-place
+`.esu-staging` tree and `renameat2` NOREPLACE/EXCHANGE, never an in-place
 multi-file update or symlink selector. A leftover staging tree remains fatal,
 even if it looks complete. Each published snapshot has a fsynced
-`.espinit-complete` commit marker (not a generation/config manifest). After an
-exchange, the old tree is renamed `.espinit-retired` **before** parent fsync and
+`.esu-complete` commit marker (not a generation/config manifest). After an
+exchange, the old tree is renamed `.esu-retired` **before** parent fsync and
 deletion. On restart only this cleanup namespace is removed, after verifying a
 complete live snapshot and the retired marker. Cleanup retains the marker until
 all other entries are removed; an empty retired directory is also safe to finish.
 Unknown nonempty retired trees, symlink roots and unmarked existing live snapshots
 stop handoff for offline inspection; no partial staging tree is resumed.
 
-The HAL consumes only `ro.boot.espinit.rom` (from `androidboot.espinit.rom`) and
+The HAL consumes only `ro.boot.esu.rom` (from `androidboot.esu.rom`) and
 `ro.boot.slot_suffix`. The ROM ID must name provisioned `Slot-<id>` and
 `MergeStatus-<id>` records; there is no default ROM/slot or automatic formatting.
 The service remains AIDL V1 `android.hardware.boot.IBootControl/default`, hash
@@ -435,12 +435,12 @@ and actual projected bdsvars block inode, then binds the HAL over the fixed
 vendor executable. It refuses non-root, wrong namespace, missing properties,
 unmatched generation, non-projected bdsvars or symlinked package paths. Before
 changing labels or mounts it directly queries the kernel boot mode through the
-single control descriptor espinitd duplicates for this child; an environment
+single control descriptor esud duplicates for this child; an environment
 variable is not boot-mode authority. It has no shell/su/manager/profile/app API
 or arbitrary policy/execute/bind interface.
 
 Core policy publication is a separate clone/mutate/publish transaction. The
-espinit daemon identity receives only the init-to-daemon file and process
+esu daemon identity receives only the init-to-daemon file and process
 transition rules needed to enter its dedicated permissive domain; inherited
 KernelSU all-domain, binder, ioctl, memfd, networking and root-product grants
 are not installed. Boot integration creates `gblbds_hal_exec` and
@@ -468,14 +468,14 @@ there is no parallel runtime configuration or generation/mode marker file.
 
 ### AArch64 build/package path
 
-Use one `ESPINIT_GENERATION` for PID1, core/thin/gpt, `thin-activate`,
-espinitd and both platform binaries. With NDK API 35 and the Rust Android
+Use one `ESU_GENERATION` for PID1, core/thin/gpt, `thin-activate`,
+esud and both platform binaries. With NDK API 35 and the Rust Android
 target installed:
 
 ```sh
-export ESPINIT_GENERATION=release-1
-export ESPINIT_NDK=/path/to/android-ndk-r29
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ESPINIT_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
+export ESU_GENERATION=release-1
+export ESU_NDK=/path/to/android-ndk-r29
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ESU_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
 RUSTFLAGS="-C target-feature=+crt-static" \
   cargo +nightly-2026-08-08 build --locked --release \
   --target aarch64-linux-android -p thin-activate --bin thin-activate
@@ -483,15 +483,15 @@ RUSTFLAGS="-C target-feature=+crt-static" \
   cargo +nightly-2026-08-08 build --locked --release \
   --target aarch64-linux-android -p fw-views --bin fw-views
 cargo +nightly-2026-08-08 build --locked --release --target aarch64-linux-android \
-  -p espinitd -p espinit-platform --bin espinitd --bin tiny-espsu
+  -p esud -p esu-platform --bin esud --bin tiny-espsu
 bash payloads/boot-hal/build-android.sh
 ```
 
 Copy the static, interpreter-free `thin-activate` to `bin/thin-activate` and
-`fw-views` to `bin/fw-views`, `espinitd` to `bin/espinitd`, and both platform
+`fw-views` to `bin/fw-views`, `esud` to `bin/esud`, and both platform
 outputs to the source paths declared by
-[`espinit/modules/boot-hal/module.toml`](espinit/modules/boot-hal/module.toml) and
-[`espinit/modules/tiny-espsu/module.toml`](espinit/modules/tiny-espsu/module.toml);
+[`esu/modules/boot-hal/module.toml`](esu/modules/boot-hal/module.toml) and
+[`esu/modules/tiny-espsu/module.toml`](esu/modules/tiny-espsu/module.toml);
 stamp both package manifests with that exact generation. Ship the checked-in
 thin early script, RC, install script and policy mirror alongside them. The
 host packager rejects a dynamically linked early activator.
@@ -501,7 +501,7 @@ must still be replaced with real projected backends; it never invents metadata,
 bdsvars or misc storage.
 
 Parent verification gates:
-`cargo test --locked -p lvm2-meta -p thin-activate -p espinit-platform -p espinit`,
+`cargo test --locked -p lvm2-meta -p thin-activate -p esu-platform -p esu`,
 `cargo test --locked --manifest-path payloads/boot-hal/Cargo.toml`,
 `cargo test --locked --manifest-path payloads/boot-hal/Cargo.toml -p varstore`,
 `python3 -m unittest tools.cuttlefish.test_assemble`, the Android builds and
@@ -513,7 +513,7 @@ without a first-stage metadata dependency. Source/host tests imply no such runti
 
 ## License and provenance
 
-This fork derives from KernelSU by [tiann](https://github.com/tiann) and its contributors. The retained Git history and original source copyright notices record upstream authorship; espinit renaming does not replace that attribution. Historical upstream documentation, where retained, describes KernelSU and is not the espinit contract.
+This fork derives from KernelSU by [tiann](https://github.com/tiann) and its contributors. The retained Git history and original source copyright notices record upstream authorship; esu renaming does not replace that attribution. Historical upstream documentation, where retained, describes KernelSU and is not the esu contract.
 
 The core remains licensed under **GNU GPL version 3**; [`LICENSE`](LICENSE) preserves the upstream GPL-3.0 text verbatim. `modules/thin` and `modules/gpt` are separate **GPL-2.0-only** modules aggregated with, not linked into or relicensed as, the GPL-3.0 core. Their subtree licenses and provenance files identify their origins and boundaries. See [`SECURITY.md`](SECURITY.md) for security scope and reporting guidance.
 

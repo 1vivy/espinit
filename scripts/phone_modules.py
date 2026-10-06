@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and admit exact-target espinit LKMs; never manufacture version data.
+"""Build and admit exact-target esu LKMs; never manufacture version data.
 
 KERNEL_CONFIG is an independently captured target config, not a defconfig or a
 copy of the candidate output's .config. A build receipt binds stable CRC build
@@ -77,7 +77,7 @@ class Arguments(argparse.Namespace):
     kernel_config: str
     module: str | None
     jobs: int
-    espinit: Path | None
+    kernelesp: Path | None
     thin: Path | None
     gpt: Path | None
 
@@ -88,13 +88,13 @@ class Arguments(argparse.Namespace):
         kernel_config = ""
         module = None
         jobs = 13
-        espinit = None
+        kernelesp = None
         thin = None
         gpt = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES: dict[str, Path] = {"espinit": ROOT / "kernel", "thin": ROOT / "modules/thin", "gpt": ROOT / "modules/gpt"}
+MODULES: dict[str, Path] = {"kernelesp": ROOT / "kernel", "thin": ROOT / "modules/thin", "gpt": ROOT / "modules/gpt"}
 
 
 class CompatibilityError(ValueError):
@@ -379,7 +379,7 @@ def build(args: Arguments) -> ModuleReport:
     receipt_path(module).unlink(missing_ok=True)
     # Do not inherit command-line/config overrides from an outer make or shell.
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CONFIG_", "KBUILD_")) and key not in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "KCFLAGS", "KCPPFLAGS", "CFLAGS_MODULE", "LDFLAGS_MODULE")}
-    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(directory), "ARCH=" + arch, "LLVM=1", "KBUILD_GENDWARFKSYMS_STABLE=1", "CONFIG_ESPINIT=m"]
+    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(directory), "ARCH=" + arch, "LLVM=1", "KBUILD_GENDWARFKSYMS_STABLE=1", "CONFIG_KERNELESP=m"]
     if module_name != "thin":
         command.append("KBUILD_MODPOST_WARN=1")
     if module_name == "thin":
@@ -411,8 +411,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _ = check_config(args.kernel_src, args.kernel_out, args.kernel_config, os.environ.get("KBUILD_GENDWARFKSYMS_STABLE", "1"))
             result = ConfigReport(config="compatible")
         else:
-            modules = {name: path for name, path in (("espinit", args.espinit), ("thin", args.thin), ("gpt", args.gpt)) if path is not None}
-            require(modules, "verify: specify --espinit, --thin and/or --gpt")
+            modules = {name: path for name, path in (("kernelesp", args.kernelesp), ("thin", args.thin), ("gpt", args.gpt)) if path is not None}
+            require(modules, "verify: specify --kernelesp, --thin and/or --gpt")
             result = verify_payload(args.kernel_src, args.kernel_out, args.kernel_config, modules)
         print(json.dumps({"status": "accepted", "result": result}, indent=2, sort_keys=True))
         return 0

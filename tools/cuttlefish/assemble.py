@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assemble one espinit Cuttlefish payload directory.
+"""Assemble one esu Cuttlefish payload directory.
 
 The payload is exactly the three artifacts the Cuttlefish lane consumes through
-`--espinit-payload`: `init_boot.img`, `esp.img` and `payload.json`. No virtual
+`--esu-payload`: `init_boot.img`, `esp.img` and `payload.json`. No virtual
 machine, no container and no Cuttlefish binary is started here, and nothing is
 written outside the output directory (temporary files live inside it).
 
@@ -41,8 +41,8 @@ PATHS = (
     "stock_init_boot",
     "avbtool",
     "avb_key",
-    "espinit",
-    "espinitd",
+    "esuinit",
+    "esud",
     "boot_hal",
     "tiny_espsu",
     "busybox",
@@ -56,19 +56,19 @@ BINARIES = (
     ("busybox", "bin/busybox"),
     ("thin_activate", "bin/thin-activate"),
     ("fw_views", "bin/fw-views"),
-    ("espinitd", "bin/espinitd"),
+    ("esud", "bin/esud"),
 )
-MODULES = (("core_module", "espinit"), ("thin_module", "thin"), ("gpt_module", "gpt"))
+MODULES = (("core_module", "kernelesp"), ("thin_module", "thin"), ("gpt_module", "gpt"))
 ESP_DIRECTORIES = (
-    "espinit",
-    "espinit/bin",
-    "espinit/roms",
-    "espinit/modules",
-    "espinit/modules/thin",
-    "espinit/modules/fw-views",
-    "espinit/modules/boot-hal",
-    "espinit/modules/tiny-espsu",
-    "espinit/receipts",
+    "esu",
+    "esu/bin",
+    "esu/roms",
+    "esu/modules",
+    "esu/modules/thin",
+    "esu/modules/fw-views",
+    "esu/modules/boot-hal",
+    "esu/modules/tiny-espsu",
+    "esu/receipts",
 )
 EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
 FW_EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec fw-views\n"
@@ -104,7 +104,7 @@ def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tu
         'packages = ["boot-hal", "tiny-espsu"]\nrecovery_packages = []\n'
     )
     for name, path in (
-        ("espinit", "modules/espinit.ko"),
+        ("kernelesp", "modules/kernelesp.ko"),
         ("thin", "modules/thin.ko"),
         # An ordered userspace helper: it runs `bin/fw-views` through its own
         # early.sh between `thin` and `gpt`, and a ROM without firmware views
@@ -121,7 +121,7 @@ def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tu
     # metadata partition itself.
     rom = head + f'id = "{rom_id}"\nrom_number = 1\n' + (
         'managed = true\n\n[[partitions]]\nname = "userdata"\n'
-        'backend = "/dev/mapper/espinit-payload-placeholder"\nread_only = false\n'
+        'backend = "/dev/mapper/esu-payload-placeholder"\nread_only = false\n'
     )
 
     return manifest, rom
@@ -200,20 +200,20 @@ def compress(mode: str, raw: bytes) -> bytes:
 def add_pid1(ramdisk: bytes, pid1: Path, work: Path) -> bytes:
     # Validate every stock archive before preserving it byte-for-byte. Android
     # initramfs commonly concatenates platform and vendor newc archives; the
-    # kernel applies later members last, so a final archive installs /espinit
+    # kernel applies later members last, so a final archive installs /esuinitinit
     # without rewriting either stock archive.
     _ = list(records(ramdisk))
 
     root = work / "entry"
     root.mkdir()
-    shutil.copyfile(pid1, root / "espinit")
-    (root / "espinit").chmod(0o755)
-    os.utime(root / "espinit", (0, 0))
+    shutil.copyfile(pid1, root / "esuinit")
+    (root / "esuinit").chmod(0o755)
+    os.utime(root / "esuinit", (0, 0))
 
     addition = run(
         ["cpio", "--create", "--format=newc", "--owner=0:0", "--reproducible", "--quiet"],
         cwd=root,
-        data=b"espinit\n",
+        data=b"esuinit\n",
     )
     _ = list(records(addition))
 
@@ -225,7 +225,7 @@ def add_pid1(ramdisk: bytes, pid1: Path, work: Path) -> bytes:
 def repack_init_boot(
     stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path
 ) -> Path:
-    """Install /espinit and re-sign the fixed-size Cuttlefish init_boot."""
+    """Install /esuinit and re-sign the fixed-size Cuttlefish init_boot."""
     original = stock.read_bytes()
     if original[:8] != BOOT_MAGIC or len(original) < BOOT_HEADER_SIZE:
         raise ValueError("stock init_boot is not an Android boot image")
@@ -341,27 +341,27 @@ def platform_files(sources: dict[str, Path], generation: str, tree: Path) -> lis
     for module in ("boot-hal", "tiny-espsu"):
         directory = tree / "modules" / module
         directory.mkdir()
-        template = REPOSITORY / "espinit/modules" / module / "module.toml"
+        template = REPOSITORY / "esu/modules" / module / "module.toml"
         text = template.read_text()
         if text.count('generation = "release-1"') != 1:
             raise ValueError(f"invalid generation template: {template}")
         manifest = directory / "module.toml"
         manifest.write_text(text.replace('generation = "release-1"', f'generation = "{generation}"'))
-        files.append((manifest, f"espinit/modules/{module}/module.toml", 0o644))
-    for key in ("espinitd", "boot_hal", "tiny_espsu"):
+        files.append((manifest, f"esu/modules/{module}/module.toml", 0o644))
+    for key in ("esud", "boot_hal", "tiny_espsu"):
         artifact_generation(sources[key], generation)
     files.extend([
-        (sources["boot_hal"], "espinit/modules/boot-hal/android.hardware.boot-service.gblbds", 0o755),
-        (REPOSITORY / "payloads/boot-hal/boot-gblbds.rc", "espinit/modules/boot-hal/boot-gblbds.rc", 0o644),
-        (sources["tiny_espsu"], "espinit/modules/tiny-espsu/tiny-espsu", 0o755),
-        (REPOSITORY / "espinit/modules/tiny-espsu/install.sh", "espinit/modules/tiny-espsu/install.sh", 0o755),
-        (REPOSITORY / "espinit/modules/tiny-espsu/policy.cil", "espinit/modules/tiny-espsu/policy.cil", 0o644),
+        (sources["boot_hal"], "esu/modules/boot-hal/android.hardware.boot-service.gblbds", 0o755),
+        (REPOSITORY / "payloads/boot-hal/boot-gblbds.rc", "esu/modules/boot-hal/boot-gblbds.rc", 0o644),
+        (sources["tiny_espsu"], "esu/modules/tiny-espsu/tiny-espsu", 0o755),
+        (REPOSITORY / "esu/modules/tiny-espsu/install.sh", "esu/modules/tiny-espsu/install.sh", 0o755),
+        (REPOSITORY / "esu/modules/tiny-espsu/policy.cil", "esu/modules/tiny-espsu/policy.cil", 0o644),
     ])
     return files
 
 
 def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, requested_mib: int | None) -> Path:
-    tree = work / "espinit"
+    tree = work / "esu"
     import tomllib
     rom_relative = f"roms/{tomllib.loads(rom)['id']}.toml"
     for directory in ("bin", "roms", "modules/thin", "modules/fw-views", "receipts"):
@@ -376,21 +376,21 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
         path.chmod(0o755)
 
     files: list[tuple[Path, str, int]] = [
-        (tree / "manifest.toml", "espinit/manifest.toml", 0o644),
-        (tree / rom_relative, f"espinit/{rom_relative}", 0o644),
+        (tree / "manifest.toml", "esu/manifest.toml", 0o644),
+        (tree / rom_relative, f"esu/{rom_relative}", 0o644),
     ]
     for name, _ in scripts:
         files.append(
             (
                 tree / "modules" / name / "early.sh",
-                f"espinit/modules/{name}/early.sh",
+                f"esu/modules/{name}/early.sh",
                 0o755,
             )
         )
     for key, target in BINARIES:
-        files.append((sources[key], f"espinit/{target}", 0o755))
+        files.append((sources[key], f"esu/{target}", 0o755))
     for key, name in MODULES:
-        files.append((sources[key], f"espinit/modules/{name}.ko", 0o644))
+        files.append((sources[key], f"esu/modules/{name}.ko", 0o644))
     # Manifest generation is already validated by configurations().
     generation = tomllib.loads(manifest)["generation"]
     files.extend(platform_files(sources, generation, tree))
@@ -406,7 +406,7 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
 
     # FAT carries no POSIX mode, so executable intent is expressed by the layout
     # and by the initramfs copy of the PID-1 binary.
-    run(["mformat", "-i", image, "-v", "ESPINIT", "-N", "45535031", "::"])
+    run(["mformat", "-i", image, "-v", "ESU", "-N", "45535031", "::"])
     run(["mmd", "-i", image, *(f"::/{directory}" for directory in ESP_DIRECTORIES)])
     for source, target, _ in files:
         run(["mcopy", "-i", image, "-o", source, f"::/{target}"])
@@ -450,7 +450,7 @@ def assemble(arguments: argparse.Namespace) -> None:
         work = Path(directory)
         init_boot = repack_init_boot(
             sources["stock_init_boot"],
-            sources["espinit"],
+            sources["esuinit"],
             sources["avbtool"],
             sources["avb_key"],
             work,

@@ -120,10 +120,10 @@ void cache_sid(void)
 
     err = security_secctx_to_secid(KERNEL_SU_CONTEXT, strlen(KERNEL_SU_CONTEXT), &cached_su_sid);
     if (err) {
-        pr_warn("Failed to cache espinit domain SID: %d\n", err);
+        pr_warn("Failed to cache esu domain SID: %d\n", err);
         cached_su_sid = 0;
     } else {
-        pr_info("Cached espinit SID: %u\n", cached_su_sid);
+        pr_info("Cached esu SID: %u\n", cached_su_sid);
     }
 
     err = security_secctx_to_secid(ZYGOTE_CONTEXT, strlen(ZYGOTE_CONTEXT), &cached_zygote_sid);
@@ -144,10 +144,10 @@ void cache_sid(void)
 
     err = security_secctx_to_secid(KSU_FILE_CONTEXT, strlen(KSU_FILE_CONTEXT), &ksu_file_sid);
     if (err) {
-        pr_warn("Failed to cache espinit_file SID: %d\n", err);
+        pr_warn("Failed to cache esu_file SID: %d\n", err);
         ksu_file_sid = 0;
     } else {
-        pr_info("Cached espinit_file SID: %u\n", ksu_file_sid);
+        pr_info("Cached esu_file SID: %u\n", ksu_file_sid);
     }
 }
 

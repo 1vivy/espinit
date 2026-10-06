@@ -1,7 +1,7 @@
 # Managed boot-control HAL
 
 **Status (2026-10-04)** - Ported AIDL V1 service and per-ROM state/storage adapter.
-The original state/storage tests are retained. Verification of this espinit port
+The original state/storage tests are retained. Verification of this esu port
 is a separate gate; no phone, Binder guest, OTA or recovery execution is claimed.
 
 ## Build and Binder choice
@@ -10,7 +10,7 @@ From the product worktree:
 
 ```sh
 cargo +nightly-2026-08-08 test --manifest-path payloads/boot-hal/Cargo.toml --locked --offline --jobs 3
-ESPINIT_NDK=/path/to/android-ndk-r29 ESPINIT_GENERATION=release-1 \
+ESU_NDK=/path/to/android-ndk-r29 ESU_GENERATION=release-1 \
   bash payloads/boot-hal/build-android.sh
 ```
 
@@ -18,8 +18,8 @@ The build uses the explicitly supplied NDK, API 35 and the installed
 `aarch64-linux-android` Rust target. Output:
 `payloads/boot-hal/target/aarch64-linux-android/release/gblbds-boot-hal`.
 The ESP package installs it as
-`/metadata/espinit/modules/boot-hal/android.hardware.boot-service.gblbds`.
-It carries the same retained `.note.espinit` generation as PID1/espinitd/tiny-espsu.
+`/metadata/esu/modules/boot-hal/android.hardware.boot-service.gblbds`.
+It carries the same retained `.note.esu` generation as PID1/esud/tiny-espsu.
 
 Rust, the state machine and the vendored `varstore` are **statically linked**. Binder
 uses the platform `libbinder_ndk.so` C ABI; no AOSP build tree, generated AIDL
@@ -49,9 +49,9 @@ contents. These host tests do not prove Binder or power-cut behavior.
 
 The ESP `boot-hal/module.toml` declares the executable and `boot-gblbds.rc`.
 PID1 installs the exact-generation package atomically after GPT projection and
-generates `/metadata/espinit/initrc/modules.rc`. The core appends this override
+generates `/metadata/esu/initrc/modules.rc`. The core appends this override
 while Android parses init.rc. Its mandatory synchronous on-init service runs
-`espinitd early` after ueventd coldboot and before `class early_hal` can start.
+`esud early` after ueventd coldboot and before `class early_hal` can start.
 tiny-espsu labels the actual source inode and binds it over
 `/vendor/bin/hw/android.hardware.boot-service.qti`; it does not modify vendor
 storage or use a shell, arbitrary command, app-root API or generic policy loader.
@@ -65,11 +65,11 @@ storage or use a shell, arbitrary command, app-root API or generic policy loader
   the entrypoint contract. Label the actual bdsvars block inode
   `gblbds_bdsvars_block_device`, not just its symlink; allow read/write, getattr,
   open and cooperative file locking for this HAL. Existing misc access remains.
-- espinit must project validated `/dev/block/by-name/bdsvars` and
+- esu must project validated `/dev/block/by-name/bdsvars` and
   `/dev/block/by-name/misc` onto their intended backends. The HAL never opens a
   whole LU, GPT, UFS sysfs node, boot partition or other firmware partition.
 
-The immutable `ro.boot.espinit.rom` property (from `androidboot.espinit.rom`)
+The immutable `ro.boot.esu.rom` property (from `androidboot.esu.rom`)
 selects the catalogue id (1-59 ASCII letters/digits/`-_.`; the filename adds
 `.toml` within a 64-byte path-component limit). `ro.boot.slot_suffix` must be
 exactly `_a` or `_b`; it is
@@ -84,7 +84,7 @@ listed `platform.recovery_packages`; the normal HAL and tiny-espsu are excluded.
 No native writer is invoked as a fallback. The source capture also contained
 HIDL 1.0-1.2 implementations: recovery AIDL/HIDL parity and device-specific
 suppression of stock activation routes are unproven integration prerequisites.
-This port does not intercept OTA payload writes; espinit's partition projection
+This port does not intercept OTA payload writes; esu's partition projection
 is mandatory before any managed OTA.
 
 The built-in policy deliberately gives neither new object type `file_type` nor

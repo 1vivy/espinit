@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-#ifndef ESPINIT_GPT_UAPI_H
-#define ESPINIT_GPT_UAPI_H
+#ifndef ESU_GPT_UAPI_H
+#define ESU_GPT_UAPI_H
 #include <linux/types.h>
 #include <linux/ioctl.h>
 #define GPT_ABI_VERSION 2U

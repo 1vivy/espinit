@@ -43,7 +43,7 @@ class PlatformPackaging(unittest.TestCase):
         self.assertEqual(
             [(module["name"], module["path"]) for module in value["modules"]],
             [
-                ("espinit", "modules/espinit.ko"),
+                ("kernelesp", "modules/kernelesp.ko"),
                 ("thin", "modules/thin.ko"),
                 # The userspace helper runs between `thin` and `gpt`.
                 ("fw-views", "bin/fw-views"),
@@ -69,7 +69,7 @@ class PlatformPackaging(unittest.TestCase):
     def test_esp_layout_carries_both_module_scripts_and_the_helper(self):
         self.assertIn("fw_views", assemble.PATHS)
         self.assertIn(("fw_views", "bin/fw-views"), assemble.BINARIES)
-        self.assertIn("espinit/modules/fw-views", assemble.ESP_DIRECTORIES)
+        self.assertIn("esu/modules/fw-views", assemble.ESP_DIRECTORIES)
         self.assertEqual(assemble.FW_EARLY_SCRIPT, "#!/bin/sh\nset -eu\nexec fw-views\n")
         for name in ("thin", "fw-views"):
             self.assertNotIn(name, [key for key, _ in assemble.MODULES])
@@ -81,7 +81,7 @@ class PlatformPackaging(unittest.TestCase):
             (tree / "modules").mkdir(parents=True)
             binary = root / "binary"
             binary.write_bytes(executable("release-2"))
-            sources = {key: binary for key in ("espinitd", "boot_hal", "tiny_espsu")}
+            sources = {key: binary for key in ("esud", "boot_hal", "tiny_espsu")}
             files = assemble.platform_files(sources, "release-2", tree)
             targets = [target for _, target, _ in files]
             self.assertEqual(len(targets), len(set(targets)))
@@ -90,7 +90,7 @@ class PlatformPackaging(unittest.TestCase):
                 self.assertEqual(manifest["id"], module)
                 self.assertEqual(manifest["generation"], "release-2")
                 for entry in manifest["files"]:
-                    self.assertIn(f"espinit/modules/{module}/{entry['source']}", targets)
+                    self.assertIn(f"esu/modules/{module}/{entry['source']}", targets)
 
 
 if __name__ == "__main__":

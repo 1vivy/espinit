@@ -171,7 +171,7 @@ fn property(name: &CStr) -> Result<String, String> {
 }
 
 pub fn run() -> Result<(), String> {
-    let id = property(c"ro.boot.espinit.rom")?;
+    let id = property(c"ro.boot.esu.rom")?;
     if id.len() > 59 {
         return Err("ROM ID exceeds 59 bytes".into());
     }

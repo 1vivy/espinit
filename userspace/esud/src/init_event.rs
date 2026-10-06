@@ -1,0 +1,330 @@
+use crate::module::{ScriptWait, handle_updated_modules, prune_modules};
+use crate::utils::is_safe_mode;
+use crate::{
+    assets, defs, ksucalls, metamodule, restorecon,
+    utils::{self},
+};
+use anyhow::{Context, Result};
+use log::{error, info, warn};
+use std::{path::Path, time::Instant};
+
+/// Module stages handled by esud when the Android dynamic runtime is available.
+/// PID-1 runs the ESP early/recovery scripts separately, before Android handoff.
+#[derive(Clone, Copy, Debug)]
+pub enum Stage {
+    Early,
+    PostFs,
+    PostFsData,
+    Service,
+    BootCompleted,
+    Recovery,
+    PostMount,
+}
+
+impl Stage {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Early => "early",
+            Self::PostFs => "post-fs",
+            Self::PostFsData => "post-fs-data",
+            Self::Service => "service",
+            Self::BootCompleted => "boot-completed",
+            Self::Recovery => "recovery",
+            Self::PostMount => "post-mount",
+        }
+    }
+}
+
+pub fn on_stage(stage: Stage) -> Result<()> {
+    match stage {
+        Stage::Early => {
+            // Lab-only and bootconfig-armed; first, so a stall inside Early is covered.
+            crate::boot_watchdog::arm();
+            // This is a mandatory synchronous prerequisite for early_hal.
+            // Unlike optional later scripts, errors must reach init's
+            // reboot_on_failure service, never become a warning and continue.
+            ksucalls::ensure_uapi_version_matched()?;
+            anyhow::ensure!(
+                ksucalls::get_info().boot_mode == 1,
+                "early platform stage requires PID1's Android boot selection"
+            );
+            // Reuse the same ROM contract as PID1, not a parallel runtime
+            // generation/mode manifest. Both generation and managed are strict.
+            let root = esu_platform::open_root(Path::new(esu_platform::ROOT))?;
+            let rom = crate::rom_isolation::installed_rom_in(&root)?;
+            assets::ensure_binaries(true).context("prepare early stage interpreter")?;
+            if rom.managed {
+                let helper = format!("{}/{}", esu_platform::ROOT, esu_platform::HELPER);
+                let mut binary = esu_platform::open_file(&root, esu_platform::HELPER)?;
+                esu_platform::check_artifact(&mut binary, esu_platform::generation::generation())?;
+                let _core_fd = ksucalls::duplicate_driver_fd_for_child()
+                    .context("prepare inherited esu control descriptor")?;
+                let status = std::process::Command::new(helper)
+                    .status()
+                    .context("start tiny-espsu")?;
+                anyhow::ensure!(status.success(), "tiny-espsu failed: {status}");
+            }
+            if let Err(error) = crate::rom_isolation::early(&rom) {
+                // The service is reboot_on_failure: leave the reason in the
+                // state root before init reboots, or the boot ends silently.
+                crate::rom_isolation::report(&format!(
+                    "ROM isolation early stage failed: {error:#}"
+                ));
+                return Err(error.context("ROM isolation early stage"));
+            }
+            run_stage(
+                stage.name(),
+                ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT),
+            );
+            Ok(())
+        }
+        Stage::PostFsData => on_post_fs_data(),
+        Stage::Service => {
+            on_services();
+            Ok(())
+        }
+        Stage::BootCompleted => {
+            on_boot_completed();
+            Ok(())
+        }
+        Stage::PostFs | Stage::Recovery | Stage::PostMount => {
+            if let Err(e) = ksucalls::ensure_uapi_version_matched() {
+                error!("{e:#}, skip {}", stage.name());
+                return Ok(());
+            }
+
+            // These synchronous stages share one deadline across common,
+            // metamodule and active-module scripts, just like post-fs-data.
+            run_stage(
+                stage.name(),
+                ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT),
+            );
+
+            Ok(())
+        }
+    }
+}
+
+pub fn on_post_fs_data() -> Result<()> {
+    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
+        error!("{e:#}, skip on_post_fs_data");
+        return Ok(());
+    }
+
+    ksucalls::report_post_fs_data();
+
+    utils::umask(0);
+
+    // Per-ROM isolation that needs `/data`: the gatekeeper first-boot marker.
+    // Failures are recorded and never fatal, unlike the early stage.
+    match crate::rom_isolation::installed_rom() {
+        Ok(rom) => {
+            if let Err(error) = crate::rom_isolation::post_fs_data(&rom) {
+                crate::rom_isolation::report(&format!(
+                    "ROM isolation post-fs-data failed: {error:#}"
+                ));
+            }
+        }
+        Err(error) => crate::rom_isolation::report(&format!(
+            "ROM isolation configuration unavailable: {error:#}"
+        )),
+    }
+
+    // Clear all temporary module configs early
+    if let Err(e) = crate::module_config::clear_all_temp_configs() {
+        warn!("clear temp configs failed: {e}");
+    }
+
+    let _ = catch_bootlog("logcat", &["logcat", "-b", "all"]);
+    let _ = catch_bootlog("dmesg", &["dmesg", "-w", "-r"]);
+
+    if utils::has_magisk() {
+        warn!("Magisk detected, skip post-fs-data!");
+        return Ok(());
+    }
+
+    let safe_mode = crate::utils::is_safe_mode();
+    let wait = ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT);
+
+    if safe_mode {
+        // we should still ensure module directory exists in safe mode
+        // because we may need to operate the module dir in safe mode
+        warn!("safe mode, skip common post-fs-data.d scripts");
+    } else {
+        // Then exec common post-fs-data scripts
+        if let Err(e) =
+            crate::module::exec_common_scripts(&format!("{}.d", Stage::PostFsData.name()), wait)
+        {
+            warn!("exec common post-fs-data scripts failed: {e}");
+        }
+    }
+
+    let module_dir = defs::MODULE_DIR;
+
+    assets::ensure_binaries(true).with_context(|| "Failed to extract bin assets")?;
+
+    // if we are in safe mode, we should disable all modules
+    if safe_mode {
+        warn!("safe mode, skip post-fs-data scripts and disable all modules!");
+        if let Err(e) = crate::module::disable_all_modules() {
+            warn!("disable all modules failed: {e}");
+        }
+        return Ok(());
+    }
+
+    if let Err(e) = handle_updated_modules() {
+        warn!("handle updated modules failed: {e}");
+    }
+
+    if let Err(e) = prune_modules() {
+        warn!("prune modules failed: {e}");
+    }
+
+    // Refresh /metadata/esu/initrc/modules.rc so the next boot's kernel hook sees the
+    // current module set. Acts as a safety net when state was changed outside
+    // of esud's normal mutation commands.
+    if let Err(e) = crate::module::regenerate_preinit_rc() {
+        warn!("regenerate preinit rc failed: {e}");
+    }
+
+    if let Err(e) = restorecon::restorecon() {
+        warn!("restorecon failed: {e}");
+    }
+
+    // load sepolicy.rule
+    if crate::module::load_sepolicy_rule().is_err() {
+        warn!("load sepolicy.rule failed");
+    }
+
+    // load feature config
+    if is_safe_mode() {
+        warn!("safe mode, skip load feature config");
+    } else if let Err(e) = crate::feature::init_features() {
+        warn!("init features failed: {e}");
+    }
+
+    // execute metamodule post-fs-data script first (priority)
+    if let Err(e) = metamodule::exec_stage_script(Stage::PostFsData.name(), wait) {
+        warn!("exec metamodule post-fs-data script failed: {e}");
+    }
+
+    // exec modules post-fs-data scripts
+    if let Err(e) = crate::module::exec_stage_script(Stage::PostFsData.name(), wait) {
+        warn!("exec post-fs-data scripts failed: {e}");
+    }
+
+    // load system.prop
+    if let Err(e) = crate::module::load_system_prop() {
+        warn!("load system.prop failed: {e}");
+    }
+
+    // execute metamodule mount script
+    if let Err(e) = metamodule::exec_mount_script(module_dir) {
+        warn!("execute metamodule mount failed: {e}");
+    }
+
+    run_stage(Stage::PostMount.name(), wait);
+
+    std::env::set_current_dir("/").with_context(|| "failed to chdir to /")?;
+
+    Ok(())
+}
+
+pub fn run_stage(stage: &str, wait: ScriptWait) {
+    utils::umask(0);
+
+    if utils::has_magisk() {
+        warn!("Magisk detected, skip {stage}");
+        return;
+    }
+
+    if crate::utils::is_safe_mode() {
+        warn!("safe mode, skip {stage} scripts");
+        return;
+    }
+
+    if let Err(e) = crate::module::exec_common_scripts(&format!("{stage}.d"), wait) {
+        warn!("Failed to exec common {stage} scripts: {e}");
+    }
+
+    // execute metamodule stage script first (priority)
+    if let Err(e) = metamodule::exec_stage_script(stage, wait) {
+        warn!("Failed to exec metamodule {stage} script: {e}");
+    }
+
+    // execute regular modules stage scripts
+    if let Err(e) = crate::module::exec_stage_script(stage, wait) {
+        warn!("Failed to exec {stage} scripts: {e}");
+    }
+}
+
+pub fn on_services() {
+    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
+        error!("{e:#}, skip on_services");
+        return;
+    }
+
+    match ksucalls::report_services() {
+        Ok(true) => {}
+        Ok(false) => {
+            info!("services already started, skipping");
+            return;
+        }
+        Err(e) => {
+            error!("Failed to report services: {e:#}");
+            return;
+        }
+    }
+
+    info!("on_services triggered!");
+    run_stage(Stage::Service.name(), ScriptWait::NoWait);
+}
+
+pub fn on_boot_completed() {
+    if let Err(e) = ksucalls::ensure_uapi_version_matched() {
+        error!("{e:#}, skip on_boot_completed");
+        return;
+    }
+
+    ksucalls::report_boot_complete();
+    info!("on_boot_completed triggered!");
+
+    run_stage(Stage::BootCompleted.name(), ScriptWait::NoWait);
+}
+
+fn catch_bootlog(logname: &str, command: &[&str]) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let logdir = Path::new(defs::BOOTLOG_DIR);
+    utils::ensure_dir_exists(logdir)?;
+    let bootlog = logdir.join(format!("{logname}.log"));
+    let oldbootlog = logdir.join(format!("{logname}.old.log"));
+
+    if bootlog.exists() {
+        std::fs::rename(&bootlog, oldbootlog)?;
+    }
+
+    let bootlog = std::fs::File::create(bootlog)?;
+
+    let mut args = vec!["-s", "9", defs::BOOTLOG_TIMEOUT];
+    args.extend_from_slice(command);
+    // timeout -s 9 30s logcat > boot.log
+    let result = unsafe {
+        std::process::Command::new("timeout")
+            .process_group(0)
+            .pre_exec(|| {
+                utils::switch_cgroups();
+                Ok(())
+            })
+            .args(args)
+            .stdout(Stdio::from(bootlog))
+            .spawn()
+    };
+
+    if let Err(e) = result {
+        warn!("Failed to start logcat: {e:#}");
+    }
+
+    Ok(())
+}

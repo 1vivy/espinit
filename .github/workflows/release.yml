@@ -21,30 +21,30 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v8
 
-      - name: Rename espinitd
+      - name: Rename esud
         run: |
-          mkdir -p espinitd
-          for dir in ./espinitd-*; do
+          mkdir -p esud
+          for dir in ./esud-*; do
             if [ -d "$dir" ]; then
                 echo "----- Rename $dir -----"
-                espinitd_platform_name=$(basename "$dir")
-                if [ -f "$dir/espinitd" ]; then
-                  mv "$dir/espinitd" "espinitd/$espinitd_platform_name"
-                elif [ -f "$dir/espinitd.exe" ]; then
-                  mv "$dir/espinitd.exe" "espinitd/$espinitd_platform_name.exe"
+                esud_platform_name=$(basename "$dir")
+                if [ -f "$dir/esud" ]; then
+                  mv "$dir/esud" "esud/$esud_platform_name"
+                elif [ -f "$dir/esud.exe" ]; then
+                  mv "$dir/esud.exe" "esud/$esud_platform_name.exe"
                 fi
             fi
           done
 
-      - name: Rename espinit
+      - name: Rename esuinit
         run: |
-          mkdir -p espinit
-          for dir in ./espinit-*; do
+          mkdir -p esuinit
+          for dir in ./esuinit-*; do
             if [ -d "$dir" ]; then
                 echo "----- Rename $dir -----"
-                espinit_platform_name=$(basename "$dir")
-                if [ -f "$dir/espinit" ]; then
-                  mv "$dir/espinit" "espinit/$espinit_platform_name"
+                esuinit_platform_name=$(basename "$dir")
+                if [ -f "$dir/esuinit" ]; then
+                  mv "$dir/esuinit" "esuinit/$esuinit_platform_name"
                 fi
             fi
           done
@@ -52,19 +52,19 @@ jobs:
       - name: Rename phone LVM activator
         run: |
           mkdir -p thin-activate
-          mv ./espinit-aarch64/thin-activate \
+          mv ./esuinit-aarch64/thin-activate \
             thin-activate/thin-activate-aarch64-linux-android
 
       - name: Rename lkm
         run: |
           mkdir -p lkm
-          for dir in ./*-android*-espinit-lkm; do
+          for dir in ./*-android*-esu-lkm; do
             if [ -d "$dir" ]; then
                 echo "----- Rename $dir -----"
                 lkm_platform_name=$(basename "$dir")
-                lkm_target="${lkm_platform_name%-espinit-lkm}"
+                lkm_target="${lkm_platform_name%-esu-lkm}"
                 lkm_kmi="${lkm_target#*-}"
-                mv "$dir/${lkm_kmi}_espinit.ko" "lkm/lkm-${lkm_target}_espinit.ko"
+                mv "$dir/${lkm_kmi}_kernelesp.ko" "lkm/lkm-${lkm_target}_kernelesp.ko"
             fi
           done
 
@@ -75,7 +75,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            espinit/*
-            espinitd/*
+            esuinit/*
+            esud/*
             thin-activate/*
-            lkm/lkm-*_espinit.ko
+            lkm/lkm-*_kernelesp.ko

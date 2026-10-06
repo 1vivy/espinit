@@ -1,4 +1,4 @@
-# `modules/thin` — espinit `thin.ko`
+# `modules/thin` — esu `thin.ko`
 
 A separate **GPL-2.0-only** out-of-tree kernel module that provides the
 device-mapper `thin-pool` and `thin` targets the multi-ROM thin-storage layout
@@ -6,7 +6,7 @@ needs. It is vendored from the Linux kernel dm-thin family and forked to use
 only exported KMI surface; `PROVENANCE.md` records the exact origin, file set,
 patch and proof evidence.
 
-`thin.ko` is aggregated with, never linked into, the GPL-3.0 espinit core. The
+`thin.ko` is aggregated with, never linked into, the GPL-3.0 esu core. The
 repository's top-level `LICENSE` is GPL-3.0 and does **not** cover this subtree:
 see `LICENSE` here (the verbatim GPL-2.0 text) and the `GPL-2.0-only` SPDX
 headers of every vendored file.
@@ -17,8 +17,8 @@ headers of every vendored file.
 | --- | --- |
 | Module file | `thin.ko`, built in this directory |
 | Module name | `thin` (from `obj-m := thin.o`); the ESP manifest `modules[].name` must be `thin` |
-| Description | `espinit thin provisioning targets (thin-pool, thin)` |
-| Author | `espinit` |
+| Description | `esu thin provisioning targets (thin-pool, thin)` |
+| Author | `esu` |
 | License | `GPL v2` in `thin-main.c`; the vendored files keep their upstream `MODULE_LICENSE("GPL")` boilerplate, all GPL-2-compatible (see `PROVENANCE.md`) |
 | Device-mapper targets | `thin-pool` (v1.23.0) and `thin` (v1.23.0), names unchanged from the proven build |
 
@@ -28,14 +28,14 @@ kernel device-mapper symbols, and the proven two-target registration is
 unchanged.
 
 The ESP manifest loads `thin` as an ordinary later module — `name = "thin"`,
-`path = "modules/thin.ko"` — listed after the `espinit` core and before `gpt`,
+`path = "modules/thin.ko"` — listed after the `esu` core and before `gpt`,
 since entries ordered before `gpt` run the scripts that may activate the logical
 volumes `gpt` then projects. The manifest contract is described in the
 repository `README.md`.
 
 ## Module parameters
 
-The espinit PID-1 loader self-check (`userspace/ksuinit/src/selfcheck.rs`) reads
+The esu PID-1 loader self-check (`userspace/esuinit/src/selfcheck.rs`) reads
 `/sys/module/thin/parameters/` after loading:
 
 | Parameter | Access | Value |
@@ -85,13 +85,13 @@ make -C modules/thin KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out \
 ### Build generation
 
 The generation identifies one coordinated ESP payload and must match the PID-1
-stage, the espinit core module, the espinitd daemon and every other ESP module.
-It is taken from `ESPINIT_GENERATION` when set, otherwise from the full 40-byte
+stage, the esu core module, the esud daemon and every other ESP module.
+It is taken from `ESU_GENERATION` when set, otherwise from the full 40-byte
 lowercase Git HEAD hash of this repository, and must be 1-63 ASCII
 letters/digits/`._-`. The Makefile validates it before compiling and rejects a
 missing or malformed value with the build failing, never with a truncated or
 empty generation. Keep this logic in sync with `kernel/Kbuild`,
-`userspace/ksud/build.rs` and `userspace/ksuinit/build.rs`.
+`userspace/esud/build.rs` and `userspace/esuinit/build.rs`.
 
 ## Layout
 

@@ -17,8 +17,8 @@
 
 struct selinux_policy *backup_sepolicy;
 
-static DEFINE_MUTEX(espinit_policy_lock);
-static bool espinit_policy_applied;
+static DEFINE_MUTEX(esu_policy_lock);
+static bool esu_policy_applied;
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
 extern int avc_ss_reset(u32 seqno);
@@ -26,7 +26,7 @@ extern int avc_ss_reset(u32 seqno);
 extern int avc_ss_reset(struct selinux_avc *avc, u32 seqno);
 #endif
 
-void espinit_policy_reset_avc(void)
+void esu_policy_reset_avc(void)
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
     avc_ss_reset(0);
@@ -72,14 +72,14 @@ static int prepare_backup(struct selinux_policy *source)
     return 0;
 }
 
-int espinit_policy_apply_once(espinit_policy_mutator_t mutate)
+int esu_policy_apply_once(esu_policy_mutator_t mutate)
 {
     struct selinux_policy *policy, *old_policy;
     int error;
 
-    mutex_lock(&espinit_policy_lock);
-    if (espinit_policy_applied) {
-        mutex_unlock(&espinit_policy_lock);
+    mutex_lock(&esu_policy_lock);
+    if (esu_policy_applied) {
+        mutex_unlock(&esu_policy_lock);
         return 0;
     }
 
@@ -110,12 +110,12 @@ int espinit_policy_apply_once(espinit_policy_mutator_t mutate)
     rcu_assign_pointer(selinux_state.policy, policy);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_policy);
-    espinit_policy_reset_avc();
-    espinit_policy_applied = true;
-    pr_info("espinit SELinux rules applied\n");
+    esu_policy_reset_avc();
+    esu_policy_applied = true;
+    pr_info("esu SELinux rules applied\n");
 
 out_unlock_policy:
     mutex_unlock(&selinux_state.policy_mutex);
-    mutex_unlock(&espinit_policy_lock);
+    mutex_unlock(&esu_policy_lock);
     return error;
 }

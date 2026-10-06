@@ -556,11 +556,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "espinit"
+name = "esuinit"
 version = "2.0.0"
 dependencies = [
  "anyhow",
- "espinit-platform",
+ "esu-platform",
  "goblin",
  "kernlog",
  "log",
@@ -573,7 +573,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "espinit-platform"
+name = "esu-platform"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -584,7 +584,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "espinitd"
+name = "esud"
 version = "0.1.0"
 dependencies = [
  "android-bootimg",
@@ -595,8 +595,8 @@ dependencies = [
  "const_format",
  "derive-new",
  "encoding_rs",
- "espinit",
- "espinit-platform",
+ "esuinit",
+ "esu-platform",
  "extattr",
  "getopts",
  "goblin",
@@ -690,8 +690,8 @@ name = "fw-views"
 version = "0.1.0"
 dependencies = [
  "dm",
- "espinit",
- "espinit-platform",
+ "esuinit",
+ "esu-platform",
  "libc",
 ]
 

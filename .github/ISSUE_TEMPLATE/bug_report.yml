@@ -1,5 +1,5 @@
 name: Bug report
-description: Create a report to help us improve espinit
+description: Create a report to help us improve esu
 labels: [Bug]
 
 body:
@@ -57,7 +57,7 @@ body:
         value: |
           - Device:
           - OS Version:
-          - espinit Version:
+          - esu Version:
           - Kernel Version:
     validations:
         required: true

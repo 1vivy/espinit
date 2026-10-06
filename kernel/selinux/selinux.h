@@ -5,8 +5,8 @@
 #include <linux/version.h>
 #include <linux/cred.h>
 
-#define KERNEL_SU_DOMAIN "espinit"
-#define KERNEL_SU_FILE "espinit_file"
+#define KERNEL_SU_DOMAIN "esu"
+#define KERNEL_SU_FILE "esu_file"
 
 #define KERNEL_SU_CONTEXT "u:r:" KERNEL_SU_DOMAIN ":s0"
 #define KSU_FILE_CONTEXT "u:object_r:" KERNEL_SU_FILE ":s0"
@@ -29,13 +29,13 @@ bool is_zygote(const struct cred *cred);
 
 bool is_init(const struct cred *cred);
 
-int apply_espinit_rules(void);
+int apply_esu_rules(void);
 
 int handle_sepolicy(void __user *user_data, u64 data_len);
 
 void setup_ksu_cred();
 
-// Grant the calling process the espinit domain; used when init execs espinitd.
+// Grant the calling process the esu domain; used when init execs esud.
 void escape_to_root_for_init();
 
 extern u32 ksu_file_sid;

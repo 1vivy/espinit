@@ -79,10 +79,10 @@ static bool part_is_writable_backend(const struct gpt_view *v,
 				     const struct block_device *bdev);
 static int seal_record_disk(struct gpt_view *v, struct gendisk *disk);
 static int seal_record_part(struct gpt_view *v, struct block_device *bdev);
-#ifndef ESPINIT_GENERATION
-#error "ESPINIT_GENERATION must be defined by modules/gpt/Makefile"
+#ifndef ESU_GENERATION
+#error "ESU_GENERATION must be defined by modules/gpt/Makefile"
 #endif
-static char generation[] = ESPINIT_GENERATION;
+static char generation[] = ESU_GENERATION;
 static_assert(sizeof(generation) >= 2);
 static_assert(sizeof(generation) <= 64);
 module_param_string(generation, generation, sizeof(generation), 0444);
@@ -666,7 +666,7 @@ static int apply_view(const struct gpt_apply *a)
 			goto fail;
 		}
 		queue_limits_stack_bdev(&limits, m->lower, m->offset,
-					"espinit-gpt");
+					"esu-gpt");
 	}
 	v->block_size = limits.logical_block_size;
 	if (v->block_size > PAGE_SIZE || v->block_size > 4096) {
@@ -730,7 +730,7 @@ static int apply_view(const struct gpt_apply *a)
 	}
 	v->disk->fops = &view_ops;
 	v->disk->private_data = v;
-	strscpy(v->disk->disk_name, "espinit-gpt", DISK_NAME_LEN);
+	strscpy(v->disk->disk_name, "esu-gpt", DISK_NAME_LEN);
 	set_capacity(v->disk, v->sectors);
 	err = setup_crypto(v);
 	if (err)
@@ -842,7 +842,7 @@ static int __init gpt_init(void)
 	ready = false;
 	sealed = false;
 	/* Parameters are read-only after load; also reject load-time spoofing. */
-	if (strcmp(generation, ESPINIT_GENERATION))
+	if (strcmp(generation, ESU_GENERATION))
 		return -EINVAL;
 	return misc_register(&control);
 }
@@ -858,4 +858,4 @@ static void __exit gpt_exit(void)
 module_init(gpt_init);
 module_exit(gpt_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("espinit in-memory GPT projection, ABI v2");
+MODULE_DESCRIPTION("esu in-memory GPT projection, ABI v2");

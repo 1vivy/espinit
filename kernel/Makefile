@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-PHONE_MODULE := espinit
+PHONE_MODULE := kernelesp
 
 KDIR := $(KDIR)
 MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
@@ -27,7 +27,7 @@ all: phone
 else
 all: check_symbol
 	$(MAKE) -C $(KDIR) $(KBUILD_ARGS) KBUILD_GENDWARFKSYMS_STABLE=1 modules compile_commands.json -j$(shell nproc)
-	./check_symbol $(ODIR)/espinit.ko $(KDIR)/vmlinux
+	./check_symbol $(ODIR)/kernelesp.ko $(KDIR)/vmlinux
 endif
 
 compdb:
