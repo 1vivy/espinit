@@ -32,6 +32,6 @@ include ../../scripts/phone-module.mk
 .PHONY: all modules clean
 all modules: phone
 clean:
-	@test -n "$(KERNEL_SRC)" && test -n "$(KERNEL_OUT)"
-	$(MAKE) -C "$(KERNEL_SRC)" O="$(KERNEL_OUT)" M="$(CURDIR)" clean
+	@test -n "$(KMI_SRC)" && test -n "$(KMI_OUT)"
+	$(MAKE) -C "$(KMI_SRC)" O="$(KMI_OUT)" M="$(CURDIR)" clean
 endif

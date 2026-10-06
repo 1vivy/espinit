@@ -52,33 +52,29 @@ init order and every failure-unwind branch are unchanged.
 
 Prerequisites:
 
-- the exact target source, complete build output (`vmlinux`, `Module.symvers`,
-  generated headers), and an independently captured full phone config.
-  `modules_prepare` alone is insufficient. The phone uses `CONFIG_MODVERSIONS=y`,
-  `CONFIG_GENDWARFKSYMS=y` and `CONFIG_TRIM_UNUSED_KSYMS=y`.
+- ACK android16-6.12 generation-6 source and complete GKI output with the
+  published export whitelist (`Module.symvers`, `System.map`, generated headers).
+  `modules_prepare` alone is insufficient.
 - a clang/LLVM toolchain matching that kernel (`LLVM=1` is always used).
 
 ```sh
-KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out \
-    KERNEL_CONFIG=/path/to/captured-phone.config modules/thin/build.sh
+KMI_SRC=/path/to/kernel KMI_OUT=/path/to/out modules/thin/build.sh
 ```
 
 or directly:
 
 ```sh
-make -C modules/thin KERNEL_SRC=/path/to/kernel KERNEL_OUT=/path/to/out \
-    KERNEL_CONFIG=/path/to/captured-phone.config [JOBS=1..13]
+make -C modules/thin KMI_SRC=/path/to/kernel KMI_OUT=/path/to/out [JOBS=1..13]
 ```
 
-- All three modules use the [shared phone contract](../../README.md#build-notes).
-  `KERNEL_SRC`, `KERNEL_OUT` and `KERNEL_CONFIG` are required; mismatched full
-  configuration or stale generated configuration fails before compilation.
+- All four modules use the [shared KMI contract](../../README.md#build-notes).
+  `KMI_SRC` and `KMI_OUT` are required; no independent full config is needed.
 - `JOBS` defaults to 13 and is capped at 13; phone builds use `ARCH=arm64`.
 - `KBUILD_GENDWARFKSYMS_STABLE=1` is always passed and old module objects are
   cleaned first. Disabling MODVERSIONS or inserting empty versions is forbidden.
-- Unresolved symbols are never tolerated for thin: modpost must pass without
-  `KBUILD_MODPOST_WARN`. Real import CRCs including `module_layout`, export CRCs,
-  exact vermagic and target BTF settings are verified after build.
+- `KBUILD_MODPOST_WARN=1` allows non-KMI imports, but admission requires them
+  in `System.map`. Every version CRC (including `module_layout`) must match
+  `Module.symvers`; vermagic flags, not its release token, are enforced.
 - Keep the generated `thin.ko.compat.json` beside `thin.ko` when copying it to a
   payload. The assembler checks the receipt and module again before packaging.
 
@@ -102,7 +98,7 @@ empty generation. Keep this logic in sync with `kernel/Kbuild`,
 | `src/persistent-data/` | vendored persistent-data helpers (btree, bitset, array, block/space maps, transaction manager) |
 | `private-rename.h` | private `thinpool_private_*` renames for every non-exported symbol |
 | `Makefile` | kbuild module description, include paths, generation validation/injection, bounded out-of-tree build wrapper |
-| `build.sh` | scripted entry point for the same build with required `KERNEL_SRC`/`KERNEL_OUT` |
+| `build.sh` | scripted entry point for the same build with required `KMI_SRC`/`KMI_OUT` |
 | `patches/0001-fork-dm-thin-for-exported-KMI-surface.patch` | the fork that adapts the vendored sources to the exported KMI |
 | `evidence/phone-d3144fcc5f04/` | frozen pre-import phone artifact, its import/modversion manifests and record summary |
 | `PROVENANCE.md` | origin, exact file set with hashes, modifications, proof evidence, licensing |

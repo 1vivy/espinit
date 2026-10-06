@@ -365,8 +365,10 @@ pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
         .context("Cannot parse kallsyms")?;
     }
 
-    for name in unresolved_symbols.keys() {
-        log::warn!("Cannot find symbol: {}", name);
+    if !unresolved_symbols.is_empty() {
+        let mut missing: Vec<_> = unresolved_symbols.keys().map(String::as_str).collect();
+        missing.sort_unstable();
+        anyhow::bail!("Cannot find kernel symbols: {}", missing.join(", "));
     }
 
     let mut kmsg = match open_kmsg_at_end() {

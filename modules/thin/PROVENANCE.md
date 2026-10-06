@@ -166,10 +166,9 @@ Only the build and metadata surface changed; the vendored `.c`/`.h` files and
   (`-I$(srctree)/drivers/md`, `-I$(src)/src`,
   `-I$(src)/src/persistent-data`, `-include $(src)/private-rename.h`), performs
   the build-time generation validation/injection, builds only out of tree from
-  caller-provided `KERNEL_SRC`/`KERNEL_OUT` and independent `KERNEL_CONFIG`,
-  with `JOBS` capped at 13, and carries
-  only warning-compatibility flags accepted or harmless across the pinned Clang
-  versions.
+  caller-provided `KMI_SRC`/`KMI_OUT` for android16-6.12 generation 6,
+  with `JOBS` capped at 13. The shared gate admits matching version CRCs and
+  non-versioned imports present in `System.map`.
 - `build.sh`, `README.md`, `PROVENANCE.md`, `LICENSE` and `evidence/` are new.
   `LICENSE` is the proof kernel tree's `LICENSES/preferred/GPL-2.0` file copied
   byte for byte (SHA-256

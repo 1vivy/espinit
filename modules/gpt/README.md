@@ -1,11 +1,11 @@
 # In-memory GPT projection
 
-This GPL-2.0-only external module targets Linux 6.12. Build against the exact
-kernel output and exported-symbol metadata used by the payload:
+This GPL-2.0-only external module targets ACK android16-6.12 generation 6.
+Build against the complete KMI output used by the payload:
 
 ```sh
-make -C modules/gpt KERNEL_SRC=/path/to/exact/source KERNEL_OUT=/path/to/exact/output \
-    KERNEL_CONFIG=/path/to/captured-phone.config ESU_GENERATION=payload-generation
+make -C modules/gpt KMI_SRC=/path/to/source KMI_OUT=/path/to/output \
+    ESU_GENERATION=payload-generation
 ```
 
 Load `gpt.ko` without a generation override. `/dev/gptctl` is a root-only misc
@@ -137,11 +137,10 @@ blk_crypto_intersect_capabilities
 blk_crypto_profile_destroy
 ```
 
-The shared phone recipe enables `KBUILD_MODPOST_WARN=1` for these deliberate
-non-KMI imports and then runs `scripts/phone_modules.py` against the exact
-configured output and `vmlinux`. It requires genuine nonempty import versions,
-including `module_layout`, checks every available import CRC against the target
-`Module.symvers`, and proves every undefined import is defined in that image.
+The shared KMI recipe enables `KBUILD_MODPOST_WARN=1` for these deliberate
+non-KMI imports and then runs `scripts/kmi_modules.py`. It requires genuine
+nonempty import versions including `module_layout`, checks every CRC against
+`Module.symvers`, and proves every non-versioned import exists in `System.map`.
 Gpt exports nothing and therefore needs no `__kcrctab`. This exemption never
 applies to import versions. The existing kallsyms relocation loader handles the
 non-KMI imports; it cannot repair ABI/config or missing export CRCs. See the

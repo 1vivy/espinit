@@ -21,8 +21,8 @@ $(info -- KBUILD_ARGS: $(KBUILD_ARGS))
 
 .PHONY: all compdb clean format check-format
 
-# KDIR remains the non-phone DDK lane; phone builds never infer a host kernel.
-ifneq ($(strip $(KERNEL_SRC)$(KERNEL_OUT)$(KERNEL_CONFIG)),)
+# KDIR remains the non-phone DDK lane; KMI builds never infer a host kernel.
+ifneq ($(strip $(KMI_SRC)$(KMI_OUT)),)
 all: phone
 else
 all: check_symbol

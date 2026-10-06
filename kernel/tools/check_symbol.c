@@ -1,5 +1,5 @@
-/* DDK import-resolution diagnostic only. Phone payload admission, including
- * real modversions and export CRCs, is owned by scripts/phone_modules.py.
+/* DDK import-resolution diagnostic only. Phone payload KMI admission is owned
+ * by scripts/kmi_modules.py.
  */
 #include <stdio.h>
 #include <stdlib.h>

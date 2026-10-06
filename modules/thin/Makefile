@@ -7,10 +7,10 @@
 # tree, so the kernel sources and their build output directory are provided by
 # the caller:
 #
-#   make -C modules/thin KERNEL_SRC=<source> KERNEL_OUT=<output> KERNEL_CONFIG=<capture>
+#   make -C modules/thin KMI_SRC=<source> KMI_OUT=<output>
 #
 # modules/thin/build.sh wraps the same invocation for scripted use. JOBS
-# defaults to 13 and is capped at 13; architecture follows the target config.
+# defaults to 13 and is capped at 13; the KMI architecture is arm64.
 
 # Build generation identity
 #
@@ -98,7 +98,7 @@ include ../../scripts/phone-module.mk
 all modules: phone
 
 clean:
-	@test -n "$(KERNEL_SRC)" && test -n "$(KERNEL_OUT)"
-	$(MAKE) -C "$(KERNEL_SRC)" O="$(KERNEL_OUT)" M="$(CURDIR)" clean
+	@test -n "$(KMI_SRC)" && test -n "$(KMI_OUT)"
+	$(MAKE) -C "$(KMI_SRC)" O="$(KMI_OUT)" M="$(CURDIR)" clean
 
 endif
