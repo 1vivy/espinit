@@ -1,10 +1,7 @@
 #[cfg(target_os = "android")]
 mod android;
-#[path = "../../../userspace/esu-platform/src/generation.rs"]
-mod generation;
 
 fn main() {
-    let _ = generation::generation();
     #[cfg(target_os = "android")]
     if let Err(error) = android::run() {
         eprintln!("boot-hal: {error}");

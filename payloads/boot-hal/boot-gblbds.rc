@@ -1,8 +1,0 @@
-# Core appends this override while parsing init.rc. tiny-espsu labels and binds
-# the source executable synchronously during early-init, before early_hal.
-service vendor.boot-qti /vendor/bin/hw/android.hardware.boot-service.qti
-    override
-    class early_hal
-    user root
-    group root
-    interface aidl android.hardware.boot.IBootControl/default

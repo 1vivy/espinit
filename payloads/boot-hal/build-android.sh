@@ -2,7 +2,6 @@
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 : "${ESU_NDK:?Set ESU_NDK to an Android NDK with API 35}"
-: "${ESU_GENERATION:?Set the exact payload generation}"
 ndk=$ESU_NDK
 llvm="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
 test -x "$llvm/bin/aarch64-linux-android35-clang"

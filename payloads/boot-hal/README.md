@@ -10,16 +10,16 @@ From the product worktree:
 
 ```sh
 cargo +nightly-2026-08-08 test --manifest-path payloads/boot-hal/Cargo.toml --locked --offline --jobs 3
-ESU_NDK=/path/to/android-ndk-r29 ESU_GENERATION=release-1 \
-  bash payloads/boot-hal/build-android.sh
+ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh
 ```
 
 The build uses the explicitly supplied NDK, API 35 and the installed
 `aarch64-linux-android` Rust target. Output:
 `payloads/boot-hal/target/aarch64-linux-android/release/gblbds-boot-hal`.
-The ESP package installs it as
-`/metadata/esu/modules/boot-hal/android.hardware.boot-service.gblbds`.
-It carries the same retained `.note.esu` generation as PID1/esud/tiny-espsu.
+The packager installs it under the read-only ESP module tree at
+`/esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`.
+There is no ELF generation note; `esu/build-id` and cpio `/esu-build-id`
+identify the complete payload, and a mismatch is logged rather than pinned.
 
 Rust, the state machine and shared `esu-platform` are **statically linked**. Binder
 uses the platform `libbinder_ndk.so` C ABI; no AOSP build tree, generated AIDL
@@ -47,23 +47,22 @@ BCB/bootloader-control bytes and valid V2 VAB reserved bytes.
 
 ## Installation and identity
 
-The ESP `boot-hal/module.toml` declares the executable and `boot-gblbds.rc`.
-PID1 installs the exact-generation package atomically after GPT projection and
-generates `/metadata/esu/initrc/modules.rc`. The core appends this override
-while Android parses init.rc. Its mandatory synchronous on-init service runs
-`esud early` after ueventd coldboot and before `class early_hal` can start.
-tiny-espsu labels the actual source inode and binds it over
-`/vendor/bin/hw/android.hardware.boot-service.qti`; it does not modify vendor
-storage or use a shell, arbitrary command, app-root API or generic policy loader.
+The ESP `boot-hal/module.prop` declares this ordinary KernelSU module.
+`esu/modules/boot-hal/attrs` supplies mode 0755, root:shell ownership and
+the stock target's `hal_bootctl_default_exec` label. During `esud early`,
+the file is copied to `/dev/esu/boot-hal/vendor/bin/hw/` on tmpfs and a
+read-only overlay is mounted over `/vendor` (module lowerdir first, stock
+`/vendor` last). Stock `vendor.boot-qti` init rc and VINTF manifest remain
+unchanged, so the stock entrypoint and `hal_bootctl_default` domain transition
+apply; there is no override rc, bind-mounted metadata executable or
+`tiny-espsu`. The module's `sepolicy.rule` grants that existing domain
+read/write access to `esu_file` efivarfs variables, not the raw bdsvars
+block device.
 
-- Init name: **`vendor.boot-qti`**, `override`, `class early_hal`, root/root.
+- Init service: stock **`vendor.boot-qti`**, `class early_hal`, root/root.
 - Binder identity: **`android.hardware.boot.IBootControl/default`**.
 - Version: **1**; hash: **`2400346954240a5de495a1debc81429dd012d7b7`**.
 - Keep the existing VINTF manifest unchanged; no second service is registered.
-- Label the bound source inode `gblbds_hal_exec`; policy transitions init into
-  existing `hal_bootctl_default`. Do not use an explicit rc `seclabel` to bypass
-  the entrypoint contract. Existing misc access remains; the HAL accesses EFI
-  variables through `/dev/efivars`, not the raw bdsvars block device.
 - The HAL opens only project efivarfs variables and `/dev/block/by-name/misc`;
   never a whole LU, GPT, UFS sysfs node, boot partition or firmware partition.
 
@@ -82,17 +81,18 @@ Storage/identity/misc failure never prevents registration: initial mirror repair
 is best effort and deferred to the next state-dependent transaction on failure.
 Current-slot, slot-count, suffix and frozen version/hash replies remain available.
 
-Recovery retains its projection and recovery scripts but stages only explicitly
-listed `platform.recovery_packages`; the normal HAL and tiny-espsu are excluded.
+Recovery retains its projection and `pid1-recovery.sh` scripts for modules
+marked `recovery-ok`; the normal Boot HAL overlay is not applied there.
 No native writer is invoked as a fallback. The source capture also contained
 HIDL 1.0-1.2 implementations: recovery AIDL/HIDL parity and device-specific
-suppression of stock activation routes are unproven integration prerequisites.
+suppression of stock activation routes remain unproved integration prerequisites.
 This port does not intercept OTA payload writes; esu's partition projection
 is mandatory before any managed OTA.
 
 Integration must permit project efivarfs reads/writes and existing misc access.
-The HAL uses only an in-process Mutex, not block-device `flock`. The bound HAL
-source on nosuid metadata still requires the existing process transition policy.
+The HAL uses only an in-process Mutex, not block-device `flock`. Its executable
+on the tmpfs lowerdir must retain the stock `hal_bootctl_default_exec` label;
+device SELinux/overlay proof remains open.
 
 ## Variable namespace and wire layout
 
