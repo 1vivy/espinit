@@ -12,6 +12,7 @@
 )]
 
 mod assets;
+mod boot_watchdog;
 #[cfg(target_os = "android")]
 mod cli;
 #[cfg(target_os = "android")]

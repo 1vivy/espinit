@@ -44,6 +44,13 @@ enum Commands {
     /// Emulate system reboot
     SoftReboot,
 
+    /// Lab-only stalled-boot watchdog (spawned by `early` from bootconfig)
+    #[command(hide = true)]
+    BootWatchdog {
+        /// deadline in seconds
+        seconds: u64,
+    },
+
     /// Load a kernel module with kallsyms access
     Insmod {
         /// kernel module path
@@ -371,6 +378,7 @@ pub fn run() -> Result<()> {
         Commands::Recovery => init_event::on_stage(init_event::Stage::Recovery),
 
         Commands::SoftReboot => crate::soft_reboot::soft_reboot(),
+        Commands::BootWatchdog { seconds } => crate::boot_watchdog::run(seconds),
 
         Commands::Insmod { module, params } => debug::insmod(&module, &params),
 
