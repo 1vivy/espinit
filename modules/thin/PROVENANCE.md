@@ -154,19 +154,16 @@ Only the build and metadata surface changed; the vendored `.c`/`.h` files and
   as in the proven bundle, so a linked `thin.ko` carries several `.modinfo`
   license strings; all of them are GPL-2-compatible, and the esu boundary
   declaration is `thin-main.c`'s `GPL v2`.
-- `thin-main.c` now requires `ESU_GENERATION` at compile time, rejects a
-  load-time generation override, and exposes the two read-only parameters the
-  esu self-check reads: `generation` (the compiled build generation) and
-  `ready` (`Y` only after all subsystems and both targets initialized, `N` again
+- `thin-main.c` exposes the read-only `ready` parameter
+  (`Y` only after all subsystems and both targets initialized, `N` again
   as soon as unload teardown starts). Empty `__versions` scaffolding has been
   removed: phone builds require genuine import/export CRCs from the exact
   MODVERSIONS-enabled target output and the shared compatibility verifier.
   The proven subsystem init order and every failure-unwind branch are unchanged.
 - `Makefile` is new: it keeps the proven object list, include paths
   (`-I$(srctree)/drivers/md`, `-I$(src)/src`,
-  `-I$(src)/src/persistent-data`, `-include $(src)/private-rename.h`), performs
-  the build-time generation validation/injection, builds only out of tree from
-  caller-provided `KMI_SRC`/`KMI_OUT` for android16-6.12 generation 6,
+  `-I$(src)/src/persistent-data`, `-include $(src)/private-rename.h`), builds
+  only out of tree from caller-provided `KMI_SRC`/`KMI_OUT` for android16-6.12 generation 6,
   with `JOBS` capped at 13. The shared gate admits matching version CRCs and
   non-versioned imports present in `System.map`.
 - `build.sh`, `README.md`, `PROVENANCE.md`, `LICENSE` and `evidence/` are new.
@@ -194,6 +191,5 @@ generation/ready ABI. See `evidence/phone-d3144fcc5f04/README.md`.
 
 ## 6. Rebuilding
 
-See `README.md` in this directory. The generation is compiled in, so a rebuilt
-`thin.ko` is a different artifact than the historical evidence file even when
-the vendored sources are identical.
+See `README.md` in this directory. A rebuilt `thin.ko` includes the current
+readiness interface, unlike the historical evidence artifact.

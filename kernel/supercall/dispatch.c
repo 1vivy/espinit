@@ -22,18 +22,6 @@
 #include "runtime/esud.h"
 
 /*
- * Build generation of the core module. kernel/Kbuild derives it from
- * ESU_GENERATION or from the full Git HEAD hash and fails the build for a
- * missing, oversized or non-ASCII value, so the copy below can never silently
- * truncate: a Kbuild regression becomes a compile error instead.
- */
-#ifndef ESU_GENERATION
-#error "ESU_GENERATION is not defined: kernel/Kbuild must define it"
-#endif
-
-static const char ksu_build_generation[] = ESU_GENERATION;
-
-/*
  * Core readiness.
  *
  * The kernel marks a module MODULE_STATE_LIVE only after its init function
@@ -61,8 +49,6 @@ static int do_get_info(void __user *arg)
 {
     struct ksu_get_info_cmd cmd = { .version = KERNEL_SU_VERSION, .flags = 0 };
 
-    BUILD_BUG_ON(sizeof(ksu_build_generation) > sizeof(cmd.generation));
-
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
 #endif
@@ -74,13 +60,6 @@ static int do_get_info(void __user *arg)
     if (ksu_core_ready()) {
         cmd.state |= ESU_STATE_READY;
     }
-
-    /*
-     * The designated initializer above leaves the whole field zeroed, so this
-     * copy always yields a NUL-terminated ASCII string inside the fixed-width
-     * generation field.
-     */
-    memcpy(cmd.generation, ksu_build_generation, sizeof(ksu_build_generation));
 
     if (copy_to_user(arg, &cmd, sizeof(cmd))) {
         pr_err("get_version: copy_to_user failed\n");

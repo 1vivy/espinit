@@ -1,12 +1,10 @@
-//! Stage the exact daemon for every boot; managed boots require verified projection first.
-use crate::config::{Manifest, RomConfig};
+//! Publish boot mode and ESP module init RC before real-init handoff.
 use crate::receipt::{Failure, Stage};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
-/// Publish the PID1-classified mode after the core passes its generation check.
-/// The core accepts this only from global PID1 and cannot switch modes later.
 pub(crate) fn select_core_boot_mode() -> Result<(), Failure> {
     let mode = if crate::scripts::is_recovery() { 2 } else { 1 };
     let result = (|| -> Result<()> {
@@ -26,74 +24,203 @@ pub(crate) fn select_core_boot_mode() -> Result<(), Failure> {
     })
 }
 
-pub fn stage(payload: &Path, manifest: &Manifest, rom: &RomConfig) -> Result<(), Failure> {
-    stage_payload(payload, manifest, rom).map_err(|error| {
+pub const MAX_MODULE_RC: usize = 65536;
+
+/// Validate every listed ESP module, including modules excluded in recovery.
+pub fn validate_modules(payload: &Path, order: &[String]) -> Result<(), Failure> {
+    let root = esu_platform::open_root(payload).map_err(rc_error)?;
+    for id in order {
+        let relative = format!("modules/{id}/module.prop");
+        let file = esu_platform::open_file(&root, &relative).map_err(rc_error)?;
+        let mut text = String::new();
+        file.take(65537)
+            .read_to_string(&mut text)
+            .map_err(rc_error)?;
+        let mut ids = text
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .filter(|(key, _)| *key == "id")
+            .map(|(_, value)| value);
+        if text.len() > 65536 || ids.next() != Some(id.as_str()) || ids.next().is_some() {
+            return Err(Failure::new(
+                Stage::Configuration,
+                "ModuleIdMismatch",
+                relative,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rc_error(error: impl std::fmt::Display) -> Failure {
+    Failure::new(
+        Stage::Configuration,
+        "ModuleRcUnreadable",
+        error.to_string(),
+    )
+}
+
+pub fn recovery_allowed(directory: &Path) -> Result<bool, Failure> {
+    match fs::symlink_metadata(directory.join("recovery-ok")) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(rc_error("recovery-ok is not a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(rc_error(error)),
+    }
+}
+
+/// Preserve manifest precedence and lexical filename order; never truncate RC.
+pub fn module_rc(payload: &Path, order: &[String], recovery: bool) -> Result<Vec<u8>, Failure> {
+    let root = esu_platform::open_root(payload).map_err(rc_error)?;
+    let mut output = Vec::new();
+    for id in order {
+        let directory = payload.join("modules").join(id);
+        if recovery && !recovery_allowed(&directory)? {
+            continue;
+        }
+        let rc_dir = directory.join("initrc");
+        match fs::symlink_metadata(&rc_dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(rc_error(error)),
+            Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                return Err(rc_error("initrc is not a directory"));
+            }
+            Ok(_) => (),
+        }
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&rc_dir).map_err(rc_error)? {
+            let entry = entry.map_err(rc_error)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| rc_error("non-UTF8 initrc filename"))?;
+            if name.ends_with(".rc") {
+                files.push(name);
+            }
+        }
+        files.sort();
+        for name in files {
+            let relative = format!("modules/{id}/initrc/{name}");
+            let file = esu_platform::open_file(&root, &relative).map_err(rc_error)?;
+            let header = format!("# === {id}/initrc/{name} ===\n");
+            let remaining = MAX_MODULE_RC.saturating_sub(output.len());
+            if header.len() > remaining {
+                return Err(too_large());
+            }
+            output.extend_from_slice(header.as_bytes());
+            let start = output.len();
+            file.take((remaining - header.len() + 1) as u64)
+                .read_to_end(&mut output)
+                .map_err(rc_error)?;
+            if output.len() > MAX_MODULE_RC {
+                return Err(too_large());
+            }
+            let contents = &output[start..];
+            let text = std::str::from_utf8(contents).map_err(rc_error)?;
+            if text.contains('\0') {
+                return Err(rc_error("NUL in module RC"));
+            }
+            // Keep the next header on its own line, including for files without LF.
+            if !contents.is_empty() && !contents.ends_with(b"\n") {
+                if output.len() == MAX_MODULE_RC {
+                    return Err(too_large());
+                }
+                output.push(b'\n');
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn too_large() -> Failure {
+    Failure::new(
+        Stage::Configuration,
+        "ModuleRcTooLarge",
+        "module RC exceeds 65536 bytes",
+    )
+}
+
+pub fn publish_module_rc(payload: &Path, order: &[String]) -> Result<(), Failure> {
+    let rc = module_rc(payload, order, crate::scripts::is_recovery())?;
+    crate::set_module_rc(&rc).map_err(|error| {
         Failure::new(
-            Stage::Storage,
-            "PlatformStagingFailed",
+            Stage::ModuleCheck,
+            "ModuleRcIoctlFailed",
             format!("{error:#}"),
         )
     })
 }
 
-fn stage_payload(payload: &Path, manifest: &Manifest, rom: &RomConfig) -> Result<()> {
-    let platform = manifest
-        .platform
-        .as_ref()
-        .context("every esu payload requires manifest.platform")?;
-    let recovery = crate::scripts::is_recovery();
-    let mode = if recovery {
-        esu_platform::BootMode::Recovery
-    } else if rom.managed {
-        esu_platform::BootMode::Managed
-    } else {
-        esu_platform::BootMode::Unmanaged
-    };
-    let rom_path =
-        crate::config::rom_path(manifest, &rom.id).map_err(|error| anyhow::anyhow!("{error}"))?;
-    let plan = esu_platform::plan(payload, platform, &manifest.generation, &rom_path, mode)?;
-    let device = if rom.managed {
-        let required: &[&str] = if recovery {
-            &["metadata"]
-        } else {
-            &["metadata", "bdsvars", "misc"]
-        };
-        for name in required {
-            ensure!(
-                rom.partitions
-                    .iter()
-                    .any(|entry| entry.name == *name && !entry.read_only),
-                "platform requires writable projected {name}"
-            );
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Temp(std::path::PathBuf);
+    impl Temp {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "esu-rc-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
         }
-        projected_metadata()?
-    } else {
-        // Unmanaged boot preserves the native view, but the unconditional init
-        // exec still needs its daemon. Resolve exactly metadata, never fall back
-        // to another partition or to an uninstalled Android runtime.
-        crate::init::resolve_native_metadata()
-            .context("native metadata unavailable")?
-            .rdev
-    };
-    esu_platform::staging::mount_and_publish(device, &platform.metadata_filesystem, plan)
-}
-
-fn projected_metadata() -> Result<u64> {
-    let disk = fs::canonicalize("/sys/class/block/esu-gpt").context("projected disk missing")?;
-    let mut found = None;
-    for entry in fs::read_dir(&disk)? {
-        let path = entry?.path();
-        if !path.join("partition").is_file() {
-            continue;
+        fn rc(&self, id: &str, name: &str, bytes: &[u8]) {
+            let directory = self.0.join("modules").join(id).join("initrc");
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join(name), bytes).unwrap();
         }
-        let uevent = fs::read_to_string(path.join("uevent"))?;
-        if !uevent.lines().any(|line| line == "PARTNAME=metadata") {
-            continue;
-        }
-        ensure!(found.is_none(), "ambiguous projected metadata");
-        let dev = fs::read_to_string(path.join("dev"))?;
-        let (major, minor) = dev.trim().split_once(':').context("bad metadata dev_t")?;
-        found = Some(rustix::fs::makedev(major.parse()?, minor.parse()?));
     }
-    found.context("metadata is absent from the projected disk")
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    #[test]
+    fn exact_headers_manifest_order_and_sorted_files() {
+        let temp = Temp::new();
+        temp.rc("b", "z.rc", b"z\n");
+        temp.rc("b", "a.rc", b"a\n");
+        temp.rc("a", "x.rc", b"x\n");
+        assert_eq!(
+            module_rc(&temp.0, &["b".into(), "a".into()], false).unwrap(),
+            b"# === b/initrc/a.rc ===\na\n# === b/initrc/z.rc ===\nz\n# === a/initrc/x.rc ===\nx\n"
+        );
+    }
+    #[test]
+    fn exact_limit_and_overflow_are_fail_closed() {
+        let temp = Temp::new();
+        let header = b"# === a/initrc/a.rc ===\n";
+        temp.rc("a", "a.rc", &vec![b'\n'; MAX_MODULE_RC - header.len()]);
+        assert_eq!(
+            module_rc(&temp.0, &["a".into()], false).unwrap().len(),
+            MAX_MODULE_RC
+        );
+        temp.rc("a", "a.rc", &vec![b'\n'; MAX_MODULE_RC - header.len() + 1]);
+        assert_eq!(
+            module_rc(&temp.0, &["a".into()], false).unwrap_err().error,
+            "ModuleRcTooLarge"
+        );
+    }
+    #[test]
+    fn recovery_marker_filters_and_malformed_rc_fails() {
+        let temp = Temp::new();
+        temp.rc("a", "a.rc", b"a\n");
+        temp.rc("b", "b.rc", b"b\n");
+        fs::write(temp.0.join("modules/b/recovery-ok"), b"").unwrap();
+        assert_eq!(
+            module_rc(&temp.0, &["a".into(), "b".into()], true).unwrap(),
+            b"# === b/initrc/b.rc ===\nb\n"
+        );
+        temp.rc("b", "b.rc", b"\0");
+        assert_eq!(
+            module_rc(&temp.0, &["b".into()], false).unwrap_err().error,
+            "ModuleRcUnreadable"
+        );
+        fs::remove_file(temp.0.join("modules/b/initrc/b.rc")).unwrap();
+        std::os::unix::fs::symlink("missing", temp.0.join("modules/b/initrc/b.rc")).unwrap();
+        assert!(module_rc(&temp.0, &["b".into()], false).is_err());
+        assert!(module_rc(&temp.0, &[], false).unwrap().is_empty());
+    }
 }

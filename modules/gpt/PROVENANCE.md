@@ -6,10 +6,6 @@ GPT rewriting module or a physical block-I/O firewall. All files in this subtree
 are GPL-2.0-only; `LICENSE` supplies the full GPL v2 text and fixes the license to
 version 2 only.
 
-The generation derivation and literal-safe ASCII token validation in `Makefile`
-reuse esu's existing `kernel/Kbuild` convention; the identity is compiled
-into static storage and cannot be changed by a load-time parameter.
-
 Public Linux v6.12 interfaces consulted during implementation:
 
 - [include/linux/blkdev.h](https://github.com/torvalds/linux/blob/v6.12/include/linux/blkdev.h)

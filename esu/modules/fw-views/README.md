@@ -1,10 +1,10 @@
 # `fw-views`: per-ROM firmware views on the shared thin pool
 
-`fw-views` is an ordered **userspace helper module**, not a kernel module. The
-manifest lists it between `thin` and `gpt` with `path = "bin/fw-views"`, and PID 1
-runs `modules/fw-views/early.sh` (`exec fw-views`) at that position. PID 1
-requires the payload file to exist, never loads it into the kernel, and treats a
-nonzero exit as a fatal managed-boot failure.
+`fw-views` is an ESP KernelSU module, not a kernel module. `modules_order`
+lists it after `thin`; PID1 runs `modules/fw-views/pid1.sh` before GPT APPLY.
+Recovery requires `recovery-ok` and runs `pid1-recovery.sh`. The helper reads
+`ESU_ROM` and `ESU_ROM_NUMBER` exported by PID1 from efivarfs, validates the
+selected ESP ROM config, and treats any failure as fatal.
 
 ## What it does
 
@@ -35,11 +35,11 @@ boot continues: the device, not the message, is the state the ROM owns.
 ## ROM config contract
 
 Every view must appear in the same ROM file as one of its projections, with the
-exact backend and access the helper publishes:
+exact backend and access the helper publishes. This example assumes the
+authoritative Slot record supplies `ESU_ROM_NUMBER=2`; no `rom_number` field
+is permitted in the ROM TOML:
 
 ```toml
-rom_number = 2
-
 [[firmware_views]]
 name = "xbl_a"       # physical sysfs PARTNAME, `<base>_a` or `<base>_b`
 thin_id = 131073     # (2 << 16) | 1
@@ -97,9 +97,8 @@ partition again.
 
 ## Build
 
-`fw-views` carries the shared generation note of `esu-platform` — the same
-one `esud` uses, and the only copy its ELF may contain — and refuses a
-mismatched `ESU_GENERATION` at run time. Build it with an NDK whose
+There is no compiled payload-generation note or runtime generation gate.
+Build it with an NDK whose
 `libc.a` bundles no Rust std members (r29; a contaminated or r30 NDK fails the
 static link with a duplicate `rust_eh_personality`), for example by pointing the
 target linker at one:
@@ -113,6 +112,6 @@ CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK/toolchains/llvm/prebuilt/linux-x
 ```
 
 Copy the static binary to `bin/fw-views` on the ESP and ship this directory's
-`early.sh`. Do not run the PV's LVM tooling (`lvconvert --repair`, `thin_restore`)
+`pid1.sh`, `pid1-recovery.sh` and `recovery-ok`. Do not run the PV's LVM tooling (`lvconvert --repair`, `thin_restore`)
 without re-running this module afterwards: those tools drop devices whose ids are
 not in the metadata.

@@ -693,18 +693,6 @@ pub fn resolve_payload_file(
     Ok(path)
 }
 
-/// Whether a manifest entry names a kernel module.
-///
-/// A managed manifest mixes two kinds of ordered entries. A `.ko` path is a
-/// kernel module: PID 1 loads it, verifies its `/sys/module/<name>` generation
-/// and readiness, and only then runs the entry's stage script. Any other path is
-/// a userspace helper module that the entry's own `early.sh`/`recovery.sh`
-/// executes from the ESP, so PID 1 requires the payload file to exist and never
-/// treats it as a loadable object.
-pub fn is_kernel_module(entry: &ModuleEntry) -> bool {
-    entry.path.ends_with(".ko")
-}
-
 /// Substitute block-device parameter references after GPT projection.
 /// `metadata` follows the by-name symlink and obtains the target's st_rdev.
 pub fn substitute_by_name_params(params: &str, root: &Path) -> std::io::Result<String> {
@@ -799,7 +787,7 @@ pub fn load_managed_module(path: &Path, entry: &ModuleEntry) -> Result<(), Failu
 ///
 /// The kernel normalizes `-` to `_` in module names, so both spellings are
 /// checked. A preloaded module is never skipped: it still has to pass the same
-/// generation and readiness self-check.
+/// readiness self-check.
 pub fn module_loaded(name: &str) -> bool {
     module_sysfs_path(name).is_some()
 }

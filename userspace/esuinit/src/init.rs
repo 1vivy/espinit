@@ -4,7 +4,7 @@
 //! opt-in APSS minidump transport preload when
 //! `androidboot.esu.apss_minidump=true` is active, normal vendor module
 //! loading, ESP discovery and read-only mount, strict manifest
-//! and ROM validation, generation matching, ordered payload module loading with
+//! and ROM validation, efivarfs identity, ordered payload module loading with
 //! self-checks, the single projection boundary immediately before the `gpt`
 //! entry, and finally the real-init handoff. Any managed-boot failure stops the
 //! handoff, persists a receipt, and enters the fatal-boot stop path: a reboot by
@@ -43,10 +43,6 @@ use crate::receipt::{Failure, ReceiptState, Stage};
 use crate::scripts;
 use crate::selfcheck;
 
-/// Generation compiled into this PID-1 binary, derived by `build.rs` from
-/// `ESU_GENERATION` or the full Git HEAD hash.
-pub const BINARY_GENERATION: &str = env!("ESU_GENERATION");
-
 /// Run the early managed boot. This must run as process 1: the entry point
 /// refuses to continue otherwise, before any platform side effect. On success
 /// the caller may hand off to the real init; every error is classified for the
@@ -83,8 +79,15 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     loader::load_vendor_modules()?;
     checkpoint(probe, ProbeStage::VendorLoaded);
 
+    // Identity must be available even when an unmanaged boot has no ESP payload.
+    load_identity_modules()?;
+    let identity = read_identity()?;
     if state.esp_mount.is_none() {
-        state.esp_mount = Some(wait_for_esp()?);
+        state.esp_mount = optional_unmanaged_payload(wait_for_esp(), identity.is_some())?;
+    }
+    if state.esp_mount.is_none() {
+        publish_empty_module_rc()?;
+        return prepare_handoff(state, &mounts);
     }
     let mount = state.esp_mount.as_ref().ok_or_else(|| {
         Failure::new(
@@ -98,14 +101,27 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     let esp_device = mount.device();
     let payload_root = esp::payload_root(mount.path());
 
+    if identity.is_none()
+        && fs::symlink_metadata(payload_root.join("manifest.toml"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        publish_empty_module_rc()?;
+        return prepare_handoff(state, &mounts);
+    }
     let manifest = read_manifest(&payload_root)?;
+    config::validate_bootstrap(&manifest).map_err(Failure::from)?;
     checkpoint(probe, ProbeStage::ManifestRead);
-    let rom = read_rom(&payload_root, &manifest)?;
-
-    check_binary_generation(&manifest)?;
-    state.generation = Some(manifest.generation.clone());
-    checkpoint(probe, ProbeStage::GenerationMatched);
-
+    crate::platform::validate_modules(&payload_root, &manifest.modules_order)?;
+    log_build_ids(&payload_root);
+    state.build_id = fs::read_to_string("/esu-build-id")
+        .ok()
+        .map(|id| id.trim_end().to_owned());
+    let Some((id, rom_number)) = identity else {
+        log::info!("No managed efivarfs identity; handing off without projection");
+        crate::platform::publish_module_rc(&payload_root, &manifest.modules_order)?;
+        return prepare_handoff(state, &mounts);
+    };
+    let rom = read_rom(&payload_root, &manifest, &id, rom_number)?;
     config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
 
     if rom.has_writable_esp_file() {
@@ -142,12 +158,19 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         rom.managed
     );
 
-    load_and_check_payload(&payload_root, &manifest, &rom, &esp_mount, esp_device)?;
+    load_and_check_payload(
+        &payload_root,
+        &manifest,
+        &rom,
+        rom_number,
+        &esp_mount,
+        esp_device,
+    )?;
     checkpoint(probe, ProbeStage::PayloadLoaded);
-    crate::platform::stage(&payload_root, &manifest, &rom)?;
-    checkpoint(probe, ProbeStage::PlatformStaged);
+    crate::platform::publish_module_rc(&payload_root, &manifest.modules_order)?;
+    checkpoint(probe, ProbeStage::ModuleRcPublished);
     if probe == Some(ProbeStage::HandoffDelayed) {
-        arm_delayed_handoff(&payload_root)?;
+        arm_delayed_handoff(&payload_root, &id, rom_number)?;
     }
 
     log::info!(
@@ -158,127 +181,157 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     prepare_handoff(state, &mounts)
 }
 
-/// Load the payload modules in manifest order, self-check each one, and run its
-/// early or recovery script before the next entry is processed.
-///
-/// The `gpt` entry is the single projection boundary. Its backends are resolved
-/// only when that entry is reached, after every earlier module and script has
-/// run, so a logical volume, mapper device, loop or ESP file published by them
-/// is visible. The complete projection is applied and verified before the
-/// module's stage script runs; nothing earlier publishes a projected view and
-/// there is no partial fallback.
+/// Load helpers before the single GPT projection boundary.
 fn load_and_check_payload(
     payload_root: &Path,
     manifest: &Manifest,
     rom: &RomConfig,
+    rom_number: u32,
     esp_mount: &str,
     esp_device: (u32, u32),
 ) -> Result<(), Failure> {
-    let generation = manifest.generation.as_str();
-    let modes = rom.partition_modes();
-    let core = manifest
+    for entry in manifest
         .modules
-        .first()
-        .ok_or_else(|| Failure::new(Stage::Configuration, "ManifestModulesEmpty", "no modules"))?;
-
-    if crate::core_loaded() {
-        log::info!("Core module is already loaded; validating it instead of reloading");
-    } else {
-        let path = loader::resolve_payload_file(payload_root, &core.path, &core.name)?;
-        loader::load_managed_module(&path, core)?;
-    }
-
-    selfcheck::check_core(generation)?;
-    crate::platform::select_core_boot_mode()?;
-    scripts::run_module_scripts(payload_root, &core.name, generation)?;
-
-    let mut projection_checked = false;
-
-    for entry in manifest.modules.iter().skip(1) {
-        if entry.name == "efivarfs"
-            && std::fs::metadata("/dev/block/by-name/bdsvars")
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        {
-            log::info!("Skipping efivarfs: no bdsvars by-name device (unmanaged boot)");
-            continue;
-        }
+        .iter()
+        .filter(|entry| !matches!(entry.name.as_str(), "kernelesp" | "efivarfs" | "gpt"))
+    {
         let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
-
-        if entry.name == "gpt" {
-            // Every earlier entry and script has run, so anything they created
-            // is visible here. The resolved set keeps every ESP-file loop guard
-            // open until APPLY has returned.
-            resolve_backends(rom, esp_mount)?;
-        }
-
-        if !loader::is_kernel_module(entry) {
-            // A userspace helper module carries no kernel image and has no
-            // `/sys/module` self-check: `<payload>/modules/<name>/early.sh`
-            // executes the helper from the ESP and its exit status is the whole
-            // contract, so a nonzero exit fails the managed boot. The binary
-            // itself was already checked against the payload generation by the
-            // packer, and `resolve_payload_file` above proved it is a regular
-            // ESP file inside the payload.
-            log::info!(
-                "Payload helper module {} is present at {}",
-                entry.name,
-                path.display()
-            );
-            scripts::run_module_scripts(payload_root, &entry.name, generation)?;
-            continue;
-        }
-
-        if loader::module_loaded(&entry.name) {
-            log::info!(
-                "Module {} is already loaded; validating it instead of reloading",
-                entry.name
-            );
-        } else {
+        if !loader::module_loaded(&entry.name) {
             loader::load_managed_module(&path, entry)?;
         }
-
-        if entry.name == "gpt" {
-            // Identity is checked before the consequential APPLY. Readiness can
-            // only become true after one atomic APPLY and exact QUERY.
-            selfcheck::check_module_generation(&entry.name, generation)?;
-            apply_projection(rom, esp_device)?;
-            selfcheck::check_projection_ready(&entry.name, modes)?;
-            projection_checked = true;
-        } else if entry.name != "efivarfs" {
-            selfcheck::check_module(&entry.name, generation)?;
+        selfcheck::check_module(&entry.name)?;
+    }
+    for id in &manifest.modules_order {
+        scripts::run_module_scripts(payload_root, id, &rom.id, rom_number)?;
+    }
+    if rom.managed {
+        let entry = manifest
+            .modules
+            .iter()
+            .find(|entry| entry.name == "gpt")
+            .ok_or_else(|| {
+                Failure::new(
+                    Stage::Projection,
+                    "ProjectionModuleMissing",
+                    "managed ROM requires gpt",
+                )
+            })?;
+        resolve_backends(rom, esp_mount)?;
+        let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
+        if !loader::module_loaded("gpt") {
+            loader::load_managed_module(&path, entry)?;
         }
-
-        scripts::run_module_scripts(payload_root, &entry.name, generation)?;
+        apply_projection(rom, rom_number, esp_device)?;
+        selfcheck::check_projection_ready("gpt", rom.partition_modes())?;
     }
-
-    if rom.managed && !projection_checked {
-        // Configuration validation already requires `gpt` for a managed ROM;
-        // this guards against the two checks drifting apart.
-        return Err(Failure::new(
-            Stage::Projection,
-            "ProjectionModuleMissing",
-            format!("a managed ROM requires an initialized gpt module before handoff ({modes})"),
-        ));
-    }
-
     Ok(())
 }
 
-/// The PID-1 binary must carry the same generation as the manifest.
-fn check_binary_generation(manifest: &Manifest) -> Result<(), Failure> {
-    if BINARY_GENERATION != manifest.generation {
-        return Err(Failure::at(
-            Stage::Generation,
-            Some("bin/esuinit"),
-            "HandoffGenerationMismatch",
-            format!(
-                "PID-1 generation {BINARY_GENERATION} does not match manifest generation {}",
-                manifest.generation
-            ),
-        ));
+/// The identity bootstrap cannot depend on an ESP manifest: direct boot may have
+/// none. These two fixed kernel modules are always supplied by the cpio.
+fn load_identity_modules() -> Result<(), Failure> {
+    for name in ["kernelesp", "efivarfs"] {
+        if name == "efivarfs"
+            && fs::metadata("/dev/block/by-name/bdsvars")
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            continue;
+        }
+        let entry = config::ModuleEntry {
+            name: name.into(),
+            path: format!("lib/{name}.ko"),
+            params: if name == "efivarfs" {
+                "dev=by-name:bdsvars".into()
+            } else {
+                String::new()
+            },
+        };
+        if !loader::module_loaded(name) {
+            let path = loader::resolve_payload_file(Path::new("/"), &entry.path, name)?;
+            loader::load_managed_module(&path, &entry)?;
+        }
+        if name == "kernelesp" {
+            selfcheck::check_core()?;
+            crate::platform::select_core_boot_mode()?;
+        }
     }
-
     Ok(())
+}
+
+fn publish_empty_module_rc() -> Result<(), Failure> {
+    crate::set_module_rc(&[]).map_err(|error| {
+        Failure::new(
+            Stage::ModuleCheck,
+            "ModuleRcIoctlFailed",
+            format!("{error:#}"),
+        )
+    })
+}
+
+fn optional_unmanaged_payload<T>(
+    payload: Result<T, Failure>,
+    managed: bool,
+) -> Result<Option<T>, Failure> {
+    match payload {
+        Ok(payload) => Ok(Some(payload)),
+        Err(error) if !managed && esp_enumeration_pending(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_identity() -> Result<Option<(String, u32)>, Failure> {
+    if fs::metadata("/dev/block/by-name/bdsvars")
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
+    fs::create_dir_all("/efivars")
+        .map_err(|error| Failure::new(Stage::Storage, "EfivarsMountFailed", error.to_string()))?;
+    rustix::mount::mount(
+        "none",
+        "/efivars",
+        "efivarfs",
+        rustix::mount::MountFlags::NOSUID
+            | rustix::mount::MountFlags::NODEV
+            | rustix::mount::MountFlags::NOEXEC,
+        "",
+    )
+    .map_err(|error| Failure::new(Stage::Storage, "EfivarsMountFailed", error.to_string()))?;
+    let result: Result<Option<(String, u32)>, Failure> = (|| {
+        let root = Path::new("/efivars");
+        let Some(id) = esu_platform::efivars::booted_rom(root).map_err(identity_error)? else {
+            return Ok(None);
+        };
+        let number = esu_platform::efivars::rom_number(root, &id).map_err(identity_error)?;
+        Ok(Some((id, number)))
+    })();
+    let unmount = rustix::mount::unmount("/efivars", rustix::mount::UnmountFlags::empty())
+        .map_err(|error| Failure::new(Stage::Storage, "EfivarsUnmountFailed", error.to_string()));
+    let identity = result?;
+    unmount?;
+    Ok(identity)
+}
+
+fn identity_error(error: esu_platform::efivars::Error) -> Failure {
+    use esu_platform::efivars::Error;
+    let code = match &error {
+        Error::RomRecordMissing => "RomRecordMissing",
+        Error::RomNumberInvalid => "RomNumberInvalid",
+        Error::BootedRomInvalid => "BootedRomInvalid",
+        Error::Io(_) => "EfivarsUnreadable",
+    };
+    Failure::new(Stage::Configuration, code, error.to_string())
+}
+
+fn log_build_ids(payload_root: &Path) {
+    let ramdisk = fs::read_to_string("/esu-build-id").ok();
+    let esp = fs::read_to_string(payload_root.join("build-id")).ok();
+    let ramdisk = ramdisk.as_deref().map(str::trim_end);
+    let esp = esp.as_deref().map(str::trim_end);
+    log::info!("Build IDs: ramdisk={ramdisk:?}, ESP={esp:?}");
+    if ramdisk != esp || ramdisk.is_none() {
+        log::warn!("Ramdisk and ESP build IDs differ or are absent; continuing");
+    }
 }
 
 /// Receipt storage is required for a managed ROM: unavailable receipt storage
@@ -307,25 +360,17 @@ fn read_manifest(payload_root: &Path) -> Result<Manifest, Failure> {
     config::parse_manifest(&text).map_err(Failure::from)
 }
 
-fn read_rom(payload_root: &Path, manifest: &Manifest) -> Result<RomConfig, Failure> {
-    let bootconfig = match fs::read_to_string("/proc/bootconfig") {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(Failure::new(
-                Stage::Configuration,
-                "BootconfigUnreadable",
-                error.to_string(),
-            ));
-        }
-    };
-    let cmdline = fs::read_to_string("/proc/cmdline").map_err(|error| {
-        Failure::new(Stage::Configuration, "CmdlineUnreadable", error.to_string())
-    })?;
-    let id = config::selected_rom_id(&bootconfig, &cmdline).map_err(Failure::from)?;
+fn read_rom(
+    payload_root: &Path,
+    manifest: &Manifest,
+    id: &str,
+    rom_number: u32,
+) -> Result<RomConfig, Failure> {
     let path = config::rom_path(manifest, id).map_err(Failure::from)?;
     let text = read_config_file(payload_root, &path, "RomUnreadable")?;
-    config::parse_selected_rom(&text, &manifest.generation, id).map_err(Failure::from)
+    let rom = config::parse_selected_rom(&text, id).map_err(Failure::from)?;
+    config::validate_rom(&rom, rom_number).map_err(Failure::from)?;
+    Ok(rom)
 }
 
 /// Read a configuration file rooted at the ESP `/esu` subtree, rejecting a
@@ -445,36 +490,17 @@ fn resolve_backends(rom: &RomConfig, esp_mount: &str) -> Result<(), Failure> {
     )
     .map_err(Failure::from)
 }
-pub(crate) fn resolve_native_metadata() -> std::io::Result<block::ResolvedBackend> {
-    retry_native_metadata(ENUMERATION_WINDOW, ENUMERATION_RETRY, || {
-        block::resolve(
-            "/dev/block/by-name/metadata",
-            esp::ESP_MOUNT_POINT,
-            block::Access::ReadOnly,
-        )
-    })
-}
-
-fn retry_native_metadata<T>(
-    window: Duration,
-    interval: Duration,
-    probe: impl FnMut() -> std::io::Result<T>,
-) -> std::io::Result<T> {
-    retry_enumerated(
-        "native metadata",
-        window,
-        interval,
-        probe,
-        block::is_pending,
-    )
-}
 
 /// Apply and verify the complete projection: enumerate only physical
 /// partitions whose PARTNAME collides with a projected name, retain the
 /// mounted ESP for failure receipts and unrelated stock partitions for normal
 /// platform operation, build the exact APPLY payload from the resolved
 /// backends, issue APPLY, and require QUERY to report the exact projection.
-fn apply_projection(rom: &RomConfig, esp_device: (u32, u32)) -> Result<(), Failure> {
+fn apply_projection(
+    rom: &RomConfig,
+    rom_number: u32,
+    esp_device: (u32, u32),
+) -> Result<(), Failure> {
     let hide = retry_enumerated(
         "shadowed physical partitions",
         ENUMERATION_WINDOW,
@@ -506,7 +532,7 @@ fn apply_projection(rom: &RomConfig, esp_device: (u32, u32)) -> Result<(), Failu
         &rom.partitions,
         rom.resolved_backends(),
         &hide,
-        rom.rom_number >= 2,
+        rom_number >= 2,
     )
 }
 
@@ -903,6 +929,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_payload_is_optional_only_without_managed_identity() {
+        let missing = || Failure::new(Stage::Storage, "EspNotFound", "absent");
+        assert!(
+            optional_unmanaged_payload::<()>(Err(missing()), false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(optional_unmanaged_payload::<()>(Err(missing()), true).is_err());
+        assert_eq!(optional_unmanaged_payload(Ok(42), false).unwrap(), Some(42));
+        assert_eq!(optional_unmanaged_payload(Ok(42), true).unwrap(), Some(42));
+        let unreadable = Failure::new(Stage::Storage, "EspMountFailed", "I/O");
+        assert!(optional_unmanaged_payload::<()>(Err(unreadable), false).is_err());
+    }
+
+    #[test]
+    fn managed_identity_errors_keep_their_classification() {
+        use esu_platform::efivars::Error;
+        assert_eq!(
+            identity_error(Error::RomRecordMissing).error,
+            "RomRecordMissing"
+        );
+        assert_eq!(
+            identity_error(Error::RomNumberInvalid).error,
+            "RomNumberInvalid"
+        );
+    }
+
+    #[test]
     fn recovery_passthrough_requires_two_unique_exact_bootconfig_keys() {
         let enabled = format!(
             "{RECOVERY_MODE_KEY}=\"{RECOVERY_MODE_VALUE}\"\n\
@@ -973,37 +1027,6 @@ mod tests {
     }
 
     #[test]
-    fn native_metadata_waits_only_for_enumeration() {
-        let mut attempts = 0;
-        let device = retry_native_metadata(Duration::from_secs(1), Duration::ZERO, || {
-            attempts += 1;
-            if attempts == 1 {
-                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
-            } else {
-                Ok(42)
-            }
-        })
-        .unwrap();
-        assert_eq!((device, attempts), (42, 2));
-        for kind in [
-            std::io::ErrorKind::InvalidData,
-            std::io::ErrorKind::PermissionDenied,
-        ] {
-            let mut attempts = 0;
-            let result = retry_native_metadata(Duration::from_secs(1), Duration::ZERO, || {
-                attempts += 1;
-                Err::<(), _>(std::io::Error::from(kind))
-            });
-            assert_eq!(result.unwrap_err().kind(), kind);
-            assert_eq!(attempts, 1);
-        }
-        let result = retry_native_metadata(Duration::ZERO, Duration::ZERO, || {
-            Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound))
-        });
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
-    }
-
-    #[test]
     fn permanent_failures_stop_without_retrying() {
         let mut attempts = 0;
         let error = retry_enumerated(
@@ -1066,11 +1089,8 @@ mod tests {
 
     #[test]
     fn enumeration_retry_succeeds_and_reuses_the_published_set() {
-        let rom = config::parse_rom(
-            "schema_version = 1\ngeneration = \"release-1\"\nid = \"android-a\"\nmanaged = false\n",
-            "release-1",
-        )
-        .unwrap();
+        let rom =
+            config::parse_rom("schema_version = 1\nid = \"android-a\"\nmanaged = false\n").unwrap();
 
         resolve_backends(&rom, esp::ESP_MOUNT_POINT).unwrap();
         // A second resolution reuses the published set instead of re-resolving.
@@ -1209,9 +1229,8 @@ mod tests {
             ("vendor-loaded", ProbeStage::VendorLoaded),
             ("esp-ready", ProbeStage::EspReady),
             ("manifest-read", ProbeStage::ManifestRead),
-            ("generation-matched", ProbeStage::GenerationMatched),
             ("payload-loaded", ProbeStage::PayloadLoaded),
-            ("platform-staged", ProbeStage::PlatformStaged),
+            ("module-rc-published", ProbeStage::ModuleRcPublished),
         ] {
             assert!(
                 matches!(
@@ -1486,8 +1505,8 @@ mod tests {
         let events = std::cell::RefCell::new(Vec::new());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             checkpoint_with(
-                Some(ProbeStage::PlatformStaged),
-                ProbeStage::PlatformStaged,
+                Some(ProbeStage::ModuleRcPublished),
+                ProbeStage::ModuleRcPublished,
                 || {
                     events.borrow_mut().push("timeout=30");
                     Ok(())

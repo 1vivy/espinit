@@ -79,16 +79,8 @@ static bool part_is_writable_backend(const struct gpt_view *v,
 				     const struct block_device *bdev);
 static int seal_record_disk(struct gpt_view *v, struct gendisk *disk);
 static int seal_record_part(struct gpt_view *v, struct block_device *bdev);
-#ifndef ESU_GENERATION
-#error "ESU_GENERATION must be defined by modules/gpt/Makefile"
-#endif
-static char generation[] = ESU_GENERATION;
-static_assert(sizeof(generation) >= 2);
-static_assert(sizeof(generation) <= 64);
-module_param_string(generation, generation, sizeof(generation), 0444);
 module_param(ready, bool, 0444);
 module_param(sealed, bool, 0444);
-MODULE_PARM_DESC(generation, "Payload generation (must match userspace)");
 MODULE_PARM_DESC(ready,
 		 "Y only after the complete GPT view and hiding are active");
 MODULE_PARM_DESC(sealed,
@@ -841,9 +833,6 @@ static int __init gpt_init(void)
 	/* ready and sealed are output-only, including when a caller passes them. */
 	ready = false;
 	sealed = false;
-	/* Parameters are read-only after load; also reject load-time spoofing. */
-	if (strcmp(generation, ESU_GENERATION))
-		return -EINVAL;
 	return misc_register(&control);
 }
 static void __exit gpt_exit(void)

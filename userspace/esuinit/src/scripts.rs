@@ -1,10 +1,4 @@
-//! PID-1 execution of the ESP early and recovery module scripts.
-//!
-//! This is deliberately separate from the Android-side stage machinery in
-//! `esud`: PID 1 runs `<payload>/modules/<module>/early.sh` on a normal
-//! boot and `recovery.sh` when bootconfig selects recovery, interpreted by the
-//! ESP's static busybox. No module parameter or configuration value is ever
-//! evaluated by a shell.
+//! PID1 scripts are distinct from Android-side KernelSU lifecycle scripts.
 
 use std::fs;
 use std::io;
@@ -105,13 +99,17 @@ pub fn is_recovery() -> bool {
 pub fn run_module_scripts(
     payload_root: &Path,
     module: &str,
-    generation: &str,
+    rom: &str,
+    rom_number: u32,
 ) -> Result<(), Failure> {
     let directory = payload_root.join("modules").join(module);
+    if is_recovery() && !crate::platform::recovery_allowed(&directory)? {
+        return Ok(());
+    }
     let script_name = if is_recovery() {
-        "recovery.sh"
+        "pid1-recovery.sh"
     } else {
-        "early.sh"
+        "pid1.sh"
     };
     let script = directory.join(script_name);
 
@@ -174,7 +172,8 @@ pub fn run_module_scripts(
         .arg(&script)
         .env_clear()
         .env("PATH", &bin)
-        .env("ESU_GENERATION", generation)
+        .env("ESU_ROM", rom)
+        .env("ESU_ROM_NUMBER", rom_number.to_string())
         .current_dir(&directory)
         .stdin(Stdio::null())
         .spawn()

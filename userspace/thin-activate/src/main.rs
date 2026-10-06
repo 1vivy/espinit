@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 mod block;
-mod generation;
 mod plan;
 
 use lvm2_meta::ReadAt;
@@ -16,24 +15,23 @@ impl ReadAt for Source {
     }
 }
 
-fn check_generation(expected: Option<&std::ffi::OsStr>, built: &str) -> Result<(), String> {
-    let expected = expected
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or("ESU_GENERATION is missing or non-UTF-8")?;
-    if expected != built {
-        return Err("compiled generation does not match ESU_GENERATION".to_owned());
+fn identity() -> Result<(String, u32), String> {
+    let rom = std::env::var("ESU_ROM").map_err(|_| "ESU_ROM missing")?;
+    let number = std::env::var("ESU_ROM_NUMBER")
+        .map_err(|_| "ESU_ROM_NUMBER missing")?
+        .parse::<u32>()
+        .map_err(|_| "ESU_ROM_NUMBER invalid")?;
+    if rom.is_empty() || !(1..=esu_platform::efivars::MAX_ROM_NUMBER).contains(&number) {
+        return Err("invalid PID1 ROM identity".into());
     }
-    Ok(())
+    Ok((rom, number))
 }
 
 fn run() -> Result<(), String> {
     if std::env::args_os().len() != 1 {
         return Err("thin-activate accepts no arguments".to_owned());
     }
-    check_generation(
-        std::env::var_os("ESU_GENERATION").as_deref(),
-        generation::generation(),
-    )?;
+    let (rom, rom_number) = identity()?;
     let physical = block::open_userdata()
         .map_err(|error| format!("cannot open physical userdata PV: {error}"))?;
     let bytes = physical
@@ -66,8 +64,7 @@ fn run() -> Result<(), String> {
     let count = devices.logical_volumes.len();
     mapper.commit();
     println!(
-        "thin-activate: generation={} vg={} seqno={} activated_lvs={count}",
-        generation::generation(),
+        "thin-activate: rom={rom} rom_number={rom_number} vg={} seqno={} activated_lvs={count}",
         metadata.vg.name(),
         metadata.vg.seqno(),
     );
@@ -78,18 +75,5 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("thin-activate: {error}");
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::OsStr;
-
-    #[test]
-    fn generation_must_be_present_and_exact() {
-        check_generation(Some(OsStr::new("release-1")), "release-1").unwrap();
-        assert!(check_generation(None, "release-1").is_err());
-        assert!(check_generation(Some(OsStr::new("release-2")), "release-1").is_err());
     }
 }

@@ -8,3 +8,4 @@ license = "GPL-3.0-only"
 libc.workspace = true
 dm = { path = "../dm" }
 lvm2-meta = { path = "../lvm2-meta" }
+esu-platform = { path = "../esu-platform" }

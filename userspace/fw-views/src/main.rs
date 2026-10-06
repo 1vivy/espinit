@@ -12,11 +12,9 @@
 //!
 //! The origin partitions are resolved before the projection runs, so the views
 //! read the physical `PARTNAME` sysfs name rather than a hidden or projected
-//! one, and the kernel opens them read-only. No argument is accepted; the
-//! selection is the same `androidboot.esu.rom` PID 1 used.
+//! one. No argument is accepted; selection is the identity exported by PID1.
 
 use dm::{DeviceMapper, DeviceNumber, Mapper, MessageError};
-use esu_platform::generation;
 use esuinit::config;
 use esuinit::esp::{ESP_MOUNT_POINT, payload_root};
 use fw_views::plan;
@@ -32,36 +30,21 @@ fn read_text(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
-/// The payload generation this binary was built for. The note is the shared
-/// Apache-2.0 source of `esu-platform`, which is the same one `esud`
-/// carries, so this binary must not link a second copy of it.
-fn check_generation() -> Result<(), String> {
-    let expected = std::env::var("ESU_GENERATION")
-        .map_err(|_| "ESU_GENERATION is missing or non-UTF-8".to_owned())?;
-
-    if expected != generation::generation() {
-        return Err("compiled generation does not match ESU_GENERATION".to_owned());
-    }
-
-    Ok(())
-}
-
-/// The selected ROM's validated config, read exactly like PID 1 reads it: the
-/// bootconfig/cmdline key selects `<id>.toml`, and the manifest supplies the
-/// generation every file must match.
-fn rom_config() -> Result<config::RomConfig, String> {
+/// Use only the authoritative identity exported by PID1.
+fn rom_config() -> Result<(config::RomConfig, u32), String> {
     let root = payload_root(ESP_MOUNT_POINT);
     let manifest = config::parse_manifest(&read_text(&root.join("manifest.toml"))?)
         .map_err(|error| error.to_string())?;
-    let bootconfig = read_text(Path::new("/proc/bootconfig")).unwrap_or_default();
-    let cmdline = read_text(Path::new("/proc/cmdline")).unwrap_or_default();
-    let id = config::selected_rom_id(&bootconfig, &cmdline).map_err(|error| error.to_string())?;
-    let rom_path = config::rom_path(&manifest, id).map_err(|error| error.to_string())?;
-    let rom =
-        config::parse_selected_rom(&read_text(&root.join(&rom_path))?, &manifest.generation, id)
-            .map_err(|error| error.to_string())?;
-
-    Ok(rom)
+    let id = std::env::var("ESU_ROM").map_err(|_| "ESU_ROM missing")?;
+    let number = std::env::var("ESU_ROM_NUMBER")
+        .map_err(|_| "ESU_ROM_NUMBER missing")?
+        .parse::<u32>()
+        .map_err(|_| "ESU_ROM_NUMBER invalid")?;
+    let rom_path = config::rom_path(&manifest, &id).map_err(|error| error.to_string())?;
+    let rom = config::parse_selected_rom(&read_text(&root.join(&rom_path))?, &id)
+        .map_err(|error| error.to_string())?;
+    config::validate_rom(&rom, number).map_err(|error| error.to_string())?;
+    Ok((rom, number))
 }
 
 /// One physical partition's size in 512-byte sectors.
@@ -93,10 +76,8 @@ fn run() -> Result<(), String> {
         return Err("fw-views accepts no arguments".to_owned());
     }
 
-    check_generation()?;
-
-    let rom = rom_config()?;
-    let views = plan::views(&rom);
+    let (rom, rom_number) = rom_config()?;
+    let views = plan::views(&rom, rom_number);
 
     if views.is_empty() {
         println!("fw-views: ROM {} has no firmware views", rom.id);

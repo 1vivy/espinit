@@ -10,10 +10,6 @@
 # cannot supply ABI CRCs.
 #
 # JOBS (default 13, maximum 13) is forwarded; architecture is arm64.
-# ESU_GENERATION is
-# forwarded when set; the Makefile derives it from this repository's Git HEAD
-# otherwise and rejects any value that is not 1-63 ASCII letters/digits/._-
-# before compiling.
 set -eu
 
 KMI_SRC=${KMI_SRC:-}

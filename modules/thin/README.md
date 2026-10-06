@@ -40,11 +40,9 @@ The esu PID-1 loader self-check (`userspace/esuinit/src/selfcheck.rs`) reads
 
 | Parameter | Access | Value |
 | --- | --- | --- |
-| `generation` | read-only (0444) | the build generation compiled into the module; must equal the payload generation |
 | `ready` | read-only (0444) | `Y` only after every subsystem and both targets initialized; `N` while any initializer fails and again as soon as unload teardown starts |
 
-`generation` is injected by the Makefile and checked at compile time
-(`thin-main.c` fails to build without it). `ready` is set exactly once, after
+`ready` is set exactly once, after
 the last initializer returns, and cleared first in the exit path; the proven
 init order and every failure-unwind branch are unchanged.
 
@@ -78,26 +76,15 @@ make -C modules/thin KMI_SRC=/path/to/kernel KMI_OUT=/path/to/out [JOBS=1..13]
 - Keep the generated `thin.ko.compat.json` beside `thin.ko` when copying it to a
   payload. The assembler checks the receipt and module again before packaging.
 
-### Build generation
-
-The generation identifies one coordinated ESP payload and must match the PID-1
-stage, the esu core module, the esud daemon and every other ESP module.
-It is taken from `ESU_GENERATION` when set, otherwise from the full 40-byte
-lowercase Git HEAD hash of this repository, and must be 1-63 ASCII
-letters/digits/`._-`. The Makefile validates it before compiling and rejects a
-missing or malformed value with the build failing, never with a truncated or
-empty generation. Keep this logic in sync with `kernel/Kbuild`,
-`userspace/esud/build.rs` and `userspace/esuinit/build.rs`.
-
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `thin-main.c` | module entry point: init order, unwind, `generation`/`ready` parameters, metadata |
+| `thin-main.c` | module entry point: init order, unwind, `ready` parameter, metadata |
 | `src/` | vendored dm-thin family sources (`dm-thin`, `dm-thin-metadata`, `dm-bufio`, `dm-io`, `dm-kcopyd`, `dm-bio-prison-v1/v2`) |
 | `src/persistent-data/` | vendored persistent-data helpers (btree, bitset, array, block/space maps, transaction manager) |
 | `private-rename.h` | private `thinpool_private_*` renames for every non-exported symbol |
-| `Makefile` | kbuild module description, include paths, generation validation/injection, bounded out-of-tree build wrapper |
+| `Makefile` | kbuild module description, include paths, bounded out-of-tree build wrapper |
 | `build.sh` | scripted entry point for the same build with required `KMI_SRC`/`KMI_OUT` |
 | `patches/0001-fork-dm-thin-for-exported-KMI-surface.patch` | the fork that adapts the vendored sources to the exported KMI |
 | `evidence/phone-d3144fcc5f04/` | frozen pre-import phone artifact, its import/modversion manifests and record summary |
@@ -110,7 +97,6 @@ empty generation. Keep this logic in sync with `kernel/Kbuild`,
 modinfo thin.ko                      # description, author, license, vermagic
 modprobe --dump-modversions thin.ko  # import manifest; 151 imports when built for the phone kernel
 insmod thin.ko
-cat /sys/module/thin/parameters/generation
 cat /sys/module/thin/parameters/ready   # Y only after a complete init
 dmsetup targets                         # thin-pool and thin
 ```

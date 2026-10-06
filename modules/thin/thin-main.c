@@ -2,12 +2,8 @@
 /*
  * esu thin.ko entry point.
  *
- * Brings up the vendored dm-thin family in one module and exposes exactly the
- * two read-only parameters the esu PID-1 self-check reads:
- *
- *   generation  build generation compiled into this module; it must equal the
- *               payload generation derived from ESU_GENERATION or the Git
- *               HEAD of this repository.
+ * Brings up the vendored dm-thin family and exposes the read-only readiness
+ * parameter used by the esu PID1 self-check:
  *   ready       "Y" only after every subsystem and both device-mapper targets
  *               initialized, and "N" again as soon as unload teardown starts.
  *
@@ -17,20 +13,6 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/string.h>
-
-#ifndef ESU_GENERATION
-#error "ESU_GENERATION must be defined by modules/thin/Makefile"
-#endif
-
-
-static char generation[] = ESU_GENERATION;
-
-static_assert(sizeof(generation) > 1 && sizeof(generation) <= 64,
-	      "generation must be a nonempty value of at most 63 bytes");
-module_param_string(generation, generation, sizeof(generation), 0444);
-MODULE_PARM_DESC(generation, "esu build generation (read-only)");
-
 static bool ready;
 module_param(ready, bool, 0444);
 MODULE_PARM_DESC(ready,
@@ -52,8 +34,6 @@ static int __init thinpool_private_init(void)
 	int r;
 
 	ready = false;
-	if (strcmp(generation, ESU_GENERATION))
-		return -EINVAL;
 
 	r = thinpool_private_dm_io_init();
 	if (r)

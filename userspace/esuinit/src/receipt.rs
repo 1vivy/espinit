@@ -41,7 +41,6 @@ pub const ESP_MOUNT_FLAGS_RO: MountFlags = ESP_MOUNT_FLAGS_RW.union(MountFlags::
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
     Configuration,
-    Generation,
     Storage,
     ModuleLoad,
     ModuleCheck,
@@ -86,18 +85,17 @@ impl Failure {
     }
 }
 
-/// Options needed to persist a receipt: the ESP mount, when it was mounted, and
-/// the selected generation, when it validated.
+/// Options needed to persist a receipt: the retained ESP and diagnostic build ID.
 #[derive(Default)]
 pub struct ReceiptState {
-    pub generation: Option<String>,
+    pub build_id: Option<String>,
     pub esp_mount: Option<esp::Mount>,
 }
 
 #[derive(Serialize)]
 struct Receipt<'a> {
     schema_version: u32,
-    generation: Option<&'a str>,
+    build_id: Option<&'a str>,
     stage: Stage,
     component: Option<&'a str>,
     error: &'a str,
@@ -137,7 +135,7 @@ pub fn record(state: &mut ReceiptState, failure: &Failure) {
         return;
     }
 
-    if let Err(error) = write_receipt(mount.path(), state.generation.as_deref(), failure) {
+    if let Err(error) = write_receipt(mount.path(), state.build_id.as_deref(), failure) {
         log::error!("esu receipt storage failure: {error:#}");
     }
 }
@@ -146,10 +144,10 @@ pub fn record(state: &mut ReceiptState, failure: &Failure) {
 /// receipts directory, fsync it, atomically rename it to `failure.json`, fsync
 /// the directory, sync the filesystem, then restore the read-only mount. The
 /// previous receipt survives until the rename succeeds.
-fn write_receipt(mount: &str, generation: Option<&str>, failure: &Failure) -> Result<()> {
+fn write_receipt(mount: &str, build_id: Option<&str>, failure: &Failure) -> Result<()> {
     let receipts = Path::new(mount).join("esu/receipts");
 
-    let json = serialize_receipt(generation, failure)?;
+    let json = serialize_receipt(build_id, failure)?;
 
     mount_writable(mount).context("cannot remount the ESP read-write for the failure receipt")?;
 
@@ -224,10 +222,10 @@ fn bound(value: &str, limit: usize) -> String {
 
 /// Serialize the bounded failure receipt exactly as it is written to
 /// `esu/receipts/failure.json`.
-fn serialize_receipt(generation: Option<&str>, failure: &Failure) -> Result<String> {
+fn serialize_receipt(build_id: Option<&str>, failure: &Failure) -> Result<String> {
     let receipt = Receipt {
         schema_version: RECEIPT_SCHEMA_VERSION,
-        generation,
+        build_id,
         stage: failure.stage,
         component: failure.component.as_deref(),
         error: failure.error,
@@ -240,8 +238,8 @@ fn serialize_receipt(generation: Option<&str>, failure: &Failure) -> Result<Stri
 mod tests {
     use super::*;
 
-    fn consumer_json(generation: Option<&str>, failure: &Failure) -> serde_json::Value {
-        serialize_receipt(generation, failure)
+    fn consumer_json(build_id: Option<&str>, failure: &Failure) -> serde_json::Value {
+        serialize_receipt(build_id, failure)
             .expect("the failure receipt must serialize")
             .parse()
             .expect("the failure receipt must be valid JSON")
@@ -252,8 +250,8 @@ mod tests {
         let failure = Failure::at(
             Stage::Configuration,
             Some("manifest.toml"),
-            "RomGenerationMismatch",
-            "rom generation a does not match manifest generation b",
+            "RomRecordMissing",
+            "managed ROM Slot record is missing",
         );
 
         let json = consumer_json(None, &failure);
@@ -263,14 +261,14 @@ mod tests {
         );
         assert_eq!(json["stage"], serde_json::json!("configuration"));
         assert_eq!(json["component"], serde_json::json!("manifest.toml"));
-        assert_eq!(json["error"], serde_json::json!("RomGenerationMismatch"));
+        assert_eq!(json["error"], serde_json::json!("RomRecordMissing"));
         assert_eq!(
             json["detail"],
-            serde_json::json!("rom generation a does not match manifest generation b")
+            serde_json::json!("managed ROM Slot record is missing")
         );
         assert!(
-            json["generation"].is_null(),
-            "a generation that never validated stays null"
+            json["build_id"].is_null(),
+            "an unavailable build ID stays null"
         );
 
         let mut keys: Vec<&str> = json
@@ -283,17 +281,17 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "build_id",
                 "component",
                 "detail",
                 "error",
-                "generation",
                 "schema_version",
                 "stage",
             ]
         );
 
-        let validated = consumer_json(Some("release-1"), &failure);
-        assert_eq!(validated["generation"], serde_json::json!("release-1"));
+        let validated = consumer_json(Some("012345abcdef"), &failure);
+        assert_eq!(validated["build_id"], serde_json::json!("012345abcdef"));
 
         let unattributed = consumer_json(
             None,
@@ -307,7 +305,6 @@ mod tests {
     fn stage_identifiers_are_the_stable_kebab_case_abi() {
         for (stage, expected) in [
             (Stage::Configuration, "configuration"),
-            (Stage::Generation, "generation"),
             (Stage::Storage, "storage"),
             (Stage::ModuleLoad, "module-load"),
             (Stage::ModuleCheck, "module-check"),
@@ -370,7 +367,7 @@ mod tests {
 
     #[test]
     fn a_failure_without_a_mounted_esp_is_not_persisted_and_does_not_panic() {
-        // No ESP means no receipt target and no fallback generation: the call
+        // No ESP means no receipt target: the call
         // must return without opening the filesystem.
         record(
             &mut ReceiptState::default(),
@@ -378,7 +375,7 @@ mod tests {
         );
 
         let mut state = ReceiptState {
-            generation: Some("release-1".to_owned()),
+            build_id: Some("012345abcdef".to_owned()),
             esp_mount: None,
         };
         record(

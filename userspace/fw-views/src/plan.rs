@@ -44,12 +44,12 @@ pub struct View {
 }
 
 /// Every firmware view the selected ROM projects.
-pub fn views(rom: &RomConfig) -> Vec<View> {
+pub fn views(rom: &RomConfig, rom_number: u32) -> Vec<View> {
     rom.firmware_views
         .iter()
         .map(|view| View {
             origin: view.name.clone(),
-            device: device(rom.rom_number, &view.name),
+            device: device(rom_number, &view.name),
             thin_id: view.thin_id,
         })
         .collect()
@@ -78,9 +78,7 @@ mod tests {
 
     const ROM: &str = r#"
 schema_version = 1
-generation = "release-1"
 id = "android-b"
-rom_number = 2
 managed = true
 [[firmware_views]]
 name = "xbl_a"
@@ -100,10 +98,10 @@ read_only = false
 
     #[test]
     fn view_names_and_ids_come_from_the_rom_number_and_config_order() {
-        let rom = parse_rom(ROM, "release-1").unwrap();
+        let rom = parse_rom(ROM).unwrap();
 
         assert_eq!(
-            views(&rom),
+            views(&rom, 2),
             [
                 View {
                     origin: "xbl_a".to_owned(),
@@ -124,14 +122,11 @@ read_only = false
 
     #[test]
     fn a_rom_without_views_plans_nothing() {
-        let rom = parse_rom(
-            "schema_version = 1\ngeneration = \"release-1\"\nid = \"android-a\"\nmanaged = true\n\
-             [[partitions]]\nname = \"system\"\nbackend = \"/dev/block/by-name/system\"\nread_only = true\n",
-            "release-1",
-        )
+        let rom = parse_rom("schema_version = 1\nid = \"android-a\"\nmanaged = true\n\
+         [[partitions]]\nname = \"system\"\nbackend = \"/dev/block/by-name/system\"\nread_only = true\n")
         .unwrap();
 
-        assert!(views(&rom).is_empty());
+        assert!(views(&rom, 1).is_empty());
     }
 
     #[test]

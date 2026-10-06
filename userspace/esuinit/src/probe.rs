@@ -23,9 +23,8 @@ pub(crate) enum ProbeStage {
     VendorLoaded,
     EspReady,
     ManifestRead,
-    GenerationMatched,
     PayloadLoaded,
-    PlatformStaged,
+    ModuleRcPublished,
 }
 
 impl ProbeStage {
@@ -51,9 +50,8 @@ impl ProbeStage {
             Some("vendor-loaded") => Ok(Some(Self::VendorLoaded)),
             Some("esp-ready") => Ok(Some(Self::EspReady)),
             Some("manifest-read") => Ok(Some(Self::ManifestRead)),
-            Some("generation-matched") => Ok(Some(Self::GenerationMatched)),
             Some("payload-loaded") => Ok(Some(Self::PayloadLoaded)),
-            Some("platform-staged") => Ok(Some(Self::PlatformStaged)),
+            Some("module-rc-published") => Ok(Some(Self::ModuleRcPublished)),
             Some(_) => Err(Self::invalid()),
         }
     }
@@ -67,8 +65,12 @@ impl ProbeStage {
     }
 }
 
-/// Arm the APSS-minidump probe only after managed platform staging completes.
-pub(crate) fn arm_delayed_handoff(payload_root: &Path) -> Result<(), Failure> {
+/// Arm the APSS-minidump probe only after module RC publication completes.
+pub(crate) fn arm_delayed_handoff(
+    payload_root: &Path,
+    rom: &str,
+    rom_number: u32,
+) -> Result<(), Failure> {
     let busybox = payload_root.join("bin/busybox");
     let command = format!(
         "exec 3>/proc/sysrq-trigger; ./bin/busybox sleep {HANDOFF_DELAY_SECONDS}; printf c >&3"
@@ -78,6 +80,8 @@ pub(crate) fn arm_delayed_handoff(payload_root: &Path) -> Result<(), Failure> {
         .arg("-c")
         .arg(command)
         .env_clear()
+        .env("ESU_ROM", rom)
+        .env("ESU_ROM_NUMBER", rom_number.to_string())
         .current_dir(payload_root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

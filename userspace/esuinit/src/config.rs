@@ -1,10 +1,7 @@
 //! Strict validation of the managed-boot configuration.
 //!
-//! The manifest and ROM files are the only configuration inputs, TOML is used
-//! directly, and every rule is enforced here: schema version, generation
-//! identity, module order/name/path, and the managed-ROM projection rules.
-//! Invalid configuration is never interpreted as `managed = false`, and the
-//! loader never falls back to another generation or an implicit module.
+//! TOML files define module precedence and projections. ROM identity and number
+//! come exclusively from efivarfs, never a configuration fallback.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,7 +18,7 @@ pub const SCHEMA_VERSION: u64 = 1;
 
 /// Highest managed ROM number. Five ROMs exactly fill DeviceInfo's 32
 /// per-ROM rollback windows, so a larger number could never be isolated.
-pub const MAX_ROM_NUMBER: u32 = 5;
+pub use esu_platform::efivars::MAX_ROM_NUMBER;
 
 /// Physical bases whose `_a`/`_b` pair is selected by the kernel from the
 /// current slot. A ROM never shadows them with its own firmware view: the
@@ -35,9 +32,6 @@ const KERNEL_SET_BASES: [&str; 7] = [
     "vbmeta_system",
     "vbmeta_vendor",
 ];
-
-/// Manifest generation limit, matching every compiled payload component.
-pub const MAX_GENERATION_BYTES: usize = 63;
 
 /// Logical module name limit.
 pub const MAX_NAME_BYTES: usize = 64;
@@ -113,12 +107,10 @@ impl From<ConfigError> for Failure {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub schema_version: u64,
-    pub generation: String,
     /// Directory of per-ROM `<id>.toml` files, relative to the payload root.
     pub rom: String,
     pub modules: Vec<ModuleEntry>,
-    #[serde(default)]
-    pub platform: Option<esu_platform::Platform>,
+    pub modules_order: Vec<String>,
 }
 
 /// One ordered manifest module entry.
@@ -130,25 +122,13 @@ pub struct ModuleEntry {
     pub params: String,
 }
 
-/// Default managed ROM number: ROM 1, the stock ROM, which every payload that
-/// predates `rom_number` describes.
-fn default_rom_number() -> u32 {
-    1
-}
-
 /// Selected per-ROM configuration, parsed with unknown/duplicate/missing fields rejected.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RomConfig {
     pub schema_version: u64,
-    pub generation: String,
     pub id: String,
     pub managed: bool,
-    /// Managed ROM number, identical to this ROM's `Slot-<id>` record.
-    /// `1` for the stock ROM and for every payload that predates the field;
-    /// `2..=5` for the additional ROMs that share the firmware storage.
-    #[serde(default = "default_rom_number")]
-    pub rom_number: u32,
     #[serde(default)]
     pub partitions: Vec<PartitionEntry>,
     /// Per-ROM firmware views: thin devices of the shared pool that serve a
@@ -246,47 +226,12 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, ConfigError> {
     Ok(manifest)
 }
 
-/// Parse and validate a selected ROM snapshot against the manifest generation.
-pub fn parse_rom(text: &str, manifest_generation: &str) -> Result<RomConfig, ConfigError> {
+/// Parse and structurally validate a ROM; runtime callers validate its number separately.
+pub fn parse_rom(text: &str) -> Result<RomConfig, ConfigError> {
     let rom: RomConfig =
         toml::from_str(text).map_err(|error| ConfigError::new("RomParse", error.to_string()))?;
-    validate_rom(&rom, manifest_generation)?;
+    validate_rom_structure(&rom)?;
     Ok(rom)
-}
-
-/// Select only the explicit Surfacer ID. Missing, duplicate or conflicting
-/// boot arguments are errors, never a request for a default ROM.
-pub fn selected_rom_id<'a>(bootconfig: &'a str, cmdline: &'a str) -> Result<&'a str, ConfigError> {
-    const KEY: &str = "androidboot.esu.rom";
-    fn entry<'a>(text: &'a str, selected: &mut Option<&'a str>) -> Result<(), ConfigError> {
-        let (key, value) = text.split_once('=').unwrap_or((text, ""));
-        if key.trim() != KEY {
-            return Ok(());
-        }
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value);
-        validate_rom_id(value)?;
-        if selected.replace(value).is_some() {
-            return Err(ConfigError::new("RomSelectionDuplicate", KEY));
-        }
-        Ok(())
-    }
-    let mut boot = None;
-    let mut command = None;
-    for line in bootconfig.lines() {
-        entry(line.trim(), &mut boot)?;
-    }
-    for token in cmdline.split_whitespace() {
-        entry(token, &mut command)?;
-    }
-    if matches!((boot, command), (Some(a), Some(b)) if a != b) {
-        return Err(ConfigError::new("RomSelectionConflict", KEY));
-    }
-    boot.or(command)
-        .ok_or_else(|| ConfigError::new("RomSelectionMissing", KEY))
 }
 
 fn validate_rom_id(id: &str) -> Result<(), ConfigError> {
@@ -304,13 +249,9 @@ pub fn rom_path(manifest: &Manifest, id: &str) -> Result<String, ConfigError> {
     Ok(path)
 }
 
-pub fn parse_selected_rom(
-    text: &str,
-    generation: &str,
-    id: &str,
-) -> Result<RomConfig, ConfigError> {
+pub fn parse_selected_rom(text: &str, id: &str) -> Result<RomConfig, ConfigError> {
     validate_rom_id(id)?;
-    let rom = parse_rom(text, generation)?;
+    let rom = parse_rom(text)?;
     if rom.id != id {
         return Err(ConfigError::new(
             "RomIdMismatch",
@@ -320,7 +261,7 @@ pub fn parse_selected_rom(
     Ok(rom)
 }
 
-/// Enforce the manifest schema, generation rule, and ordered module rules.
+/// Enforce strict schema and the distinct kernel/ESP module lists.
 pub fn validate_manifest(manifest: &Manifest) -> Result<(), ConfigError> {
     if manifest.schema_version != SCHEMA_VERSION {
         return Err(ConfigError::new(
@@ -332,14 +273,18 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), ConfigError> {
         ));
     }
 
-    validate_generation(&manifest.generation)
-        .map_err(|error| error.with_component("manifest.toml"))?;
-
     validate_relative_path(&manifest.rom).map_err(|error| error.with_component("manifest.toml"))?;
-    if let Some(platform) = &manifest.platform {
-        platform.validate().map_err(|error| {
-            ConfigError::at("PlatformConfiguration", "manifest.toml", error.to_string())
-        })?;
+    let mut ids = std::collections::HashSet::new();
+    for id in &manifest.modules_order {
+        esu_platform::identifier(id)
+            .map_err(|error| ConfigError::at("ModuleIdInvalid", id, error.to_string()))?;
+        if !ids.insert(id) {
+            return Err(ConfigError::at(
+                "ModuleIdDuplicate",
+                id,
+                "duplicate modules_order ID",
+            ));
+        }
     }
 
     if manifest.modules.is_empty() {
@@ -366,6 +311,16 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), ConfigError> {
 
         validate_relative_path(&module.path)
             .map_err(|error| error.with_component(module.name.clone()))?;
+        if !module.path.starts_with("lib/")
+            || !module.path.ends_with(".ko")
+            || module.path.split('/').count() != 2
+        {
+            return Err(ConfigError::at(
+                "ModulePathInvalid",
+                &module.name,
+                "kernel modules must use lib/<filename>.ko",
+            ));
+        }
 
         validate_module_params(&module.params)
             .map_err(|error| error.with_component(module.name.clone()))?;
@@ -382,8 +337,53 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Enforce the ROM schema, generation equality, and projection rules.
-pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), ConfigError> {
+/// Fixed cpio identity modules were loaded before reading an ESP manifest.
+pub fn validate_bootstrap(manifest: &Manifest) -> Result<(), ConfigError> {
+    for (name, params) in [("kernelesp", ""), ("efivarfs", "dev=by-name:bdsvars")] {
+        let entry = manifest
+            .modules
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                ConfigError::at(
+                    "IdentityModuleMissing",
+                    name,
+                    "identity bootstrap module absent from manifest",
+                )
+            })?;
+        if entry.path != format!("lib/{name}.ko") || entry.params != params {
+            return Err(ConfigError::at(
+                "IdentityModuleMismatch",
+                name,
+                "manifest differs from loaded cpio bootstrap",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate ROM identity-dependent projection rules with the bdsvars number.
+pub fn validate_rom(rom: &RomConfig, rom_number: u32) -> Result<(), ConfigError> {
+    validate_rom_structure(rom)?;
+    if !(1..=MAX_ROM_NUMBER).contains(&rom_number) {
+        return Err(ConfigError::new(
+            "RomNumberInvalid",
+            "bdsvars ROM number is outside 1..=5",
+        ));
+    }
+    for partition in &rom.partitions {
+        if block::is_esp_file(&partition.backend) && !partition.read_only && rom_number < 2 {
+            return Err(ConfigError::at(
+                "RomEspFileWritable",
+                &partition.name,
+                "a writable ESP-file backend requires a managed ROM >= 2",
+            ));
+        }
+    }
+    validate_firmware_views(rom, rom_number)
+}
+
+fn validate_rom_structure(rom: &RomConfig) -> Result<(), ConfigError> {
     if rom.schema_version != SCHEMA_VERSION {
         return Err(ConfigError::new(
             "RomSchemaVersion",
@@ -392,30 +392,7 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
         .with_component("rom.toml"));
     }
 
-    validate_generation(&rom.generation).map_err(|error| error.with_component("rom.toml"))?;
     validate_rom_id(&rom.id)?;
-
-    if rom.rom_number == 0 || rom.rom_number > MAX_ROM_NUMBER {
-        return Err(ConfigError::at(
-            "RomNumberInvalid",
-            "rom.toml",
-            format!(
-                "rom_number must be 1..={MAX_ROM_NUMBER}, found {}",
-                rom.rom_number
-            ),
-        ));
-    }
-
-    if rom.generation != manifest_generation {
-        return Err(ConfigError::at(
-            "RomGenerationMismatch",
-            "rom.toml",
-            format!(
-                "rom generation {} does not match manifest generation {}",
-                rom.generation, manifest_generation
-            ),
-        ));
-    }
 
     if rom.managed && rom.partitions.is_empty() {
         return Err(ConfigError::new(
@@ -460,17 +437,7 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
 
         validate_backend_path(&partition.backend)
             .map_err(|error| error.with_component(partition.name.clone()))?;
-
-        if block::is_esp_file(&partition.backend) && !partition.read_only && rom.rom_number < 2 {
-            return Err(ConfigError::at(
-                "RomEspFileWritable",
-                partition.name.clone(),
-                "a writable ESP-file backend requires a managed ROM >= 2",
-            ));
-        }
     }
-
-    validate_firmware_views(rom)?;
 
     Ok(())
 }
@@ -484,7 +451,7 @@ pub fn validate_rom(rom: &RomConfig, manifest_generation: &str) -> Result<(), Co
 /// `(rom_number << 16) | index` thin id of its 1-based list position, appears
 /// once, and is projected as the writable `/dev/mapper/rom<N>-fw-<name>`
 /// partition that `fw-views` creates before the `gpt` entry runs.
-fn validate_firmware_views(rom: &RomConfig) -> Result<(), ConfigError> {
+fn validate_firmware_views(rom: &RomConfig, rom_number: u32) -> Result<(), ConfigError> {
     if rom.firmware_views.is_empty() {
         return Ok(());
     }
@@ -496,12 +463,12 @@ fn validate_firmware_views(rom: &RomConfig) -> Result<(), ConfigError> {
         ));
     }
 
-    if rom.rom_number < 2 {
+    if rom_number < 2 {
         return Err(ConfigError::new(
             "RomFirmwareViewsRomNumber",
             format!(
                 "firmware views require rom_number >= 2, found {}",
-                rom.rom_number
+                rom_number
             ),
         ));
     }
@@ -544,7 +511,7 @@ fn validate_firmware_views(rom: &RomConfig) -> Result<(), ConfigError> {
             ));
         }
 
-        let expected = (rom.rom_number << 16) | (offset as u32 + 1);
+        let expected = (rom_number << 16) | (offset as u32 + 1);
 
         if view.thin_id != expected {
             return Err(ConfigError::at(
@@ -557,7 +524,7 @@ fn validate_firmware_views(rom: &RomConfig) -> Result<(), ConfigError> {
             ));
         }
 
-        let backend = format!("/dev/mapper/rom{}-fw-{}", rom.rom_number, view.name);
+        let backend = format!("/dev/mapper/rom{rom_number}-fw-{}", view.name);
 
         let projected = rom.partitions.iter().any(|partition| {
             partition.name == view.name && partition.backend == backend && !partition.read_only
@@ -693,44 +660,6 @@ fn validate_backend_identity(
             ),
         ));
     }
-    Ok(())
-}
-
-/// Generation identity: nonempty ASCII letters/digits plus `.`, `_`, `-`,
-/// at most 63 bytes. It identifies one coordinated payload, not a kernel
-/// version, and is compared by exact byte equality everywhere.
-pub fn validate_generation(generation: &str) -> Result<(), ConfigError> {
-    if generation.is_empty() {
-        return Err(ConfigError::new("GenerationEmpty", "generation is empty"));
-    }
-
-    if generation.len() > MAX_GENERATION_BYTES {
-        return Err(ConfigError::new(
-            "GenerationTooLong",
-            format!(
-                "generation is {} bytes, limit {MAX_GENERATION_BYTES}",
-                generation.len()
-            ),
-        ));
-    }
-
-    if !generation.is_ascii() {
-        return Err(ConfigError::new(
-            "GenerationNotAscii",
-            "generation must be ASCII",
-        ));
-    }
-
-    if let Some(byte) = generation
-        .bytes()
-        .find(|byte| !byte.is_ascii_alphanumeric() && !matches!(*byte, b'.' | b'_' | b'-'))
-    {
-        return Err(ConfigError::new(
-            "GenerationInvalidCharacter",
-            format!("generation contains {byte:#04x} outside [A-Za-z0-9._-]"),
-        ));
-    }
-
     Ok(())
 }
 
@@ -929,20 +858,19 @@ mod tests {
 
     const MANIFEST: &str = r#"
 schema_version = 1
-generation = "release-1"
+modules_order = ["thin", "fw-views"]
 rom = "roms"
 [[modules]]
 name = "kernelesp"
-path = "modules/kernelesp.ko"
+path = "lib/kernelesp.ko"
 params = ""
 [[modules]]
 name = "gpt"
-path = "modules/gpt.ko"
+path = "lib/gpt.ko"
 params = "debug=0"
 "#;
     const ROM: &str = r#"
 schema_version = 1
-generation = "release-1"
 id = "android-a"
 managed = true
 [[partitions]]
@@ -953,9 +881,7 @@ read_only = true
     /// One managed ROM 2 view of the physical `xbl_a` firmware partition.
     const FW_ROM: &str = r#"
 schema_version = 1
-generation = "release-1"
 id = "android-b"
-rom_number = 2
 managed = true
 [[firmware_views]]
 name = "xbl_a"
@@ -967,59 +893,25 @@ read_only = false
 "#;
 
     #[test]
-    fn boot_selection_is_explicit_unique_and_matches_the_rom() {
+    fn selected_identity_must_match_rom_and_safe_path() {
+        let manifest = parse_manifest(MANIFEST).unwrap();
         for id in ["android-a", "android.b_2", "recovery", &"x".repeat(59)] {
-            let boot = format!("androidboot.esu.rom = \"{id}\"\n");
-            let command = format!("androidboot.esu.rom={id}");
-            assert_eq!(selected_rom_id(&boot, "").unwrap(), id);
-            assert_eq!(selected_rom_id("", &command).unwrap(), id);
-            assert_eq!(selected_rom_id(&boot, &command).unwrap(), id);
-            assert_eq!(
-                rom_path(&parse_manifest(MANIFEST).unwrap(), id).unwrap(),
-                format!("roms/{id}.toml")
-            );
+            assert_eq!(rom_path(&manifest, id).unwrap(), format!("roms/{id}.toml"));
         }
-        for (boot, command) in [
-            ("", ""),
-            ("androidboot.qshim.rom = \"android-a\"", ""),
-            ("androidboot.esu.rom = \"a\"", "androidboot.esu.rom=b"),
-            (
-                "androidboot.esu.rom = \"a\"\nandroidboot.esu.rom = \"a\"",
-                "",
-            ),
-            ("", "androidboot.esu.rom=a androidboot.esu.rom=a"),
-        ] {
-            assert!(selected_rom_id(boot, command).is_err());
+        for id in ["", ".", "..", "../a", "a/b", "é", "a b", &"x".repeat(60)] {
+            assert!(rom_path(&manifest, id).is_err());
         }
-        for id in [
-            "",
-            ".",
-            "..",
-            "../a",
-            "a/b",
-            "é",
-            "a b",
-            "\"a",
-            "a\"",
-            &"x".repeat(60),
-        ] {
-            assert!(selected_rom_id(&format!("androidboot.esu.rom = {id}"), "").is_err());
-            assert!(rom_path(&parse_manifest(MANIFEST).unwrap(), id).is_err());
-        }
-        parse_selected_rom(ROM, "release-1", "android-a").unwrap();
+        parse_selected_rom(ROM, "android-a").unwrap();
         assert_eq!(
-            parse_selected_rom(ROM, "release-1", "android-b")
-                .unwrap_err()
-                .error,
+            parse_selected_rom(ROM, "android-b").unwrap_err().error,
             "RomIdMismatch"
         );
-        assert!(parse_rom(&ROM.replace("android-a", "../a"), "release-1").is_err());
     }
 
     #[test]
     fn valid_managed_configuration_preserves_order_and_projection() {
         let manifest = parse_manifest(MANIFEST).unwrap();
-        let rom = parse_rom(ROM, &manifest.generation).unwrap();
+        let rom = parse_rom(ROM).unwrap();
         validate_managed(&manifest, &rom).unwrap();
         assert_eq!(manifest.rom, "roms");
         assert_eq!(
@@ -1036,37 +928,61 @@ read_only = false
     }
 
     #[test]
-    fn rom_number_defaults_to_the_stock_rom_and_stays_within_the_rollback_table() {
-        assert_eq!(parse_rom(ROM, "release-1").unwrap().rom_number, 1);
-
-        let explicit = ROM.replace("managed = true", "managed = true\nrom_number = 3");
-        assert_eq!(
-            parse_selected_rom(&explicit, "release-1", "android-a")
-                .unwrap()
-                .rom_number,
-            3
+    fn manifest_cannot_change_loaded_identity_bootstrap() {
+        let text = format!(
+            "{MANIFEST}\n[[modules]]\nname=\"efivarfs\"\npath=\"lib/efivarfs.ko\"\nparams=\"dev=by-name:bdsvars\"\n"
         );
-
-        for invalid in [0, MAX_ROM_NUMBER + 1, u32::MAX] {
-            let text = ROM.replace(
-                "managed = true",
-                &format!("managed = true\nrom_number = {invalid}"),
-            );
-            let error = parse_rom(&text, "release-1").unwrap_err();
-            assert_eq!(error.error, "RomNumberInvalid", "{invalid}");
-            assert_eq!(error.component.as_deref(), Some("rom.toml"));
-            assert!(!error.is_pending());
-            assert!(parse_selected_rom(&text, "release-1", "android-a").is_err());
-        }
-
+        validate_bootstrap(&parse_manifest(&text).unwrap()).unwrap();
         assert_eq!(
-            parse_rom(
-                &ROM.replace("managed = true", "managed = true\nrom_number = \"1\""),
-                "release-1"
-            )
-            .unwrap_err()
-            .error,
-            "RomParse"
+            validate_bootstrap(&parse_manifest(MANIFEST).unwrap())
+                .unwrap_err()
+                .error,
+            "IdentityModuleMissing"
+        );
+        for changed in [
+            text.replace("dev=by-name:bdsvars", "dev=8:16"),
+            text.replace("lib/kernelesp.ko", "lib/other.ko"),
+        ] {
+            assert_eq!(
+                validate_bootstrap(&parse_manifest(&changed).unwrap())
+                    .unwrap_err()
+                    .error,
+                "IdentityModuleMismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_identity_fields_are_rejected() {
+        for field in ["generation = \"old\"", "rom_number = 2"] {
+            assert_eq!(
+                parse_rom(&format!("{field}\n{ROM}")).unwrap_err().error,
+                "RomParse"
+            );
+        }
+        for field in [
+            "generation = \"old\"",
+            "[platform]\npackages = []",
+            "recovery_packages = []",
+        ] {
+            assert_eq!(
+                parse_manifest(&format!("{field}\n{MANIFEST}"))
+                    .unwrap_err()
+                    .error,
+                "ManifestParse"
+            );
+        }
+        assert_eq!(
+            parse_manifest(&MANIFEST.replace("[\"thin\", \"fw-views\"]", "[\"thin\", \"thin\"]"))
+                .unwrap_err()
+                .error,
+            "ModuleIdDuplicate"
+        );
+        assert_eq!(
+            parse_manifest(&MANIFEST.replace("[\"thin\", \"fw-views\"]", "[\"../bad\"]"))
+                .unwrap_err()
+                .error,
+            "ModuleIdInvalid"
         );
     }
 
@@ -1100,11 +1016,7 @@ read_only = false
             ROM.replace("id = \"android-a\"\n", ""),
             ROM.replace("managed = true", "managed = \"true\""),
         ] {
-            assert_eq!(
-                parse_rom(&text, "release-1").unwrap_err().error,
-                "RomParse",
-                "{text}"
-            );
+            assert_eq!(parse_rom(&text).unwrap_err().error, "RomParse", "{text}");
         }
     }
 
@@ -1124,7 +1036,7 @@ read_only = false
                 "ManifestDuplicateModule",
             ),
             (
-                "schema_version=1\ngeneration=\"release-1\"\nrom=\"roms\"\nmodules=[]".into(),
+                "schema_version=1\nrom=\"roms\"\nmodules=[]\nmodules_order=[]".into(),
                 "ManifestModulesEmpty",
             ),
         ] {
@@ -1134,34 +1046,28 @@ read_only = false
 
     #[test]
     fn managed_requires_gpt_and_partitions_without_unmanaged_fallback() {
-        let manifest =
-            parse_manifest(&MANIFEST.replace("name = \"gpt\"", "name = \"other\"")).unwrap();
-        let rom = parse_rom(ROM, "release-1").unwrap();
+        let manifest = parse_manifest(
+            &MANIFEST
+                .replace("name = \"gpt\"", "name = \"other\"")
+                .replace("lib/gpt.ko", "lib/other.ko"),
+        )
+        .unwrap();
+        let rom = parse_rom(ROM).unwrap();
         assert_eq!(
             validate_managed(&manifest, &rom).unwrap_err().error,
             "ManifestManagedGptMissing"
         );
         let prefix = ROM.split("[[partitions]]").next().unwrap();
         for text in [prefix.to_owned(), format!("{prefix}partitions = []\n")] {
-            assert_eq!(
-                parse_rom(&text, "release-1").unwrap_err().error,
-                "RomPartitionsEmpty"
-            );
+            assert_eq!(parse_rom(&text).unwrap_err().error, "RomPartitionsEmpty");
         }
         assert_eq!(
-            parse_rom(
-                &ROM.replace("managed = true", "managed = false"),
-                "release-1"
-            )
-            .unwrap_err()
-            .error,
+            parse_rom(&ROM.replace("managed = true", "managed = false"),)
+                .unwrap_err()
+                .error,
             "RomPartitionsNotAllowed"
         );
-        let unmanaged = parse_rom(
-            &prefix.replace("managed = true", "managed = false"),
-            "release-1",
-        )
-        .unwrap();
+        let unmanaged = parse_rom(&prefix.replace("managed = true", "managed = false")).unwrap();
         assert!(!unmanaged.managed);
         assert!(unmanaged.partitions.is_empty());
 
@@ -1173,7 +1079,7 @@ read_only = false
 
         // The same unmanaged ROM with an unmanaged manifest is valid.
         let plain = parse_manifest(&MANIFEST.replace(
-            "\n[[modules]]\nname = \"gpt\"\npath = \"modules/gpt.ko\"\nparams = \"debug=0\"\n",
+            "\n[[modules]]\nname = \"gpt\"\npath = \"lib/gpt.ko\"\nparams = \"debug=0\"\n",
             "",
         ))
         .unwrap();
@@ -1181,31 +1087,24 @@ read_only = false
     }
 
     #[test]
-    fn rom_rejects_generation_schema_and_duplicate_partition_names() {
+    fn rom_rejects_schema_and_duplicate_partition_names() {
         assert_eq!(
-            parse_rom(ROM, "Release-1").unwrap_err().error,
-            "RomGenerationMismatch"
-        );
-        assert_eq!(
-            parse_rom(
-                &ROM.replace("schema_version = 1", "schema_version = 0"),
-                "release-1"
-            )
-            .unwrap_err()
-            .error,
+            parse_rom(&ROM.replace("schema_version = 1", "schema_version = 0"),)
+                .unwrap_err()
+                .error,
             "RomSchemaVersion"
         );
         let duplicate = format!(
             "{ROM}\n[[partitions]]\nname=\"system\"\nbackend=\"/dev/other\"\nread_only=false\n"
         );
-        let error = parse_rom(&duplicate, "release-1").unwrap_err();
+        let error = parse_rom(&duplicate).unwrap_err();
         assert_eq!(error.error, "RomPartitionDuplicate");
         assert_eq!(error.component.as_deref(), Some("system"));
     }
 
     #[test]
     fn resolved_backend_identity_rejects_aliases_but_not_distinct_devices() {
-        let rom = parse_rom(ROM, "release-1").unwrap();
+        let rom = parse_rom(ROM).unwrap();
         let first = &rom.partitions[0];
         let vendor = PartitionEntry {
             name: "vendor".into(),
@@ -1248,7 +1147,7 @@ read_only = false
             "esp-file:esu/backing.img",
         ] {
             let text = ROM.replace("/dev/block/by-name/system", backend);
-            parse_rom(&text, "release-1").unwrap();
+            parse_rom(&text).unwrap();
         }
 
         for (backend, error) in [
@@ -1270,10 +1169,16 @@ read_only = false
             ("file:esu/backing.img", "BackendNotAbsolute"),
         ] {
             let text = ROM.replace("/dev/block/by-name/system", backend);
-            let rejection = parse_rom(&text, "release-1").unwrap_err();
+            let rejection = parse_rom(&text).unwrap_err();
             assert_eq!(rejection.error, error, "{backend}");
             assert_eq!(rejection.component.as_deref(), Some("system"), "{backend}");
         }
+    }
+
+    fn numbered(text: &str, number: u32) -> Result<RomConfig, ConfigError> {
+        let rom = parse_rom(text)?;
+        validate_rom(&rom, number)?;
+        Ok(rom)
     }
 
     #[test]
@@ -1281,50 +1186,28 @@ read_only = false
         let writable = ROM
             .replace("/dev/block/by-name/system", "esp-file:esu/backing.img")
             .replace("read_only = true", "read_only = false");
-
-        let error = parse_rom(&writable, "release-1").unwrap_err();
+        let error = numbered(&writable, 1).unwrap_err();
         assert_eq!(error.error, "RomEspFileWritable");
         assert_eq!(error.component.as_deref(), Some("system"));
-
-        // A managed ROM >= 2 owns the ESP-file image and may write through it.
-        let later = writable.replace("managed = true", "managed = true\nrom_number = 2");
-        let rom = parse_rom(&later, "release-1").unwrap();
-        assert_eq!(rom.rom_number, 2);
-        assert!(rom.has_writable_esp_file());
-        assert!(!parse_rom(ROM, "release-1").unwrap().has_writable_esp_file());
+        assert!(numbered(&writable, 2).unwrap().has_writable_esp_file());
+        assert!(!parse_rom(ROM).unwrap().has_writable_esp_file());
     }
 
     #[test]
     fn firmware_views_require_a_managed_rom_from_two_on() {
-        let rom = parse_rom(FW_ROM, "release-1").unwrap();
-        assert_eq!(rom.rom_number, 2);
-        assert_eq!(rom.firmware_views.len(), 1);
-        assert_eq!(rom.firmware_views[0].name, "xbl_a");
+        let rom = numbered(FW_ROM, 2).unwrap();
         assert_eq!(rom.firmware_views[0].thin_id, 131_073);
-
-        // ROM 1 reads the physical firmware partitions directly.
-        let error = parse_rom(
-            &FW_ROM.replace("rom_number = 2", "rom_number = 1"),
-            "release-1",
-        )
-        .unwrap_err();
-        assert_eq!(error.error, "RomFirmwareViewsRomNumber");
-
-        // Only a managed ROM has a projection contract for a view.
-        let unmanaged = "schema_version = 1\ngeneration = \"release-1\"\nid = \"android-b\"\n\
-                         rom_number = 2\nmanaged = false\n\
-                         [[firmware_views]]\nname = \"xbl_a\"\nthin_id = 131073\n";
-        let error = parse_rom(unmanaged, "release-1").unwrap_err();
-        assert_eq!(error.error, "RomFirmwareViewsUnmanaged");
-        assert_eq!(error.component.as_deref(), None);
-
-        // Five ROMs fill the reserved id range, so a sixth never has a view.
-        let error = parse_rom(
-            &FW_ROM.replace("rom_number = 2", "rom_number = 6"),
-            "release-1",
-        )
-        .unwrap_err();
-        assert_eq!(error.error, "RomNumberInvalid");
+        assert_eq!(
+            numbered(FW_ROM, 1).unwrap_err().error,
+            "RomFirmwareViewsRomNumber"
+        );
+        let unmanaged = "schema_version = 1\nid = \"android-b\"\nmanaged = false\n\
+            [[firmware_views]]\nname = \"xbl_a\"\nthin_id = 131073\n";
+        assert_eq!(
+            numbered(unmanaged, 2).unwrap_err().error,
+            "RomFirmwareViewsUnmanaged"
+        );
+        assert_eq!(numbered(FW_ROM, 6).unwrap_err().error, "RomNumberInvalid");
     }
 
     #[test]
@@ -1337,7 +1220,7 @@ read_only = false
                 &format!("name = {name:?}\nthin_id"),
                 1,
             );
-            let error = parse_rom(&text, "release-1").unwrap_err();
+            let error = numbered(&text, 2).unwrap_err();
             assert_eq!(error.error, "RomFirmwareViewName", "{name}");
             assert_eq!(error.component.as_deref(), Some(name));
         }
@@ -1346,7 +1229,7 @@ read_only = false
         // LVM2-owned id and never another ROM's id.
         for id in ["0", "1", "131074", "16777216"] {
             let text = FW_ROM.replacen("thin_id = 131073", &format!("thin_id = {id}"), 1);
-            let error = parse_rom(&text, "release-1").unwrap_err();
+            let error = numbered(&text, 2).unwrap_err();
             assert_eq!(error.error, "RomFirmwareViewThinId", "{id}");
             assert_eq!(error.component.as_deref(), Some("xbl_a"));
         }
@@ -1356,7 +1239,7 @@ read_only = false
             "[[partitions]]",
             "[[firmware_views]]\nname = \"xbl_a\"\nthin_id = 131074\n\n[[partitions]]",
         );
-        let error = parse_rom(&duplicate, "release-1").unwrap_err();
+        let error = numbered(&duplicate, 2).unwrap_err();
         assert_eq!(error.error, "RomFirmwareViewDuplicate");
         assert_eq!(error.component.as_deref(), Some("xbl_a"));
     }
@@ -1376,7 +1259,7 @@ read_only = false
             // Right device, read-only.
             FW_ROM.replace("read_only = false", "read_only = true"),
         ] {
-            let error = parse_rom(&text, "release-1").unwrap_err();
+            let error = numbered(&text, 2).unwrap_err();
             assert_eq!(error.error, "RomFirmwareViewProjection");
             assert_eq!(error.component.as_deref(), Some("xbl_a"));
         }
@@ -1392,7 +1275,7 @@ read_only = false
                 "read_only = false\n",
                 "read_only = false\n\n[[partitions]]\nname = \"tz_a\"\nbackend = \"/dev/mapper/rom2-fw-tz_a\"\nread_only = false\n",
             );
-        let rom = parse_rom(&both, "release-1").unwrap();
+        let rom = numbered(&both, 2).unwrap();
         assert_eq!(
             rom.firmware_views
                 .iter()
@@ -1401,12 +1284,11 @@ read_only = false
             [("xbl_a", 131_073), ("tz_a", 131_074)]
         );
 
-        let rom = parse_rom(
+        let rom = numbered(
             &FW_ROM
-                .replacen("rom_number = 2", "rom_number = 5", 1)
                 .replacen("thin_id = 131073", "thin_id = 327681", 1)
                 .replacen("/dev/mapper/rom2-fw-xbl_a", "/dev/mapper/rom5-fw-xbl_a", 1),
-            "release-1",
+            5,
         )
         .unwrap();
         assert_eq!(rom.firmware_views[0].thin_id, 327_681);
@@ -1423,11 +1305,11 @@ read_only = false
             ));
         }
 
-        parse_rom(&rom, "release-1").unwrap();
+        parse_rom(&rom).unwrap();
 
         rom.push_str("[[partitions]]\nname=\"extra\"\nbackend=\"/dev/loop200\"\nread_only=true\n");
 
-        let error = parse_rom(&rom, "release-1").unwrap_err();
+        let error = parse_rom(&rom).unwrap_err();
         assert_eq!(error.error, "RomPartitionsTooMany");
         assert!(
             error
@@ -1449,35 +1331,16 @@ read_only = false
         ] {
             for text in [
                 MANIFEST.replace("roms", path),
-                MANIFEST.replace("modules/gpt.ko", path),
+                MANIFEST.replace("lib/gpt.ko", path),
             ] {
                 assert_eq!(parse_manifest(&text).unwrap_err().error, error, "{path}");
             }
         }
-        parse_manifest(&MANIFEST.replace("modules/gpt.ko", "modules/gpt..ko")).unwrap();
+        parse_manifest(&MANIFEST.replace("lib/gpt.ko", "lib/gpt..ko")).unwrap();
     }
 
     #[test]
     fn bounded_values_accept_exact_limits_and_reject_next_byte() {
-        validate_generation(&"g".repeat(MAX_GENERATION_BYTES)).unwrap();
-        assert_eq!(
-            validate_generation(&"g".repeat(MAX_GENERATION_BYTES + 1))
-                .unwrap_err()
-                .error,
-            "GenerationTooLong"
-        );
-        for (value, error) in [
-            ("", "GenerationEmpty"),
-            ("é", "GenerationNotAscii"),
-            ("release/1", "GenerationInvalidCharacter"),
-        ] {
-            assert_eq!(
-                parse_manifest(&MANIFEST.replace("release-1", value))
-                    .unwrap_err()
-                    .error,
-                error
-            );
-        }
         validate_module_name(&"m".repeat(MAX_NAME_BYTES)).unwrap();
         validate_partition_name(&"p".repeat(MAX_PARTITION_NAME_BYTES)).unwrap();
         assert_eq!(
@@ -1573,23 +1436,22 @@ read_only = false
     fn managed_rom_rejects_gpt_placed_before_the_core_module() {
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
-            generation: "release-1".to_owned(),
             rom: "roms".to_owned(),
-            platform: None,
+            modules_order: vec![],
             modules: vec![
                 ModuleEntry {
                     name: "gpt".to_owned(),
-                    path: "modules/gpt.ko".to_owned(),
+                    path: "lib/gpt.ko".to_owned(),
                     params: String::new(),
                 },
                 ModuleEntry {
                     name: "kernelesp".to_owned(),
-                    path: "modules/kernelesp.ko".to_owned(),
+                    path: "lib/kernelesp.ko".to_owned(),
                     params: String::new(),
                 },
             ],
         };
-        let rom = parse_rom(ROM, "release-1").unwrap();
+        let rom = parse_rom(ROM).unwrap();
 
         let error = validate_managed(&manifest, &rom).unwrap_err();
         assert_eq!(error.error, "ManifestManagedGptOrder");
@@ -1604,12 +1466,12 @@ read_only = false
 
     #[test]
     fn rejections_convert_to_configuration_failures_with_the_component() {
-        let rejection = parse_rom(ROM, "Release-1").unwrap_err();
+        let rejection =
+            parse_rom(&ROM.replace("schema_version = 1", "schema_version = 0")).unwrap_err();
         let failure = Failure::from(rejection);
         assert_eq!(failure.stage, Stage::Configuration);
-        assert_eq!(failure.error, "RomGenerationMismatch");
+        assert_eq!(failure.error, "RomSchemaVersion");
         assert_eq!(failure.component.as_deref(), Some("rom.toml"));
-        assert!(failure.detail.contains("Release-1"));
 
         let unattributed = Failure::from(
             parse_manifest(&MANIFEST.replace("schema_version = 1", "schema_version = 9"))
@@ -1629,7 +1491,7 @@ read_only = false
 
     #[test]
     fn resolved_backends_stay_unpublished_until_validation_succeeds() {
-        let rom = parse_rom(ROM, "release-1").unwrap();
+        let rom = parse_rom(ROM).unwrap();
         assert!(rom.resolved_backends().is_empty());
     }
 
@@ -1674,12 +1536,8 @@ read_only = false
     #[test]
     fn strict_and_ambiguous_rejections_are_never_pending() {
         for error in [
-            parse_rom(ROM, "Release-1").unwrap_err(),
-            parse_rom(
-                &ROM.replace("managed = true", "managed = \"true\""),
-                "release-1",
-            )
-            .unwrap_err(),
+            parse_rom(&ROM.replace("schema_version = 1", "schema_version = 0")).unwrap_err(),
+            parse_rom(&ROM.replace("managed = true", "managed = \"true\"")).unwrap_err(),
             parse_manifest(&MANIFEST.replace("schema_version = 1", "schema_version = 9"))
                 .unwrap_err(),
             validate_backend_path("/dev/block/sda").unwrap_err(),

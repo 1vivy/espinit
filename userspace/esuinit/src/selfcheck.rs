@@ -1,10 +1,6 @@
 //! Payload self-checks.
 //!
-//! The core module is checked through the esu control interface (UAPI v3):
-//! ABI compatibility, exact generation equality, and completed initialization.
-//! Every later module self-reports through its read-only sysfs parameters
-//! `generation` and `ready`, so a successful load alone is never treated as
-//! proof of compatibility.
+//! UAPI compatibility and completed initialization remain required.
 
 use std::fs;
 use std::path::Path;
@@ -18,7 +14,7 @@ use crate::receipt::{Failure, Stage};
 /// The readiness bit is derived from the kernel's own module state, so it is
 /// already set once `finit_module`/`init_module` returns success: a single
 /// ioctl is sufficient and there is no polling loop.
-pub fn check_core(generation: &str) -> Result<(), Failure> {
+pub fn check_core() -> Result<(), Failure> {
     let info = crate::query_core_info().map_err(|error| {
         Failure::at(
             Stage::ModuleCheck,
@@ -41,24 +37,6 @@ pub fn check_core(generation: &str) -> Result<(), Failure> {
         ));
     }
 
-    let reported = info.generation().ok_or_else(|| {
-        Failure::at(
-            Stage::Generation,
-            Some("kernelesp"),
-            "CoreGenerationInvalid",
-            "core generation is not NUL-terminated ASCII",
-        )
-    })?;
-
-    if reported != generation {
-        return Err(Failure::at(
-            Stage::Generation,
-            Some("kernelesp"),
-            "CoreGenerationMismatch",
-            format!("core generation {reported} does not match payload generation {generation}"),
-        ));
-    }
-
     if !info.ready() {
         return Err(Failure::at(
             Stage::ModuleCheck,
@@ -68,30 +46,19 @@ pub fn check_core(generation: &str) -> Result<(), Failure> {
         ));
     }
 
-    log::info!("Core module esu generation {generation} is ready");
+    log::info!("Core module esu is ready");
     Ok(())
 }
 
-/// Verify one later module through its `generation`/`ready` sysfs parameters.
-pub fn check_module(name: &str, generation: &str) -> Result<(), Failure> {
+/// Verify one later module through its readiness parameter.
+pub fn check_module(name: &str) -> Result<(), Failure> {
     let base = module_base(name)?;
-    check_generation_at(&base, name, generation)?;
     check_readiness_at(&base, name, Stage::ModuleCheck, "ModuleNotReady", None)?;
-    log::info!("Module {name} generation {generation} is ready");
+    log::info!("Module {name} is ready");
     Ok(())
 }
 
-/// Verify a module's identity before a consequential activation step. `gpt`
-/// uses this immediately after load and before APPLY can publish any view.
-pub fn check_module_generation(name: &str, generation: &str) -> Result<(), Failure> {
-    let base = module_base(name)?;
-    check_generation_at(&base, name, generation)?;
-    log::info!("Module {name} generation {generation} matches the payload");
-    Ok(())
-}
-
-/// Verify projection readiness after APPLY. Generation was already checked
-/// before APPLY, so this check observes only activation state.
+/// Verify projection readiness after APPLY.
 pub fn check_projection_ready(name: &str, modes: PartitionModes) -> Result<(), Failure> {
     let base = module_base(name)?;
     check_readiness_at(
@@ -114,21 +81,6 @@ fn module_base(name: &str) -> Result<std::path::PathBuf, Failure> {
             format!("/sys/module/{name} is absent after loading"),
         )
     })
-}
-
-fn check_generation_at(base: &Path, name: &str, generation: &str) -> Result<(), Failure> {
-    let reported = read_parameter(base, "generation", name)?;
-
-    if reported != generation {
-        return Err(Failure::at(
-            Stage::Generation,
-            Some(name),
-            "ModuleGenerationMismatch",
-            format!("module generation {reported} does not match payload generation {generation}"),
-        ));
-    }
-
-    Ok(())
 }
 
 fn check_readiness_at(

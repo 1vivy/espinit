@@ -4,18 +4,13 @@ This GPL-2.0-only external module targets ACK android16-6.12 generation 6.
 Build against the complete KMI output used by the payload:
 
 ```sh
-make -C modules/gpt KMI_SRC=/path/to/source KMI_OUT=/path/to/output \
-    ESU_GENERATION=payload-generation
+make -C modules/gpt KMI_SRC=/path/to/source KMI_OUT=/path/to/output
 ```
 
-Load `gpt.ko` without a generation override. `/dev/gptctl` is a root-only misc
-device; both ioctls also require `CAP_SYS_ADMIN`. `generation`, `ready` and
-`sealed` are read-only sysfs parameters. The generation is compiled from
-`ESU_GENERATION`
-(1–63 ASCII letters/digits/._-), or the full 40-byte lowercase Git HEAD when unset,
-using the same validation as `kernel/Kbuild`. Size assertions pin its storage;
-load-time parameters that change the compiled identity are rejected. Loading
-does not create a disk or assert readiness.
+Load `gpt.ko` normally. `/dev/gptctl` is a root-only misc device; both ioctls
+also require `CAP_SYS_ADMIN`. `ready` and `sealed` are read-only sysfs
+parameters. Loading does not create a disk or assert readiness. Payload
+build IDs are diagnostic files, not kernel module parameters or load gates.
 
 ## ABI v2
 
@@ -150,7 +145,7 @@ repository [build contract](../../README.md#build-notes), including the required
 Repository validation proves host manifest/config/UAPI behavior; exact
 Cuttlefish- and phone-kernel builds; every phone unresolved import against the
 exact `vmlinux`; and isolated boot under the exact Cuttlefish kernel covering
-module load, generation/readiness, APPLY/QUERY, projected names, mapped reads
+module load/readiness, APPLY/QUERY, projected names, mapped reads
 and writes, flush, metadata-write rejection, read-only rejection, and unload.
 That runtime proof uses disposable RAM backends. A second, sealed APPLY covers
 the seal: a referenced disk that is not a writable backend reports `ro=1` in

@@ -459,25 +459,19 @@ const fn ioc_write(nr: u32, size: u32) -> u32 {
 /// `KSU_IOCTL_GET_INFO` for the v3 structure (`0x80584502`).
 pub const IOCTL_GET_INFO: u32 = ioc_read(2, std::mem::size_of::<GetInfoCmd>() as u32);
 pub const IOCTL_SET_BOOT_MODE: u32 = ioc_write(20, std::mem::size_of::<u32>() as u32);
+pub const IOCTL_SET_MODULE_RC: u32 = ioc_write(21, std::mem::size_of::<ModuleRcCmd>() as u32);
 
 const _: () = assert!(IOCTL_GET_INFO == 0x8058_4502);
 const _: () = assert!(IOCTL_SET_BOOT_MODE == 0x4004_4514);
+const _: () = assert!(IOCTL_SET_MODULE_RC == 0x4010_4515);
+#[repr(C, align(8))]
+struct ModuleRcCmd {
+    ptr: u64,
+    len: u32,
+    reserved: u32,
+}
 
 impl GetInfoCmd {
-    /// The generation reported by the core, when the field is NUL-terminated
-    /// valid ASCII. `generation[63]` is always NUL, so a missing terminator
-    /// means the core is not speaking this ABI.
-    pub fn generation(&self) -> Option<String> {
-        let end = self.generation.iter().position(|byte| *byte == 0)?;
-        let bytes = &self.generation[..end];
-
-        if !bytes.is_ascii() {
-            return None;
-        }
-
-        Some(bytes.iter().map(|byte| char::from(*byte)).collect())
-    }
-
     /// Whether the core reported `ESU_STATE_READY`.
     pub fn ready(&self) -> bool {
         self.state & STATE_READY != 0
@@ -508,7 +502,7 @@ fn install_driver_fd() -> Result<i32> {
 
 /// Query the core module identity through the v3 control interface. Fails when
 /// the driver fd cannot be installed or the ioctl is rejected; the caller is
-/// responsible for ABI-version, generation, readiness, and boot-mode checks.
+/// responsible for ABI-version, readiness, and boot-mode checks.
 pub fn query_core_info() -> Result<GetInfoCmd> {
     use syscalls::{Sysno, syscall};
 
@@ -553,6 +547,35 @@ pub fn set_core_boot_mode(mode: u32) -> Result<()> {
     result
         .map_err(|errno| anyhow::anyhow!("errno {}", errno.into_raw()))
         .context("esu set-boot-mode ioctl failed")?;
+    Ok(())
+}
+
+/// Set the complete module RC, including the required empty RC handshake.
+pub fn set_module_rc(rc: &[u8]) -> Result<()> {
+    use syscalls::{Sysno, syscall};
+    if rc.len() > 65536 {
+        bail!("module RC exceeds 65536 bytes");
+    }
+    let cmd = ModuleRcCmd {
+        ptr: rc.as_ptr() as u64,
+        len: rc.len() as u32,
+        reserved: 0,
+    };
+    let fd = install_driver_fd()?;
+    let result = unsafe {
+        syscall!(
+            Sysno::ioctl,
+            fd,
+            IOCTL_SET_MODULE_RC,
+            std::ptr::addr_of!(cmd)
+        )
+    };
+    unsafe {
+        let _ = syscall!(Sysno::close, fd);
+    }
+    result
+        .map_err(|errno| anyhow::anyhow!("errno {}", errno.into_raw()))
+        .context("esu set-module-rc ioctl failed")?;
     Ok(())
 }
 
