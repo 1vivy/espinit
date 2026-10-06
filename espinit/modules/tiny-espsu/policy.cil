@@ -12,5 +12,8 @@
 (allow gblbds_hal_exec labeledfs (filesystem (associate)))
 (allow gblbds_bdsvars_block_device tmpfs (filesystem (associate)))
 (allow init hal_bootctl_default (process2 (nosuid_transition)))
+; The HAL reads the staged /metadata/espinit/rom.toml before registering.
+(allow hal_bootctl_default metadata_file (dir (search)))
+(allow hal_bootctl_default metadata_file (file (getattr open read)))
 ; lock is necessary for the HAL's preserved flock transaction; absent in source CIL.
 ; Other init -> hal_bootctl_default process/FD/signal and misc access stay stock.
