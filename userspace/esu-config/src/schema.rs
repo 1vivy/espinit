@@ -59,6 +59,11 @@ pub struct PartitionEntry {
     pub name: String,
     pub backend: String,
     pub read_only: bool,
+    /// Standalone AVB metadata at a safe ESP-root-relative path, seeded when
+    /// the backing is initialized. Subsequent OTA/current backing bytes win:
+    /// ESP files are grafted at provisioning, firmware COW views when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
 }
 
 impl PartitionEntry {
@@ -287,6 +292,16 @@ pub fn validate_rom(rom: &RomConfig, rom_number: u32) -> Result<(), Error> {
         {
             return Err(Error::at("RomEspFileWritable", &partition.name));
         }
+        if partition.metadata.is_some()
+            && matches!(partition.backend(), Ok(Backend::Mapper(_)))
+            && (partition.backend != format!("/dev/mapper/rom{rom_number}-fw-{}", partition.name)
+                || !rom
+                    .firmware_views
+                    .iter()
+                    .any(|view| view.name == partition.name))
+        {
+            return Err(Error::at("RomMetadataBackend", &partition.name));
+        }
     }
 
     validate_firmware_views(rom, rom_number)
@@ -322,9 +337,27 @@ fn validate_rom_structure(rom: &RomConfig) -> Result<(), Error> {
         }
         names.push(&partition.name);
 
-        partition
+        let backend = partition
             .backend()
             .map_err(|error| error.with_component(partition.name.clone()))?;
+
+        if let Some(metadata) = &partition.metadata {
+            if !relative_path(metadata) || !metadata.ends_with(".vbmd") {
+                return Err(Error::at("RomMetadataPath", &partition.name));
+            }
+            let base = partition
+                .name
+                .strip_suffix("_a")
+                .or_else(|| partition.name.strip_suffix("_b"));
+            if base.is_none_or(|base| {
+                base.is_empty() || matches!(base, "vbmeta" | "vbmeta_system" | "vbmeta_vendor")
+            }) {
+                return Err(Error::at("RomMetadataPartition", &partition.name));
+            }
+            if !matches!(backend, Backend::EspFile(_) | Backend::Mapper(_)) {
+                return Err(Error::at("RomMetadataBackend", &partition.name));
+            }
+        }
     }
 
     Ok(())

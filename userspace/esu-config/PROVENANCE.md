@@ -1,10 +1,11 @@
 # Vendored esu-config provenance
 
-`userspace/esu-config` is a pinned copy of `crates/esu-config` from gbl-bds-rs
-commit `e028394530f798766bd81bcc0fc14b72afe26cac` (branch
+`userspace/esu-config` is a pinned copy of `crates/esu-config` from gbl-bds-rs.
+Its baseline is commit `e028394530f798766bd81bcc0fc14b72afe26cac` (branch
 `sesori/execute-esp-kernelsu-plan`, "esu-config, rom-catalogue: shared
-installed schema and BLS/ROM catalogue"). Every hash below was checked against
-`git show e028394:crates/esu-config/<file>`.
+installed schema and BLS/ROM catalogue"). The AVB metadata graft cutover updates
+`src/schema.rs` and `tests/schema.rs` from the canonical working tree; the
+content hashes below identify this updated source without claiming a new commit.
 
 The schema code was authored in this repository as
 `userspace/esuinit/src/config.rs`; the owner approved publishing it as
@@ -16,10 +17,26 @@ only the manifest is adapted to espinit's workspace.
 | --- | --- |
 | src/installed.rs | d32dae2716a81d51eb5428272e88f626f0505b6585d590292f2ac1cc894d8a12 |
 | src/lib.rs | f81e4f8375c89dcbc8b18c71e554e9fc777901b51af312005a866cf669453711 |
-| src/schema.rs | bd2800f795cbfcf89142801e7d352005b0a775f657186da12dd303276248aaf4 |
+| src/schema.rs | 6fde39f36039c20a2a6c4502571f3266055af8bfac51195494eed0d5b3c07a9a |
 | tests/installed.rs | 832780037e7ad2660739c3a15feffd32742417ca528c8b3bd93b76ee3f78fb58 |
-| tests/schema.rs | 617eaf4d2c5867865dc42fb2f632040ed48834297cca22a5672126b1ac036da9 |
+| tests/schema.rs | c9fb833e71948de03a216dd8cd35db211384749e9ffdd1489c0cb361237aa028 |
 | tests/fixtures/mod.rs | 16a9282a22f644dfaa6f5bc5710025baaae77cfc6c8989e3847659e66fe9edad |
+
+From the gbl-bds-rs worktree, check canonical source identity with:
+
+```sh
+diff -r crates/esu-config/src /home/vivy/Projects/efisp-projects/espinit/userspace/esu-config/src
+diff -r crates/esu-config/tests /home/vivy/Projects/efisp-projects/espinit/userspace/esu-config/tests
+sha256sum crates/esu-config/src/schema.rs crates/esu-config/tests/schema.rs
+```
+
+`PartitionEntry.metadata` selects a safe ESP-root-relative `.vbmd` seeded when
+a backing is initialized. ESP-file contents are grafted during provisioning;
+runtime preserves current contents. Mapper metadata is admitted only for that
+ROM's configured firmware view; an empty view can be seeded, while existing COW
+contents win. Direct physical/loop backends and unslotted/raw vbmeta entries are
+rejected. Other slotted images are admitted subject to runtime footer geometry
+and metadata validation by the shared `avb-graft` crate.
 
 ## Deviations from the source manifest
 

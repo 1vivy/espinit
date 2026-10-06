@@ -294,6 +294,7 @@ mod tests {
             name: name.to_owned(),
             backend: "/dev/block/by-name/system".to_owned(),
             read_only,
+            metadata: None,
         }
     }
 

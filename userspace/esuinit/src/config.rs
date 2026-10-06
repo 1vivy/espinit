@@ -356,6 +356,7 @@ read_only = true
             name: "vendor".into(),
             backend: "/dev/loop7".into(),
             read_only: false,
+            metadata: None,
         };
         let system = ResolvedBackend {
             path: "/dev/esu/backends/sda1".into(),
@@ -390,6 +391,7 @@ read_only = true
             name: "system".to_owned(),
             backend: "/dev/block/by-name/system".to_owned(),
             read_only: true,
+            metadata: None,
         };
 
         let absent = backend_error(

@@ -560,6 +560,7 @@ fn backend_spellings_are_classified() {
         name: "system".to_owned(),
         backend: backend.to_owned(),
         read_only: true,
+        metadata: None,
     };
 
     assert_eq!(
@@ -888,4 +889,89 @@ fn esp_file_paths_are_bounded_identifiers() {
     assert_eq!(exact.len(), MAX_PATH_BYTES);
     assert!(relative_path(&exact));
     assert!(!relative_path(&format!("{exact}/x")));
+}
+
+/// Metadata selection cannot escape the ESP or silently mutate a physical
+/// partition, and only footer-bearing slotted payload images can be grafted.
+#[test]
+fn metadata_rejects_unsafe_paths_and_unsupported_projection_combinations() {
+    let text = |name: &str, backend: &str, metadata: &str| {
+        format!(
+            "{}metadata = {metadata:?}\n",
+            fixtures::rom_with("rom2", [(name, backend)])
+        )
+    };
+    for metadata in [
+        "",
+        "/rom/a.vbmd",
+        "../a.vbmd",
+        "rom//a.vbmd",
+        "rom/a.img",
+        "rom/a\\b.vbmd",
+    ] {
+        let error =
+            parse_rom(&text("recovery_a", "esp-file:rom/recovery.img", metadata)).unwrap_err();
+        assert_eq!(error.code, "RomMetadataPath", "{metadata}");
+    }
+    for name in [
+        "recovery",
+        "_a",
+        "vbmeta_a",
+        "vbmeta_system_b",
+        "vbmeta_vendor_a",
+    ] {
+        let error = parse_rom(&text(
+            name,
+            "esp-file:rom/recovery.img",
+            "rom/recovery.vbmd",
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, "RomMetadataPartition", "{name}");
+    }
+    for backend in ["/dev/block/by-name/recovery_a", "/dev/loop0"] {
+        let error = parse_rom(&text("recovery_a", backend, "rom/recovery.vbmd")).unwrap_err();
+        assert_eq!(error.code, "RomMetadataBackend", "{backend}");
+    }
+    let rom = parse_rom(&text(
+        "recovery_a",
+        "esp-file:rom/recovery.img",
+        "rom/recovery.vbmd",
+    ))
+    .unwrap();
+    assert_eq!(
+        rom.partitions[0].metadata.as_deref(),
+        Some("rom/recovery.vbmd")
+    );
+    parse_rom(&text(
+        "system_a",
+        "esp-file:rom/system.img",
+        "rom/system.vbmd",
+    ))
+    .unwrap();
+    let missing = parse_rom(&fixtures::rom_with(
+        "rom2",
+        [("recovery_a", "esp-file:rom/recovery.img")],
+    ))
+    .unwrap();
+    assert!(missing.partitions[0].metadata.is_none());
+}
+
+/// A mapper spelling alone does not authorize graft writes: it must be the
+/// selected ROM's configured external-origin firmware view.
+#[test]
+fn metadata_mapper_requires_matching_rom_local_firmware_view() {
+    let text = fixtures::FW_ROM.replace("xbl_a", "recovery_a").replace(
+        "read_only = false",
+        "read_only = false\nmetadata = \"rom/recovery.vbmd\"",
+    );
+    numbered(&text, 2).unwrap();
+    assert_eq!(numbered(&text, 3).unwrap_err().code, "RomMetadataBackend");
+    let missing = format!(
+        "{}metadata = \"rom/recovery.vbmd\"\n",
+        fixtures::rom_with("rom2", [("recovery_a", "/dev/mapper/rom2-fw-recovery_a")])
+    );
+    assert_eq!(
+        numbered(&missing, 2).unwrap_err().code,
+        "RomMetadataBackend"
+    );
 }
