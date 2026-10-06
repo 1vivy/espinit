@@ -45,6 +45,8 @@ class PlatformPackaging(unittest.TestCase):
         self.assertEqual(tomllib.loads(rom)["generation"], value["generation"])
         self.assertEqual(value["rom"], "roms")
         self.assertEqual(tomllib.loads(rom)["id"], "android-a")
+        self.assertEqual(tomllib.loads(rom)["rom_number"], 1)
+        self.assertNotIn("metadata_shared", rom)
         _, second = assemble.configurations("release-1", "ext4", "android-b")
         self.assertEqual(tomllib.loads(second)["id"], "android-b")
         assemble.configurations("release-1", "ext4", "x" * 59)

@@ -100,7 +100,10 @@ def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tu
 
     # Valid managed shape with a deliberately impossible backend: the lab lane
     # replaces this file with the complete generated GPT projection before boot.
-    rom = head + f'id = "{rom_id}"\n' + (
+    # The stock ROM number is explicit, and there is no `metadata_shared`
+    # projection: one guest per payload, and Cuttlefish projects the physical
+    # metadata partition itself.
+    rom = head + f'id = "{rom_id}"\nrom_number = 1\n' + (
         'managed = true\n\n[[partitions]]\nname = "userdata"\n'
         'backend = "/dev/mapper/espinit-payload-placeholder"\nread_only = false\n'
     )

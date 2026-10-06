@@ -10,6 +10,7 @@ build = "../../userspace/ksuinit/build.rs"
 
 [dependencies]
 varstore = { path = "varstore" }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 
 [[bin]]
 name = "gblbds-boot-hal"
