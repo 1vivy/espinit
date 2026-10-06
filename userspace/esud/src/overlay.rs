@@ -277,7 +277,7 @@ pub fn apply(root: &Path, order: &[String]) -> Result<()> {
                         "tmpfs",
                         STAGING,
                         "tmpfs",
-                        libc::MS_NODEV,
+                        0, // metadata_shared block node must be openable here.
                         "mode=0700,uid=0,gid=0",
                     )?;
                 }
