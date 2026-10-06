@@ -286,8 +286,14 @@ def expected_vermagic(config: Mapping[str, str], output: Path, machine: int) -> 
             parts.append(word)
     if machine == 183:
         parts.append("aarch64")
+        require(config.get("CONFIG_RANDSTRUCT") != "y", "vermagic: RANDSTRUCT target needs an exact reference vermagic implementation")
+        return " ".join(parts)
     require(config.get("CONFIG_RANDSTRUCT") != "y", "vermagic: RANDSTRUCT target needs an exact reference vermagic implementation")
-    return " ".join(parts)
+    # x86_64's MODULE_ARCH_VERMAGIC is empty, so the trailing space that every
+    # MODULE_VERMAGIC_* component carries (VERMAGIC_STRING concatenates them
+    # verbatim) survives into the running kernel's own VERMAGIC_STRING; an
+    # aarch64 target replaces it with the arch word above.
+    return " ".join(parts) + " "
 
 
 def verify_module(path: PathInput, name: str, config: Mapping[str, str], output: Path, kernel_symbols: set[str] | None = None) -> ModuleReport:

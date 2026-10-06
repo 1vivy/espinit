@@ -169,6 +169,23 @@ class PhoneModuleCompatibility(unittest.TestCase):
         with self.assertRaisesRegex(compat.CompatibilityError, "basic/extended CRC mismatch"):
             _ = self.verify(module_file(extra=extra))
 
+    def test_vermagic_encoding_matches_the_target_architecture(self) -> None:
+        # Every MODULE_VERMAGIC_* component is spelled with a trailing space.
+        # aarch64's MODULE_ARCH_VERMAGIC follows the last one as its own word;
+        # x86_64's is empty, so the running kernel's VERMAGIC_STRING keeps that
+        # trailing space and an exact x86_64 module must match it.
+        self.assertEqual(
+            compat.expected_vermagic(self.config, self.output, 183),
+            "6.12-phone SMP preempt mod_unload modversions aarch64",
+        )
+        x86 = dict(self.config)
+        _ = x86.pop("CONFIG_ARM64")
+        x86["CONFIG_X86_64"] = "y"
+        self.assertEqual(
+            compat.expected_vermagic(x86, self.output, 62),
+            "6.12-phone SMP preempt mod_unload modversions ",
+        )
+
     def test_config_rejects_stale_header_and_wrong_source(self) -> None:
         _ = (self.output / "include/generated/autoconf.h").write_text("#define CONFIG_MODVERSIONS 1\n")
         with self.assertRaisesRegex(compat.CompatibilityError, "stale autoconf.h"):
