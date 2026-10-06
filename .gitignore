@@ -4,6 +4,7 @@ CLAUDE.md
 AGENTS.md
 .DS_Store
 /target
+/out
 .cargo/config.toml
 __pycache__
 /dist
