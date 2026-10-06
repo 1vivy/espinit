@@ -1,226 +1,81 @@
-# Host `esud boot-patch`
+# esud
 
-`esud` is the Linux **artifact builder**. `esud` remains the Android daemon;
-its command surface is not imported into the host binary. The host tool restores
-only the historical `android_bootimg` parsing, compression, patching and CPIO
-mechanics, pinned to the previously used upstream revision.
+The Android binary is generic KernelSU lifecycle/policy support without the manager. It executes directly from `/dev/esp/esu/bin/esud`; module home is the read-only `/dev/esp/esu/modules`. Init owns the ESP and efivarfs mounts. Writable state is limited to `/data/adb/esu/log`, created at post-fs-data.
 
-There is no phone connection, device discovery, block-device input, flashing,
-OTA/update-engine integration, partition selection, backup/restore, kernel
-replacement, embedded kernel/module, root-manager integration, shell enablement,
-or adbd configuration. No input executable or payload script is executed.
+Android commands: `early`, `post-fs`, `post-fs-data`, `services`, `boot-completed`, `recovery`, `sepolicy`, `insmod`, `unload`, `resetprop`, `core set-boot-mode`, `platform reload`, and the internal boot watchdog. The executable also recognizes the `resetprop` invocation name. There is no install/uninstall, manager, module mutation, metamodule or profile command.
 
-## Build and prerequisites
+Stages use the core boot mode rather than a manager/safe-mode/one-shot gate. They can be re-run by root. `platform reload` reapplies strict policy and mounts missing overlays, without executing scripts. Identity and ROM number come from bdsvars through `esu_platform::efivars`; a selected ROM with an invalid Slot fails, rather than defaulting to number 1. Configuration is `/dev/esp/esu/roms/<id>.toml`.
 
-From the repository root, build the host executable (select your Linux host
-triple if your Cargo configuration otherwise selects Android):
+## ESP modules
 
-```sh
-cargo build --locked --release -p esud --bin esud --target x86_64-unknown-linux-gnu
-```
+Manifest `modules_order` defines policy/script ordering and overlay precedence (first is highest). Modules use `module.prop`, optional `sepolicy.rule`, `attrs`, lifecycle scripts, `initrc/*.rc`, and partition trees `system`, `vendor`, `product`, `system_ext`, `odm`. There is no remapping of `system/vendor`.
 
-Put the resulting `esud` on your host PATH. Packaging needs Python 3.11 or newer
-as `python3`; it invokes the **embedded, unmodified** committed
-`scripts/kmi_modules.py` with `-I` and its `verify` action. The script is
-embedded at build time, so an installed `esud` does not need the source checkout.
-It needs the explicit `--kmi-out` reference output containing Module.symvers,
-System.map and include/generated/utsrelease.h and schema-2 compatibility receipts.
-
-The KMI module recipes documented in the repository produce those
-receipts. Build core/thin/gpt with the same `ESU_GENERATION` as the payload. Keep
-the receipts alongside their `.ko` files. Do not hand-edit receipts, CRC tables,
-or vermagic strings. `esud` never manufactures or repairs them. A stripped module
-without its generation object/symbol table is not admissible.
-
-Build the supplied PID-1 `esuinit` as a static ELF64 little-endian AArch64 or
-x86-64 executable. It must retain `.note.espinit` with the manifest generation.
-The Android daemon and package/tool binaries must retain their generation notes
-and use the same target architecture. The host builder's own generation is
-recorded separately; it need not equal the payload generation. The supplied
-static BusyBox interpreter is a third-party binary and is architecture/static-link
-checked, not required to contain an esu generation note.
-
-## Prepare the payload source
-
-`--payload` names the **contents of the ESP `/esu` directory**, not the ESP
-root or a source checkout. It is copied in full, including kernel scripts and
-additional tools. Prepare this tree before invoking the builder:
+Early processing applies policies strictly, stages trees into tmpfs `/dev/esu/<id>/<partition>` (private root 0700, no nosuid), mounts read-only lowerdir-only overlays, executes every `early.sh` through ESP BusyBox, then runs ROM isolation. Attr lines are:
 
 ```text
-payload/
-  manifest.toml
-  roms/
-    rom1.toml
-  bin/
-    esud                  executable Android daemon
-    busybox                   executable static interpreter
-    thin-activate             when required by the thin early script
-  modules/
-    thin/early.sh             when using the current thin activation flow
-    boot-hal/module.toml      normal managed platform package
-    ...                       every declared package source file
-    tiny-espsu/module.toml
-    ...
-  receipts/                   may be absent; created in the output
+/vendor/bin/hw/android.hardware.boot-service.qti 0755 0 2000 u:object_r:hal_bootctl_default_exec:s0
 ```
 
-Use the current `esu/manifest.example.toml`, per-ROM schema and checked-in
-package manifests, with real values and files. The builder does not generate
-placeholder ROMs or stamp over generations. It reuses PID-1's strict manifest,
-ROM and platform package validators:
+Directory attrs may name `/vendor` itself. Every staged inode takes explicit attrs or existing target lstat/SELinux xattr metadata. Missing metadata fails `OverlayAttrsMissing`; vfat labels/modes are never inherited. No bind fallback is implemented without device overlayfs EINVAL evidence. Module source symlinks and special inodes are not supported by the host package contract.
 
-- `manifest.toml` must have schema 1, a valid generation, explicit ROM directory,
-  ordered modules beginning with `kernelesp`, and `[platform]` for complete staging.
-- `--rom rom1` selects `<manifest.rom>/rom1.toml`, whose ID and generation must
-  agree. All copied ROM TOMLs must agree with the generation and managed-module
-  rules. Managed ROMs require `gpt`; unmanaged ROMs must not list it.
-- Normal and recovery package plans must be complete. All listed packages,
-  including ones skipped at runtime in unmanaged mode, are validated. An
-  unlisted `module.toml` is rejected. Any `.ko` inside the ESP payload fails.
-- `--modules-dir` contains every manifest `lib/<name>.ko` and its schema-2
-  `<name>.ko.compat.json`. The captured bytes are verified against `--kmi-out`;
-  missing modules, stale receipts, CRC mismatches and missing imports fail closed.
-  Core/thin/gpt retain generation checks; upstream efivarfs has no generation.
-- `bin/esuinit` is populated from `--esu`. If already present in the source,
-  it must be byte-identical; stale PID-1 copies fail rather than being hidden.
-- Supply every helper used by your scripts. Scripts are copied but never run or
-  interpreted by the builder. Additional ELF tools in `bin/` are generation and
-  architecture checked. Runtime readiness/projection is not a host packaging
-  claim.
-- An `esp-file:` backend is checked for an existing nonempty file. Since the
-  input is the `/esu` subtree, such backends must use
-  `esp-file:esu/<path-within-payload>`; files elsewhere on an existing ESP are
-  not implicitly borrowed. By-name/mapper/loop configuration is structurally
-  validated only; no host or phone device is opened.
+The Boot HAL's ordinary module is generated from its built executable using the checked-in `esu/modules/boot-hal/{module.prop,attrs,sepolicy.rule}`. It replaces the fixed stock QTI executable without changing the service name or SELinux transition.
 
-Keep source trees stable during packaging. Symlinks (including root ancestors),
-non-regular files, `..`, unsafe relative names, case-insensitive name collisions,
-and trailing-dot names are rejected. Source paths may be explicit absolute or
-working-directory-relative paths; there are no implicit defaults. Input files
-must be regular files. The output must be outside the source payload, must not
-already exist, and must have an existing parent directory.
+## Linux host boot-patch
 
-## One packaging command
-
-The stock boot or init_boot image is required because its effective `/init` is
-preserved in the per-ROM takeover archive:
+The Linux binary exposes only `boot-patch`. It packages explicit files, never mounts, flashes, discovers a phone, executes an input binary/script, patches a kernel or enables a shell.
 
 ```sh
+cargo build --locked --release -p esud --target x86_64-unknown-linux-gnu
 esud boot-patch \
-  --esuinit /build/esu-static \
+  --esuinit /build/esuinit \
   --payload /build/payload \
   --modules-dir /build/modules \
   --kmi-out /build/kmi-out \
   --rom rom1 \
   --boot /build/stock/init_boot.img \
-  --out /build/artifacts/rom1
+  --out /build/new-output
 ```
 
-The output path must be new for every invocation; the tool will not overwrite an
-existing directory, even an empty one. Successful stdout is the receipt path.
-Errors return a nonzero exit status and do not publish a partial output tree.
+`--payload` is the contents of ESP `/esu`, not the ESP root. It contains strict schema-1 `manifest.toml`, `roms/<id>.toml`, `bin/esud`, static `bin/busybox`, static `bin/thin-activate`, any additional script helpers, and the declared module directories. The ROM's required ID must match the filename. There are no payload generation pins, binary generation notes or `[platform]` package manifests. Number-dependent runtime ROM constraints remain the responsibility of the authoritative Slot record.
 
-## Output and later provisioning
+`--modules-dir` must contain `kernelesp.ko`, `thin.ko`, `gpt.ko`, `efivarfs.ko` and each corresponding schema-2 `.ko.compat.json`. All four must be declared as `lib/<name>.ko`. The embedded unmodified `scripts/kmi_modules.py verify` runs with Python 3.11+ against explicit `--kmi-out`; stale receipts, absent imports and CRC mismatches fail closed. Compatibility receipts are inputs, not ESP kernel modules. Any `.ko` anywhere inside the payload is rejected.
+
+All executables must match the PID-1 ELF architecture. PID 1, BusyBox and early helpers must be static. No supplied executable is run. Inputs must be regular files; symlink ancestors/entries, traversal, FAT case collisions, unsafe names and special inodes fail. The output must not exist, its parent must exist, and it must be outside the source tree. A preexisting `bin/esuinit` must match `--esuinit` byte-for-byte.
+
+The builder captures inputs before validation and publishes only after success. Output:
 
 ```text
-rom1/
-  esu.cpio
+new-output/
   receipt.json
-  patched.img                 unsigned emulator/test image
-  esp/                        contents for later ESP provisioning
-    rom/
-      rom1/
-        esu.cpio
+  patched.img                 unsigned conventional host-test image
+  esu.cpio                    canonical legacy-LZ4 stream
+  esp/
+    rom/rom1/esu.cpio          byte-identical canonical stream
     esu/
+      build-id
       manifest.toml
       roms/rom1.toml
-      bin/esuinit
-      bin/esud
-      bin/busybox
+      bin/...
       modules/...
       receipts/
 ```
 
-The canonical firmware artifact is a deterministic legacy-LZ4 stream containing
-one newc overlay. It installs esu as executable `/init` and copies the stock
-image's effective executable `/init` to the reserved `/init.real`, both mode
-`0755` with normalized metadata. The overlay also contains manifest kernel modules
-at `lib/<name>.ko` (0644); it contains no debug policy.
-The packager rejects an absent/non-static/non-AArch64 stock init and any existing
-`/init.real` collision.
+The stream contains one normalized newc overlay: `init` (esuinit), `init.real` (effective stock init), both 0755; `lib/` and the four modules (0644); and `esu-build-id` (0644). The stock boot/init_boot must be v3/v4 with a valid static effective init. Existing `init.real` collisions fail. The patched image preserves stock ramdisks and removes old rdinit/ROM-selector cmdline tokens; runtime selection uses bdsvars. It omits stale GKI/AVB signatures and is not a signed deployment artifact.
 
-The firmware archive location is **ESP `/rom/<rom-id>/esu.cpio`**, matching the
-physical-phone `/rom/rom1/esu.cpio` convention. The byte-identical output-root
-`esu.cpio` is also provided. Manifest and ROM configuration stay under the
-separate `/esu` payload contract. A later provisioning tool consumes the
-**whole `esp/` tree** plus `receipt.json`; this command creates no filesystem image
-and mounts or provisions nothing.
+## Receipt and build ID
 
-`receipt.json` schema 1 binds:
+`receipt.json` schema 1 retains tool/version/verifier identity, selected ROM, archive path, boot contract, complete `sources`, `artifacts` (`sha256`, `size`, `mode`), directories and KMI verification report. It replaces payload/tool generation fields with `build_id` and `build_id_inputs`.
 
-- tool name, package version, tool build generation, and embedded verifier SHA-256;
-- selected ROM, payload generation, archive path and the bootconfig selector;
-- SHA-256, byte size and normalized mode for the explicit PID1, stock image and
-  every copied payload source;
-- SHA-256, byte size and mode for every published artifact except the receipt
-  itself, plus the complete directory list (including empty receipt storage);
-- the successful module verifier report and the unsigned test image contract.
+The stable build-ID serialization is:
 
-Paths in artifact maps are output-relative; `payload/` source keys are relative
-to `--payload`. No temporary directory name, output directory name or wall-clock
-time is recorded. Thus identical input bytes/modes, kernel receipts and tool
-produce identical archive, image and receipt bytes. Directory/file timestamps
-are not part of this tree format; ordinary source file modes are normalized to
-`0755` when executable and `0644` otherwise. The receipt is evidence of checked
-consistency, **not a signature or a runtime boot-success receipt**.
+1. Collect the captured source artifact hashes: all payload files, supplied PID 1, all files captured from `--modules-dir` (including compatibility receipts), and stock boot image. Their logical names and hashes are recorded in `build_id_inputs`.
+2. Sort **hash values** lexicographically, retaining duplicates. Encode each lowercase 64-hex SHA256 followed by one ASCII LF, including the last value.
+3. SHA256 that byte stream; take its first 12 lowercase hex characters.
 
-All data files are written and fsynced in a private sibling staging directory.
-Directories are fsynced and the complete result is published with Linux
-`renameat2(RENAME_NOREPLACE)`, then the parent is fsynced. Pre-publication failure
-removes the private staging directory. A failure of the final parent fsync may
-leave the complete published output and reports an error; it is not silently
-reported as durable success. Sources are only opened for reading.
+Generated `esu/build-id`, takeover archives, patched image and output receipt are excluded to avoid recursion. The source payload must not already contain `build-id`. ESP `esu/build-id` and cpio `/esu-build-id` contain exactly the 12 characters plus one LF. JSON `build_id` has no LF. The recipe is independent of input enumeration order; changes to any captured artifact affect identity. This is a diagnostic fingerprint, not authentication. PID 1 warns on cpio/ESP mismatch without failing boot.
 
-## Stock-image contract and limits
+## Verification
 
-`--boot` accepts Android boot/init_boot header v3/v4 regular files with an
-existing newc ramdisk and executable AArch64 `/init`. It does not accept
-vendor_boot, raw ramdisks, legacy headers, device nodes, or a ramdisk already
-containing the reserved `/init.real`. Existing ramdisk archives are
-bounded/framing-checked and preserved byte-for-byte; `patched.img` appends the
-uncompressed takeover overlay before restoring the source compression. Kernel
-bytes are preserved.
+Host tests construct synthetic ELF, KMI receipts and stock init_boot fixtures but exercise the real boot-patch path and embedded verifier, then inspect output ESP files, receipt hashes and decoded newc members. They also cover deterministic build-ID framing, rejected inputs, preserved stock init, malformed strict policy and overlay attr parsing/failure propagation. They do not establish real-kernel compatibility or device boot success.
 
-The header command line retains unrelated arguments, removes stale `rdinit` and
-ROM selectors, and ends with exactly:
-
-```text
-androidboot.esu.rom=rom1
-```
-
-Firmware delivery uses the same selector as bootconfig and appends the
-legacy-LZ4 `esu.cpio`; it does not generate `rdinit`. The tool does not
-modify vendor_boot or bootloader configuration.
-
-`patched.img` is **unsigned conventional-test-only**: prior GKI signatures and
-AVB tail data are deliberately omitted because they no longer authenticate the
-changed bytes. It is not flash-ready. The source image is never modified.
-
-OTA support is intentionally absent, not an automatic next stage of this command.
-
-## Host regression gates
-
-Run from the repository root on a Linux host:
-
-```sh
-cargo test --locked -p esud --bin esud --test host_cli --target x86_64-unknown-linux-gnu
-cargo clippy --locked -p esud --bin esud --test host_cli --target x86_64-unknown-linux-gnu -- -D warnings
-cargo fmt --all -- --check
-```
-
-Tests use explicit synthetic ELF/config fixtures; they run the real embedded
-module verifier, not mocked admission. They cover takeover metadata and
-compression, generation/receipt/CRC mismatches, atomic publication,
-reproducibility, source preservation, stock-init collision checks, boot parsing,
-kernel preservation, selector replacement and unsigned-image behavior. These
-host tests do not prove a device boot or real-module target compatibility.
+Run workspace fmt/clippy/tests, Android esud clippy with NDK r29, `python3 -m unittest tools.cuttlefish.test_assemble`, real module KMI verification, and separate device gates before deployment.

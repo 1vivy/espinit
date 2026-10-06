@@ -3,7 +3,7 @@
 use super::*;
 use std::os::unix::fs::symlink;
 
-const GENERATION: &str = "host-test-1";
+const FIXTURE_MARKER: &str = "host-test-1";
 const DYNAMIC_LINKER: &[u8] = b"/system/bin/linker64\0";
 type ElfSection<'a> = (&'a str, Vec<u8>, u32, u64, u32, u64);
 
@@ -87,32 +87,23 @@ fn elf_fixture(kind: u16, dynamic: bool, sections: Vec<ElfSection<'_>>) -> Vec<u
     bytes
 }
 
-fn binary_fixture_kind(generation: &str, dynamic: bool) -> Vec<u8> {
-    let mut note = vec![0u8; 84];
-    put32(&mut note, 0, 8);
-    put32(&mut note, 4, 64);
-    put32(&mut note, 8, 1);
-    note[12..20].copy_from_slice(b"ESPINIT\0");
-    note[20..20 + generation.len()].copy_from_slice(generation.as_bytes());
-    let mut sections = vec![
-        (".text", vec![0; 4], 1, 6, 0, 0),
-        (".note.espinit", note, 7, 2, 0, 0),
-    ];
+fn binary_fixture_kind(marker: &str, dynamic: bool) -> Vec<u8> {
+    let mut sections = vec![(".text", marker.as_bytes().to_vec(), 1, 6, 0, 0)];
     if dynamic {
         sections.insert(0, (".interp", DYNAMIC_LINKER.to_vec(), 1, 2, 0, 0));
     }
     elf_fixture(2, dynamic, sections)
 }
 
-fn binary_fixture(generation: &str) -> Vec<u8> {
-    binary_fixture_kind(generation, false)
+fn binary_fixture(marker: &str) -> Vec<u8> {
+    binary_fixture_kind(marker, false)
 }
 
-fn module_fixture(generation: &str) -> Vec<u8> {
-    named_module_fixture("kernelesp", generation)
+fn module_fixture() -> Vec<u8> {
+    named_module_fixture("kernelesp")
 }
 
-fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
+fn named_module_fixture(name: &str) -> Vec<u8> {
     let mut versions = Vec::new();
     for (name, crc) in [("module_layout", 0x1234_5678u64), ("known", 0x1122_3344)] {
         let mut record = [0u8; 64];
@@ -120,13 +111,9 @@ fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
         record[8..8 + name.len()].copy_from_slice(name.as_bytes());
         versions.extend(record);
     }
-    let mut symbols = vec![0u8; 72];
+    let mut symbols = vec![0u8; 48];
     put32(&mut symbols, 24, 1);
     symbols[28] = 0x10; // known: undefined global import
-    put32(&mut symbols, 48, 7);
-    symbols[52] = 1; // generation: local object
-    put16(&mut symbols, 54, 4);
-    put64(&mut symbols, 64, generation.len() as u64 + 1);
     elf_fixture(
         1,
         false,
@@ -144,24 +131,8 @@ fn named_module_fixture(name: &str, generation: &str) -> Vec<u8> {
                 0,
             ),
             ("__versions", versions, 1, 2, 0, 0),
-            (".data", format!("{generation}\0").into_bytes(), 1, 3, 0, 0),
-            (
-                ".strtab",
-                format!(
-                    "\0known\0{}\0",
-                    if name == "kernelesp" {
-                        "ksu_build_generation"
-                    } else {
-                        "generation"
-                    }
-                )
-                .into_bytes(),
-                3,
-                0,
-                0,
-                0,
-            ),
-            (".symtab", symbols, 2, 0, 5, 24),
+            (".strtab", b"\0known\0".to_vec(), 3, 0, 0, 0),
+            (".symtab", symbols, 2, 0, 4, 24),
         ],
     )
 }
@@ -198,16 +169,26 @@ impl Fixture {
         for dir in ["bin", "roms", "modules", "receipts"] {
             fs::create_dir_all(payload.join(dir)).unwrap();
         }
-        let binary = binary_fixture(GENERATION);
+        let binary = binary_fixture(FIXTURE_MARKER);
         let pid1 = root.path().join("esu");
         fs::write(&pid1, &binary).unwrap();
-        for path in ["bin/esud", "bin/busybox"] {
+        for path in ["bin/esud", "bin/busybox", "bin/thin-activate"] {
             let path = payload.join(path);
             fs::write(&path, &binary).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        fs::write(payload.join("manifest.toml"), format!("schema_version = 1\ngeneration = \"{GENERATION}\"\nrom = \"roms\"\n[platform]\nmetadata_filesystem = \"ext4\"\npackages = []\n[[modules]]\nname = \"kernelesp\"\npath = \"lib/kernelesp.ko\"\nparams = \"\"\n")).unwrap();
-        fs::write(payload.join("roms/rom1.toml"), format!("schema_version = 1\ngeneration = \"{GENERATION}\"\nid = \"rom1\"\nmanaged = false\n")).unwrap();
+        let mut manifest = "schema_version = 1\nrom = \"roms\"\nmodules_order = []\n".to_owned();
+        for name in ["kernelesp", "thin", "gpt", "efivarfs"] {
+            manifest.push_str(&format!(
+                "[[modules]]\nname = \"{name}\"\npath = \"lib/{name}.ko\"\nparams = \"\"\n"
+            ));
+        }
+        fs::write(payload.join("manifest.toml"), manifest).unwrap();
+        fs::write(
+            payload.join("roms/rom1.toml"),
+            "schema_version = 1\nid = \"rom1\"\nmanaged = true\n[[partitions]]\nname = \"userdata\"\nbackend = \"/dev/mapper/userdata\"\nread_only = false\n",
+        )
+        .unwrap();
         let source = root.path().join("kernel-src");
         let output = root.path().join("kernel-out");
         let config = root.path().join("captured.config");
@@ -255,7 +236,7 @@ impl Fixture {
             ),
         )
         .unwrap();
-        let module = module_fixture(GENERATION);
+        let module = module_fixture();
         fs::write(modules.join("kernelesp.ko"), &module).unwrap();
         // Test-only provenance for this synthetic kernel. Production has no path
         // that creates compatibility receipts or writes kernel version data.
@@ -276,6 +257,17 @@ impl Fixture {
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
+        for name in ["thin", "gpt", "efivarfs"] {
+            let bytes = named_module_fixture(name);
+            fs::write(modules.join(format!("{name}.ko")), &bytes).unwrap();
+            let mut receipt = receipt.clone();
+            receipt["module_sha256"] = digest(&bytes).into();
+            fs::write(
+                modules.join(format!("{name}.ko.compat.json")),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+        }
         let mut stock = Cpio::new();
         stock
             .add(
@@ -302,61 +294,36 @@ impl Fixture {
     fn managed(&self) {
         let payload = &self.args.payload;
         let manifest = payload.join("manifest.toml");
-        let text = fs::read_to_string(&manifest)
-            .unwrap()
-            .replace("packages = []", "packages = [\"boot-hal\", \"tiny-espsu\"]");
         fs::write(
-            manifest,
-            format!("{text}\n[[modules]]\nname = \"gpt\"\npath = \"lib/gpt.ko\"\nparams = \"\"\n"),
+            &manifest,
+            fs::read_to_string(&manifest)
+                .unwrap()
+                .replace("modules_order = []", "modules_order = [\"boot-hal\"]"),
         )
         .unwrap();
-        let rom = payload.join("roms/rom1.toml");
-        let text = fs::read_to_string(&rom)
-            .unwrap()
-            .replace("managed = false", "managed = true");
-        fs::write(rom, format!("{text}\n[[partitions]]\nname = \"metadata\"\nbackend = \"/dev/mapper/metadata\"\nread_only = false\n")).unwrap();
-        let module = named_module_fixture("gpt", GENERATION);
-        fs::write(self.args.modules_dir.join("gpt.ko"), &module).unwrap();
-        let mut receipt: serde_json::Value = serde_json::from_slice(
-            &fs::read(self.args.modules_dir.join("kernelesp.ko.compat.json")).unwrap(),
-        )
-        .unwrap();
-        receipt["module_sha256"] = digest(&module).into();
+        fs::write(payload.join("roms/rom1.toml"), "schema_version = 1\nid = \"rom1\"\nmanaged = true\n[[partitions]]\nname = \"metadata\"\nbackend = \"/dev/mapper/metadata\"\nread_only = false\n").unwrap();
+        let directory = payload.join("modules/boot-hal");
+        fs::create_dir_all(directory.join("vendor/bin/hw")).unwrap();
         fs::write(
-            self.args.modules_dir.join("gpt.ko.compat.json"),
-            serde_json::to_vec(&receipt).unwrap(),
+            directory.join("module.prop"),
+            include_str!("../../../esu/modules/boot-hal/module.prop"),
         )
         .unwrap();
-        for (id, manifest) in [
-            (
-                "boot-hal",
-                include_str!("../../../esu/modules/boot-hal/module.toml"),
-            ),
-            (
-                "tiny-espsu",
-                include_str!("../../../esu/modules/tiny-espsu/module.toml"),
-            ),
-        ] {
-            fs::create_dir_all(payload.join(format!("modules/{id}"))).unwrap();
-            fs::write(
-                payload.join(format!("modules/{id}/module.toml")),
-                manifest.replace("release-1", GENERATION),
-            )
-            .unwrap();
-        }
-        for path in [
-            "modules/boot-hal/android.hardware.boot-service.gblbds",
-            "modules/tiny-espsu/tiny-espsu",
-        ] {
-            fs::write(payload.join(path), binary_fixture(GENERATION)).unwrap();
-        }
-        for (path, text) in [
-            ("modules/boot-hal/boot-gblbds.rc", "# fixture initrc\n"),
-            ("modules/tiny-espsu/install.sh", "#!/bin/sh\nexit 0\n"),
-            ("modules/tiny-espsu/policy.cil", "; fixture policy\n"),
-        ] {
-            fs::write(payload.join(path), text).unwrap();
-        }
+        fs::write(
+            directory.join("sepolicy.rule"),
+            include_str!("../../../esu/modules/boot-hal/sepolicy.rule"),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("attrs"),
+            include_str!("../../../esu/modules/boot-hal/attrs"),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("vendor/bin/hw/android.hardware.boot-service.qti"),
+            binary_fixture("hal"),
+        )
+        .unwrap();
     }
 
     fn reject(&self, expected: &str) {
@@ -390,12 +357,13 @@ fn stock_boot(version: u32, ramdisk: &[u8]) -> Vec<u8> {
 
 #[test]
 fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
-    let binary = binary_fixture(GENERATION);
+    let binary = binary_fixture(FIXTURE_MARKER);
     let real_init = binary_fixture("stock-init");
     let overlay = takeover_cpio(
         binary.clone(),
         real_init.clone(),
         BTreeMap::from([("lib/kernelesp.ko".to_owned(), vec![7, 8, 9])]),
+        "0123456789ab",
     )
     .unwrap();
     assert_eq!(legacy_lz4(&overlay).unwrap(), legacy_lz4(&overlay).unwrap());
@@ -415,7 +383,11 @@ fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
     .unwrap();
     assert_eq!(mode & 0o777, 0o644);
     let cpio = Cpio::load_from_data(&overlay).unwrap();
-    assert_eq!(cpio.entries().len(), 4);
+    assert_eq!(cpio.entries().len(), 5);
+    assert_eq!(
+        cpio.entry_by_name("esu-build-id").unwrap().data().unwrap(),
+        b"0123456789ab\n"
+    );
     assert_eq!(cpio.entry_by_name("init").unwrap().data().unwrap(), binary);
     assert_eq!(
         cpio.entry_by_name("init.real").unwrap().data().unwrap(),
@@ -424,9 +396,14 @@ fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
     let archive = legacy_lz4(&overlay).unwrap();
     assert!(archive.starts_with(&LZ4_LEGACY_MAGIC));
     assert_eq!(decode_legacy_lz4(&archive), overlay);
+    let header = overlay
+        .windows(5)
+        .position(|bytes| bytes == b"init\0")
+        .unwrap()
+        - 110;
     let field = |index: usize| {
         u32::from_str_radix(
-            std::str::from_utf8(&overlay[6 + index * 8..14 + index * 8]).unwrap(),
+            std::str::from_utf8(&overlay[header + 6 + index * 8..header + 14 + index * 8]).unwrap(),
             16,
         )
         .unwrap()
@@ -447,7 +424,13 @@ fn cpio_traversal_truncation_and_bad_crc_fail() {
         cpio.dump(&mut bytes).unwrap();
         assert!(validate_cpio(&bytes).is_err());
     }
-    let archive = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6], BTreeMap::new()).unwrap();
+    let archive = takeover_cpio(
+        vec![1, 2, 3],
+        vec![4, 5, 6],
+        BTreeMap::new(),
+        "0123456789ab",
+    )
+    .unwrap();
     for size in [1, 100, 110, 115, 119] {
         assert!(validate_cpio(&archive[..size]).is_err());
     }
@@ -464,8 +447,20 @@ fn host_transaction_is_complete_deterministic_and_nonmutating() {
     let first_receipt = fs::read(fixture.args.out.join("receipt.json")).unwrap();
     let receipt: serde_json::Value = serde_json::from_slice(&first_receipt).unwrap();
     assert_eq!(receipt["archive_path"], "rom/rom1/esu.cpio");
-    assert_eq!(receipt["generation"], GENERATION);
-    assert_eq!(receipt["boot_contract"], "androidboot.esu.rom=rom1");
+    assert_eq!(receipt["boot_contract"], "bdsvars BootedRom via efivarfs");
+    let build_id = receipt["build_id"].as_str().unwrap();
+    assert_eq!(build_id.len(), 12);
+    let marker = format!("{build_id}\n");
+    assert_eq!(
+        fs::read(fixture.args.out.join("esp/esu/build-id")).unwrap(),
+        marker.as_bytes()
+    );
+    let archive = decode_legacy_lz4(&fs::read(fixture.args.out.join("esu.cpio")).unwrap());
+    let cpio = Cpio::load_from_data(&archive).unwrap();
+    assert_eq!(
+        cpio.entry_by_name("esu-build-id").unwrap().data().unwrap(),
+        marker.as_bytes()
+    );
     assert_eq!(receipt["boot_image"], "unsigned-conventional-test-only");
     assert_eq!(receipt["module_verification"]["status"], "accepted");
     assert_eq!(
@@ -529,7 +524,7 @@ fn required_boot_path_preserves_source_kernel_and_saved_init() {
     let cmdline =
         std::str::from_utf8(&cmdline[..cmdline.iter().position(|byte| *byte == 0).unwrap()])
             .unwrap();
-    assert_eq!(cmdline, "console=ttyS0 quiet androidboot.esu.rom=rom1");
+    assert_eq!(cmdline, "console=ttyS0 quiet");
     let mut rebuilt = Vec::new();
     parsed
         .get_blocks()
@@ -552,7 +547,6 @@ fn required_boot_path_preserves_source_kernel_and_saved_init() {
         patch_boot(
             &source,
             &decode_legacy_lz4(&fs::read(fixture.args.out.join("esu.cpio")).unwrap()),
-            "rom1",
         )
         .unwrap(),
         image
@@ -570,8 +564,14 @@ fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted()
             source.extend(vec![0x55; 4096]);
         }
         source.extend(b"untrusted AVB tail");
-        let overlay = takeover_cpio(vec![1, 2, 3], vec![4, 5, 6], BTreeMap::new()).unwrap();
-        let patched = patch_boot(&source, &overlay, "rom1").unwrap();
+        let overlay = takeover_cpio(
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            BTreeMap::new(),
+            "0123456789ab",
+        )
+        .unwrap();
+        let patched = patch_boot(&source, &overlay).unwrap();
         let image = BootImage::parse(&patched).unwrap();
         assert!(image.get_blocks().get_kernel().is_none());
         if version == 4 {
@@ -606,31 +606,29 @@ fn missing_manifest_rom_or_module_receipt_never_publishes() {
 }
 
 #[test]
-fn generation_disagreement_in_every_component_fails_closed() {
-    for path in ["roms/rom1.toml", "bin/esud"] {
-        let fixture = Fixture::new();
-        let path = fixture.args.payload.join(path);
-        if path
-            .extension()
-            .is_some_and(|extension| extension == "toml")
-        {
-            fs::write(
-                &path,
-                fs::read_to_string(&path)
-                    .unwrap()
-                    .replace(GENERATION, "other"),
-            )
-            .unwrap();
-        } else if path.extension().is_some_and(|extension| extension == "ko") {
-            fs::write(&path, module_fixture("other")).unwrap();
-        } else {
-            fs::write(&path, binary_fixture("other")).unwrap();
-        }
-        fixture.reject("generation");
-    }
-    let fixture = Fixture::new();
-    fs::write(&fixture.args.esuinit, binary_fixture("other")).unwrap();
-    fixture.reject("generation");
+fn build_id_is_sorted_framed_and_retains_duplicate_hashes() {
+    let a = digest(b"a");
+    let b = digest(b"b");
+    let expected = digest(format!("{a}\n{b}\n").as_bytes());
+    let mut hashes = [a.as_str(), b.as_str()];
+    hashes.sort_unstable();
+    let expected = if hashes[0] == a {
+        expected
+    } else {
+        digest(format!("{b}\n{a}\n").as_bytes())
+    };
+    assert_eq!(
+        artifact_build_id([a.as_str(), b.as_str()].into_iter()),
+        expected[..12]
+    );
+    assert_eq!(
+        artifact_build_id([b.as_str(), a.as_str()].into_iter()),
+        expected[..12]
+    );
+    assert_ne!(
+        artifact_build_id([a.as_str(), a.as_str(), b.as_str()].into_iter()),
+        expected[..12]
+    );
 }
 
 #[test]
@@ -687,130 +685,38 @@ fn traversal_symlink_orphan_module_and_existing_output_fail_closed() {
 #[test]
 fn malformed_boot_and_dynamic_pid1_are_rejected() {
     for source in [vec![], vec![0; 4096], b"ANDROID!".to_vec()] {
-        assert!(patch_boot(&source, b"", "rom1").is_err());
+        assert!(patch_boot(&source, b"").is_err());
     }
     let mut source = stock_boot(3, &[]);
     put32(&mut source, 40, 2);
-    assert!(patch_boot(&source, b"", "rom1").is_err());
+    assert!(patch_boot(&source, b"").is_err());
     let fixture = Fixture::new();
-    let binary = binary_fixture_kind(GENERATION, true);
+    let binary = binary_fixture_kind(FIXTURE_MARKER, true);
     fs::write(&fixture.args.esuinit, binary).unwrap();
     assert!(patch(&fixture.args).is_err());
     assert!(!fixture.args.out.exists());
     let fixture = Fixture::new();
     let path = fixture.args.payload.join("bin/thin-activate");
-    fs::write(path, binary_fixture_kind(GENERATION, true)).unwrap();
+    fs::write(path, binary_fixture_kind(FIXTURE_MARKER, true)).unwrap();
     fixture.reject("statically linked");
 }
 
-/// List `bin/fw-views` as an ordered userspace helper module with the given
-/// manifest name, parameters, file mode and generation note.
-fn with_helper(fixture: &Fixture, name: &str, params: &str, mode: u32, generation: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let payload = &fixture.args.payload;
-    let manifest = payload.join("manifest.toml");
-    fs::write(
-        &manifest,
-        format!(
-            "{}\n[[modules]]\nname = \"{name}\"\npath = \"bin/fw-views\"\nparams = \"{params}\"\n",
-            fs::read_to_string(&manifest).unwrap()
-        ),
-    )
-    .unwrap();
-    let path = payload.join("bin/fw-views");
-    fs::write(&path, binary_fixture(generation)).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
-}
-
 #[test]
-fn an_ordered_helper_module_must_be_an_executable_static_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
-    // A listed helper is admitted when it is an executable, interpreter-free
-    // binary of this payload generation: PID 1 runs it from the ESP through its
-    // own early.sh and never loads it into the kernel.
+fn managed_payload_contains_ordinary_boot_hal_module() {
     let fixture = Fixture::new();
-    with_helper(&fixture, "fw-views", "", 0o755, GENERATION);
-    patch(&fixture.args).unwrap();
-
-    for (name, params, mode, generation, expected) in [
-        (
-            "fw-views",
-            "",
-            0o644,
-            GENERATION,
-            "helper module is not executable",
-        ),
-        (
-            "fw-views",
-            "debug=1",
-            0o755,
-            GENERATION,
-            "takes no parameters",
-        ),
-        ("fw-views", "", 0o755, "release-9", "generation"),
-        (
-            "helper",
-            "",
-            0o755,
-            GENERATION,
-            "does not admit helper module",
-        ),
-    ] {
-        let fixture = Fixture::new();
-        with_helper(&fixture, name, params, mode, generation);
-        fixture.reject(expected);
-    }
-
-    // A dynamic helper cannot run where PID 1 has no linker.
-    let fixture = Fixture::new();
-    with_helper(&fixture, "fw-views", "", 0o755, GENERATION);
-    fs::write(
-        fixture.args.payload.join("bin/fw-views"),
-        binary_fixture_kind(GENERATION, true),
-    )
-    .unwrap();
-    fs::set_permissions(
-        fixture.args.payload.join("bin/fw-views"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    fixture.reject("statically linked");
-
-    // A manifest that lists the helper without shipping it fails closed.
-    let fixture = Fixture::new();
-    with_helper(&fixture, "fw-views", "", 0o755, GENERATION);
-    fs::remove_file(fixture.args.payload.join("bin/fw-views")).unwrap();
-    fixture.reject("helper module is not executable");
-}
-
-#[test]
-fn managed_payload_stages_both_packages_and_rejects_stale_or_missing_sources() {
-    let mut fixture = Fixture::new();
     fixture.managed();
     patch(&fixture.args).unwrap();
     for path in [
-        "modules/boot-hal/boot-gblbds.rc",
-        "modules/tiny-espsu/install.sh",
-        "modules/tiny-espsu/policy.cil",
+        "module.prop",
+        "attrs",
+        "sepolicy.rule",
+        "vendor/bin/hw/android.hardware.boot-service.qti",
     ] {
         assert_eq!(
-            fs::read(fixture.args.payload.join(path)).unwrap(),
-            fs::read(fixture.args.out.join("esp/esu").join(path)).unwrap()
+            fs::read(fixture.args.payload.join("modules/boot-hal").join(path)).unwrap(),
+            fs::read(fixture.args.out.join("esp/esu/modules/boot-hal").join(path)).unwrap()
         );
     }
-    fixture.args.out = fixture.root.path().join("rejected");
-    fs::write(
-        fixture.args.payload.join("modules/tiny-espsu/tiny-espsu"),
-        binary_fixture("stale"),
-    )
-    .unwrap();
-    fixture.reject("generation");
-    let fixture = Fixture::new();
-    fixture.managed();
-    fs::remove_file(fixture.args.payload.join("modules/tiny-espsu/policy.cil")).unwrap();
-    fixture.reject("No such file");
     let fixture = Fixture::new();
     fixture.managed();
     let receipt = fixture.args.modules_dir.join("gpt.ko.compat.json");
@@ -830,7 +736,7 @@ fn generated_names_cannot_collide_on_fat_and_pid1_cannot_hide_a_stale_copy() {
     let fixture = Fixture::new();
     fs::write(
         fixture.args.payload.join("bin/Esuinit"),
-        binary_fixture(GENERATION),
+        binary_fixture(FIXTURE_MARKER),
     )
     .unwrap();
     fixture.reject("case-folding collision");
@@ -848,9 +754,9 @@ fn commandline_preserves_quoted_arguments_and_has_one_explicit_contract() {
     let command =
         br#"console=ttyS0 label="one  two" "rdinit=/old" androidboot.esu.rom=old rdinit=/another"#;
     assert_eq!(
-        boot_cmdline(command, "rom1").unwrap(),
-        "console=ttyS0 label=\"one  two\" androidboot.esu.rom=rom1"
+        boot_cmdline(command).unwrap(),
+        "console=ttyS0 label=\"one  two\""
     );
-    assert!(boot_cmdline(b"label=\"unterminated", "rom1").is_err());
-    assert!(boot_cmdline(&[b'x'; 1536], "rom1").is_err());
+    assert!(boot_cmdline(b"label=\"unterminated").is_err());
+    assert!(boot_cmdline(&[b'x'; 1536]).is_err());
 }

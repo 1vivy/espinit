@@ -5,7 +5,7 @@ use crate::ksu_uapi;
 use std::cell::Cell;
 use std::fs;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::RawFd;
 use std::sync::LazyLock;
 
 // sigsys handler
@@ -136,24 +136,6 @@ fn init_driver_fd() -> Option<RawFd> {
     }
 }
 
-/// Duplicate the validated control descriptor without `O_CLOEXEC` for one
-/// tightly scoped helper process. The caller keeps this owned duplicate alive
-/// through `Command::status`; the original cached descriptor remains private.
-pub fn duplicate_driver_fd_for_child() -> Result<OwnedFd> {
-    let fd = *DRIVER_FD;
-    if fd < 0 {
-        bail!("could not retrieve esu driver fd");
-    }
-    // SAFETY: `fd` is the process-owned cached descriptor. `F_DUPFD` returns a
-    // new descriptor without FD_CLOEXEC, owned by the returned `OwnedFd`.
-    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD, 3) };
-    if duplicate < 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    // SAFETY: `duplicate` is a fresh descriptor returned by `fcntl`.
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
-}
-
 // ioctl wrapper using libc
 fn ksuctl<T>(request: u32, arg: *mut T) -> Result<i32> {
     use std::io;
@@ -187,9 +169,8 @@ fn query_info() -> ksu_uapi::ksu_get_info_cmd {
         boot_mode: 0,
     };
     if ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO, &raw mut cmd).is_err() {
-        // A core predating UAPI v2 answers only the zero-size request, and its
-        // reply carries neither a version nor a generation; the readiness and
-        // generation checks below reject that reply.
+        // A core predating UAPI v2 answers only the zero-size request; the
+        // UAPI and readiness checks below reject that reply.
         let _ = ksuctl(ksu_uapi::KSU_IOCTL_GET_INFO_LEGACY, &raw mut cmd);
     }
     cmd
@@ -200,22 +181,9 @@ pub fn get_info() -> ksu_uapi::ksu_get_info_cmd {
     *INFO_CACHE
 }
 
-pub fn get_version() -> i32 {
-    get_info().version as i32
-}
-
-pub fn is_lkm() -> bool {
-    get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_LKM != 0
-}
-
 pub const fn uapi_version() -> u32 {
     ksu_uapi::ESU_UAPI_VERSION
 }
-
-/// Build generation compiled into this daemon by build.rs, from
-/// `ESU_GENERATION` or the full Git HEAD hash of the esu repository.
-/// It must equal the generation of the loaded core module.
-pub const BUILD_GENERATION: &str = env!("ESU_GENERATION");
 
 /// State bits reported by the core module through the last get-info query.
 pub fn core_state() -> u32 {
@@ -228,29 +196,8 @@ pub fn is_core_ready() -> bool {
     core_state() & ksu_uapi::ESU_STATE_READY != 0
 }
 
-/// Build generation reported by the loaded core module, decoded from the
-/// fixed-width NUL-terminated ASCII field. `generation[63]` is always NUL, so
-/// a missing terminator or non-ASCII content means the core is not speaking
-/// this ABI, and the result is `None`. Any remaining weakness in this decode
-/// cannot admit an invalid generation: the caller accepts it only when it is
-/// byte-identical to `BUILD_GENERATION`, which build.rs validates against the
-/// `[A-Za-z0-9._-]{1,63}` build charset.
-pub fn kernel_generation() -> Option<String> {
-    let generation = &get_info().generation;
-    let end = generation.iter().position(|&byte| byte == 0)?;
-    let bytes = &generation[..end];
-    if !bytes.is_ascii() {
-        return None;
-    }
-    Some(bytes.iter().map(|&byte| char::from(byte)).collect())
-}
-
-pub fn runtime_mode() -> &'static str {
-    if is_lkm() { "module" } else { "built-in" }
-}
-
 /// Verify that the loaded core module matches this daemon before any operation
-/// relies on it: same UAPI, finished initialization and identical generation.
+/// relies on it: same UAPI and finished initialization.
 pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
     let info = get_info();
     let kernel_uapi = info.uapi_version;
@@ -266,25 +213,6 @@ pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
             "esu core is not ready: get-info reported state=0x{:x} without the READY bit. Load the \
              matching esu module to completion before the daemon runs.",
             info.state
-        );
-    }
-
-    let Some(kernel_generation) = kernel_generation() else {
-        bail!(
-            "esu core reported an invalid build generation: the get-info field is not \
-             NUL-terminated ASCII. Build and load a core module that implements UAPI v3."
-        );
-    };
-    if kernel_generation.is_empty() {
-        bail!(
-            "esu core reported an empty build generation. Build the core module with \
-             ESU_GENERATION or from a Git checkout and reinstall the matching payload."
-        );
-    }
-    if kernel_generation != BUILD_GENERATION {
-        bail!(
-            "esu generation mismatch: kernel={kernel_generation}, esud={BUILD_GENERATION}. \
-             Install a payload whose core module and daemon share one generation."
         );
     }
 
@@ -311,16 +239,6 @@ pub fn report_boot_complete() {
     report_event(ksu_uapi::EVENT_BOOT_COMPLETED);
 }
 
-pub fn report_module_mounted() {
-    report_event(ksu_uapi::EVENT_MODULE_MOUNTED);
-}
-
-pub fn check_kernel_safemode() -> bool {
-    let mut cmd = ksu_uapi::ksu_check_safemode_cmd { in_safe_mode: 0 };
-    let _ = ksuctl(ksu_uapi::KSU_IOCTL_CHECK_SAFEMODE, &raw mut cmd);
-    cmd.in_safe_mode != 0
-}
-
 pub fn set_sepolicy(payload: *const u8, payload_len: u64) -> Result<i32> {
     let mut ioctl_cmd = crate::ksu_uapi::ksu_set_sepolicy_cmd {
         data_len: payload_len,
@@ -328,120 +246,4 @@ pub fn set_sepolicy(payload: *const u8, payload_len: u64) -> Result<i32> {
     };
 
     ksuctl(ksu_uapi::KSU_IOCTL_SET_SEPOLICY, &raw mut ioctl_cmd)
-}
-
-/// Get feature value and support status from kernel
-/// Returns (value, supported)
-pub fn get_feature(feature_id: u32) -> Result<(u64, bool)> {
-    let mut cmd = ksu_uapi::ksu_get_feature_cmd {
-        feature_id,
-        value: 0,
-        supported: 0,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_GET_FEATURE, &raw mut cmd)?;
-    Ok((cmd.value, cmd.supported != 0))
-}
-
-/// Set feature value in kernel
-pub fn set_feature(feature_id: u32, value: u64) -> Result<()> {
-    let mut cmd = ksu_uapi::ksu_set_feature_cmd { feature_id, value };
-    ksuctl(ksu_uapi::KSU_IOCTL_SET_FEATURE, &raw mut cmd)?;
-    Ok(())
-}
-
-/// Get mark status for a process (pid=0 returns total marked count)
-pub fn mark_get(pid: i32) -> Result<u32> {
-    let mut cmd = ksu_uapi::ksu_manage_mark_cmd {
-        operation: ksu_uapi::KSU_MARK_GET,
-        pid,
-        result: 0,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_MANAGE_MARK, &raw mut cmd)?;
-    Ok(cmd.result)
-}
-
-/// Mark a process (pid=0 marks all processes)
-pub fn mark_set(pid: i32) -> Result<()> {
-    let mut cmd = ksu_uapi::ksu_manage_mark_cmd {
-        operation: ksu_uapi::KSU_MARK_MARK,
-        pid,
-        result: 0,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_MANAGE_MARK, &raw mut cmd)?;
-    Ok(())
-}
-
-/// Unmark a process (pid=0 unmarks all processes)
-pub fn mark_unset(pid: i32) -> Result<()> {
-    let mut cmd = ksu_uapi::ksu_manage_mark_cmd {
-        operation: ksu_uapi::KSU_MARK_UNMARK,
-        pid,
-        result: 0,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_MANAGE_MARK, &raw mut cmd)?;
-    Ok(())
-}
-
-/// Refresh mark for all running processes
-pub fn mark_refresh() -> Result<()> {
-    let mut cmd = ksu_uapi::ksu_manage_mark_cmd {
-        operation: ksu_uapi::KSU_MARK_REFRESH,
-        pid: 0,
-        result: 0,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_MANAGE_MARK, &raw mut cmd)?;
-    Ok(())
-}
-
-pub fn nuke_ext4_sysfs(mnt: &str) -> anyhow::Result<()> {
-    let c_mnt = std::ffi::CString::new(mnt)?;
-    let mut ioctl_cmd = ksu_uapi::ksu_nuke_ext4_sysfs_cmd {
-        arg: c_mnt.as_ptr() as u64,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_NUKE_EXT4_SYSFS, &raw mut ioctl_cmd)?;
-    Ok(())
-}
-
-/// Wipe all entries from umount list
-pub fn umount_list_wipe() -> Result<()> {
-    let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
-        arg: 0,
-        flags: 0,
-        mode: ksu_uapi::KSU_UMOUNT_WIPE,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut cmd)?;
-    Ok(())
-}
-
-/// Add mount point to umount list
-pub fn umount_list_add(path: &str, flags: u32) -> anyhow::Result<()> {
-    let c_path = std::ffi::CString::new(path)?;
-    let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
-        arg: c_path.as_ptr() as u64,
-        flags,
-        mode: ksu_uapi::KSU_UMOUNT_ADD,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut cmd)?;
-    Ok(())
-}
-
-/// Delete mount point from umount list
-pub fn umount_list_del(path: &str) -> anyhow::Result<()> {
-    let c_path = std::ffi::CString::new(path)?;
-    let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
-        arg: c_path.as_ptr() as u64,
-        flags: 0,
-        mode: ksu_uapi::KSU_UMOUNT_DEL,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut cmd)?;
-    Ok(())
-}
-
-/// Set current process's process group to init_group (pgid = 0)
-pub fn set_init_pgrp() -> Result<()> {
-    ksuctl(
-        ksu_uapi::KSU_IOCTL_SET_INIT_PGRP,
-        std::ptr::null_mut::<u8>(),
-    )?;
-    Ok(())
 }

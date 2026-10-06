@@ -2,12 +2,6 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-/// Maximum length of the generation string, excluding its NUL terminator. It
-/// must stay in sync with the `generation[64]` field of `struct
-/// ksu_get_info_cmd` in uapi/supercall.h and with the validation in
-/// kernel/Kbuild.
-const GENERATION_MAX_LEN: usize = 63;
-
 fn get_git_version() -> Result<(u32, String), std::io::Error> {
     let output = Command::new("git")
         .args(["rev-list", "--count", "HEAD"])
@@ -44,70 +38,8 @@ fn git_output(args: &[&str]) -> Option<String> {
     (!stdout.is_empty()).then_some(stdout)
 }
 
-fn is_generation_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
-}
-
-/// Reject a generation that must not be shipped. The value is embedded into a
-/// fixed-width C field and into matching kernel/module builds, so a bad value
-/// must fail the build instead of being truncated or mangled.
-fn validate_generation(value: &str, source: &str) {
-    if value.is_empty() {
-        panic!("esu {source} is empty, but the generation must not be empty");
-    }
-    if value.len() > GENERATION_MAX_LEN {
-        panic!(
-            "esu {source} is {} bytes long, but a generation may hold at most \
-             {GENERATION_MAX_LEN} bytes; refusing to truncate it",
-            value.len()
-        );
-    }
-    if let Some(ch) = value.chars().find(|ch| !is_generation_char(*ch)) {
-        panic!(
-            "esu {source} contains {ch:?}, but a generation must be ASCII \
-             letters/digits or one of . _ -"
-        );
-    }
-}
-
-/// The generation shared by the PID-1 stage, the core kernel module, every ESP
-/// module and this daemon. `ESU_GENERATION` wins when set, otherwise the
-/// full 40-byte lowercase Git HEAD hash of the esu repository is used.
-/// Keep this logic in sync with kernel/Kbuild and userspace/esuinit/build.rs.
-fn build_generation() -> String {
-    match env::var("ESU_GENERATION") {
-        Ok(value) if !value.is_empty() => {
-            validate_generation(&value, "ESU_GENERATION");
-            value
-        }
-        Ok(_) => {
-            panic!("ESU_GENERATION is set but empty; unset it to derive the full Git HEAD hash")
-        }
-        Err(_) => {
-            let head = git_output(&["rev-parse", "HEAD"]).unwrap_or_else(|| {
-                panic!(
-                    "cannot derive the esu generation: ESU_GENERATION is unset and \
-                     `git rev-parse HEAD` failed or returned no usable output. Set ESU_GENERATION explicitly when building from a source tarball."
-                )
-            });
-            if head.len() != 40
-                || !head
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-            {
-                panic!(
-                    "git rev-parse HEAD did not return 40 lowercase hex bytes; set ESU_GENERATION explicitly when building from a source tarball"
-                );
-            }
-            head
-        }
-    }
-}
-
-/// Files whose content changes the generation or the generated UAPI bindings.
-/// Cargo reruns this script when one of them changes; without this the daemon
-/// could keep a stale generation after a checkout or a UAPI edit.
-fn generation_inputs() -> Vec<String> {
+/// Rebuild version metadata and bindings when their source changes.
+fn build_inputs() -> Vec<String> {
     let mut inputs = vec!["src/ksu_uapi.h".to_string(), "../../uapi".to_string()];
     if let Some(git_dir) = git_output(&["rev-parse", "--absolute-git-dir"]) {
         let git_dir = Path::new(&git_dir);
@@ -161,15 +93,9 @@ fn main() {
     println!("cargo:rustc-env=VERSION_CODE={code}");
     println!("cargo:rustc-env=VERSION_NAME={name}");
 
-    let generation = build_generation();
-    println!("cargo:rustc-env=ESU_GENERATION={generation}");
-    println!("cargo:rerun-if-env-changed=ESU_GENERATION");
-    for input in generation_inputs() {
+    for input in build_inputs() {
         println!("cargo:rerun-if-changed={input}");
     }
 
-    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
-    if target_os == "android" {
-        configure_bindgen();
-    }
+    configure_bindgen();
 }

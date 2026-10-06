@@ -28,7 +28,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-GENERATION = re.compile(r"[A-Za-z0-9._-]{1,63}")
 BOOT_MAGIC = b"ANDROID!"
 BOOT_HEADER_SIZE = 4096
 HEADER_SIZES = {3: 1580, 4: 1584}
@@ -44,7 +43,6 @@ PATHS = (
     "esuinit",
     "esud",
     "boot_hal",
-    "tiny_espsu",
     "busybox",
     "thin_activate",
     "fw_views",
@@ -68,7 +66,9 @@ ESP_DIRECTORIES = (
     "esu/modules/thin",
     "esu/modules/fw-views",
     "esu/modules/boot-hal",
-    "esu/modules/tiny-espsu",
+    "esu/modules/boot-hal/vendor",
+    "esu/modules/boot-hal/vendor/bin",
+    "esu/modules/boot-hal/vendor/bin/hw",
     "esu/receipts",
 )
 EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
@@ -89,28 +89,18 @@ def run(arguments: list[str | Path], *, cwd: Path | None = None, data: bytes | N
     return completed.stdout
 
 
-def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tuple[str, str]:
+def configurations(metadata_filesystem: str, rom_id: str) -> tuple[str, str]:
     """Render the manifest and the structurally valid placeholder ROM config."""
-    if not GENERATION.fullmatch(generation):
-        raise ValueError("generation must be 1..63 ASCII letters/digits plus . _ -")
     if metadata_filesystem not in ("ext4", "f2fs"):
         raise ValueError("metadata filesystem must be explicitly ext4 or f2fs")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,59}", rom_id) or rom_id in (".", ".."):
         raise ValueError("ROM ID must be 1..59 ASCII letters/digits plus . _ -, excluding . and ..")
 
-    head = f'schema_version = 1\ngeneration = "{generation}"\n'
-    manifest = head + 'rom = "roms"\n'
-    manifest += (
-        f'\n[platform]\nmetadata_filesystem = "{metadata_filesystem}"\n'
-        'packages = ["boot-hal", "tiny-espsu"]\nrecovery_packages = []\n'
-    )
+    head = 'schema_version = 1\n'
+    manifest = head + 'rom = "roms"\nmodules_order = ["boot-hal", "thin", "fw-views"]\n'
     for name, path in (
         ("kernelesp", "lib/kernelesp.ko"),
         ("thin", "lib/thin.ko"),
-        # An ordered userspace helper: it runs `bin/fw-views` through its own
-        # early.sh between `thin` and `gpt`, and a ROM without firmware views
-        # makes it a no-op.
-        ("fw-views", "bin/fw-views"),
         ("gpt", "lib/gpt.ko"),
         ("efivarfs", "lib/efivarfs.ko"),
     ):
@@ -119,10 +109,8 @@ def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tu
 
     # Valid managed shape with a deliberately impossible backend: the lab lane
     # replaces this file with the complete generated GPT projection before boot.
-    # The stock ROM number is explicit, and there is no `metadata_shared`
-    # projection: one guest per payload, and Cuttlefish projects the physical
-    # metadata partition itself.
-    rom = head + f'id = "{rom_id}"\nrom_number = 1\n' + (
+    # One guest per payload; bdsvars supplies the runtime ROM number.
+    rom = head + f'id = "{rom_id}"\n' + (
         'managed = true\n\n[[partitions]]\nname = "userdata"\n'
         'backend = "/dev/mapper/esu-payload-placeholder"\nread_only = false\n'
     )
@@ -200,7 +188,7 @@ def compress(mode: str, raw: bytes) -> bytes:
     return raw
 
 
-def add_pid1(ramdisk: bytes, pid1: Path, work: Path, modules: dict[str, Path] | None = None) -> bytes:
+def add_pid1(ramdisk: bytes, pid1: Path, work: Path, modules: dict[str, Path], build_id: str) -> bytes:
     # Validate every stock archive before preserving it byte-for-byte. Android
     # initramfs commonly concatenates platform and vendor newc archives; the
     # kernel applies later members last, so a final archive installs /esuinitinit
@@ -212,7 +200,10 @@ def add_pid1(ramdisk: bytes, pid1: Path, work: Path, modules: dict[str, Path] | 
     shutil.copyfile(pid1, root / "esuinit")
     (root / "esuinit").chmod(0o755)
     os.utime(root / "esuinit", (0, 0))
-    members = ["esuinit"]
+    (root / "esu-build-id").write_text(build_id + "\n")
+    (root / "esu-build-id").chmod(0o644)
+    os.utime(root / "esu-build-id", (0, 0))
+    members = ["esuinit", "esu-build-id"]
     if modules:
         (root / "lib").mkdir()
         members.append("lib")
@@ -236,7 +227,7 @@ def add_pid1(ramdisk: bytes, pid1: Path, work: Path, modules: dict[str, Path] | 
 
 
 def repack_init_boot(
-    stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path, modules: dict[str, Path] | None = None
+    stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path, modules: dict[str, Path], build_id: str
 ) -> Path:
     """Install /esuinit and re-sign the fixed-size Cuttlefish init_boot."""
     original = stock.read_bytes()
@@ -268,7 +259,7 @@ def repack_init_boot(
 
     mode, raw = decompress(ramdisk)
     replacement = work / "ramdisk"
-    replacement.write_bytes(compress(mode, add_pid1(raw, pid1, work, modules)))
+    replacement.write_bytes(compress(mode, add_pid1(raw, pid1, work, modules, build_id)))
 
     arguments[arguments.index("--ramdisk") + 1] = str(replacement)
     image = work / "init_boot.img"
@@ -321,59 +312,19 @@ def esp_image_size(content: int, requested_mib: int | None) -> int:
     return max(DEFAULT_ESP_MIB * 1024 * 1024, -(-needed // (1024 * 1024)) * 1024 * 1024)
 
 
-def artifact_generation(path: Path, generation: str) -> None:
-    """Check the ELF note without running an Android binary on the host."""
-    data = path.read_bytes()
-    if data[:6] != b"\x7fELF\x02\x01" or len(data) < 64:
-        raise ValueError(f"{path}: expected little-endian ELF64")
-    kind, machine = struct.unpack_from("<HH", data, 16)
-    if kind not in (2, 3) or machine not in (62, 183):
-        raise ValueError(f"{path}: unsupported executable architecture/type")
-    offset = struct.unpack_from("<Q", data, 40)[0]
-    size, count, names_index = struct.unpack_from("<HHH", data, 58)
-    if size != 64 or count == 0 or names_index >= count or offset + size * count > len(data):
-        raise ValueError(f"{path}: malformed ELF section table")
-    sections = [struct.unpack_from("<IIQQQQIIQQ", data, offset + size * index) for index in range(count)]
-    strings = sections[names_index]
-    names = data[strings[4]:strings[4] + strings[5]]
-    notes = []
-    for section in sections:
-        if section[0] >= len(names):
-            raise ValueError(f"{path}: invalid section name")
-        name = names[section[0]:].split(b"\0", 1)[0]
-        if name == b".note.espinit":
-            notes.append(data[section[4]:section[4] + section[5]])
-    expected = struct.pack("<III", 8, 64, 1) + b"ESPINIT\0" + generation.encode().ljust(64, b"\0")
-    if notes != [expected]:
-        raise ValueError(f"{path}: missing, duplicate, malformed or mismatched generation note")
-
-
-def platform_files(sources: dict[str, Path], generation: str, tree: Path) -> list[tuple[Path, str, int]]:
-    """Use the checked-in module contract, not a second package format."""
+def platform_files(sources: dict[str, Path], tree: Path) -> list[tuple[Path, str, int]]:
+    """Assemble the ordinary KernelSU Boot HAL module from its built binary."""
     files = []
-    for module in ("boot-hal", "tiny-espsu"):
-        directory = tree / "modules" / module
-        directory.mkdir()
-        template = REPOSITORY / "esu/modules" / module / "module.toml"
-        text = template.read_text()
-        if text.count('generation = "release-1"') != 1:
-            raise ValueError(f"invalid generation template: {template}")
-        manifest = directory / "module.toml"
-        manifest.write_text(text.replace('generation = "release-1"', f'generation = "{generation}"'))
-        files.append((manifest, f"esu/modules/{module}/module.toml", 0o644))
-    for key in ("esud", "boot_hal", "tiny_espsu"):
-        artifact_generation(sources[key], generation)
-    files.extend([
-        (sources["boot_hal"], "esu/modules/boot-hal/android.hardware.boot-service.gblbds", 0o755),
-        (REPOSITORY / "payloads/boot-hal/boot-gblbds.rc", "esu/modules/boot-hal/boot-gblbds.rc", 0o644),
-        (sources["tiny_espsu"], "esu/modules/tiny-espsu/tiny-espsu", 0o755),
-        (REPOSITORY / "esu/modules/tiny-espsu/install.sh", "esu/modules/tiny-espsu/install.sh", 0o755),
-        (REPOSITORY / "esu/modules/tiny-espsu/policy.cil", "esu/modules/tiny-espsu/policy.cil", 0o644),
-    ])
+    directory = tree / "modules/boot-hal/vendor/bin/hw"
+    directory.mkdir(parents=True)
+    for module in ("boot-hal", "thin", "fw-views"):
+        for name in (("module.prop", "attrs", "sepolicy.rule") if module == "boot-hal" else ("module.prop", "recovery-ok")):
+            files.append((REPOSITORY / "esu/modules" / module / name, f"esu/modules/{module}/{name}", 0o644))
+    files.append((sources["boot_hal"], "esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti", 0o755))
     return files
 
 
-def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, requested_mib: int | None) -> Path:
+def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, requested_mib: int | None, build_id: str) -> Path:
     tree = work / "esu"
     import tomllib
     rom_relative = f"roms/{tomllib.loads(rom)['id']}.toml"
@@ -381,30 +332,26 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
         (tree / directory).mkdir(parents=True)
     (tree / "manifest.toml").write_text(manifest)
     (tree / rom_relative).write_text(rom)
+    (tree / "build-id").write_text(build_id + "\n")
 
     scripts = (("thin", EARLY_SCRIPT), ("fw-views", FW_EARLY_SCRIPT))
     for name, script in scripts:
-        path = tree / "modules" / name / "early.sh"
-        path.write_text(script)
-        path.chmod(0o755)
+        for stage in ("pid1.sh", "pid1-recovery.sh"):
+            path = tree / "modules" / name / stage
+            path.write_text(script)
+            path.chmod(0o755)
 
     files: list[tuple[Path, str, int]] = [
         (tree / "manifest.toml", "esu/manifest.toml", 0o644),
         (tree / rom_relative, f"esu/{rom_relative}", 0o644),
+        (tree / "build-id", "esu/build-id", 0o644),
     ]
     for name, _ in scripts:
-        files.append(
-            (
-                tree / "modules" / name / "early.sh",
-                f"esu/modules/{name}/early.sh",
-                0o755,
-            )
-        )
+        for stage in ("pid1.sh", "pid1-recovery.sh"):
+            files.append((tree / "modules" / name / stage, f"esu/modules/{name}/{stage}", 0o755))
     for key, target in BINARIES:
         files.append((sources[key], f"esu/{target}", 0o755))
-    # Manifest generation is already validated by configurations().
-    generation = tomllib.loads(manifest)["generation"]
-    files.extend(platform_files(sources, generation, tree))
+    files.extend(platform_files(sources, tree))
 
     missing = [directory for directory in ESP_DIRECTORIES if not (work / directory).is_dir()]
     if missing:
@@ -425,8 +372,22 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
     return image
 
 
+def build_identity(sources: dict[str, Path], manifest: str, rom: str) -> tuple[str, dict[str, str]]:
+    """SHA256 of sorted artifact SHA256 values, each followed by LF."""
+    inputs = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in sources.items()}
+    inputs.update({name: hashlib.sha256(text.encode()).hexdigest() for name, text in
+                   (("manifest", manifest), ("rom", rom))})
+    for module, script in (("thin", EARLY_SCRIPT), ("fw-views", FW_EARLY_SCRIPT)):
+        for stage in ("pid1.sh", "pid1-recovery.sh"):
+            inputs[f"{module}/{stage}"] = hashlib.sha256(script.encode()).hexdigest()
+    for module in ("boot-hal", "thin", "fw-views"):
+        for name in (("module.prop", "attrs", "sepolicy.rule") if module == "boot-hal" else ("module.prop", "recovery-ok")):
+            inputs[f"{module}/{name}"] = hashlib.sha256((REPOSITORY / "esu/modules" / module / name).read_bytes()).hexdigest()
+    return hashlib.sha256("".join(value + "\n" for value in sorted(inputs.values())).encode()).hexdigest()[:12], inputs
+
+
 def assemble(arguments: argparse.Namespace) -> None:
-    manifest, rom = configurations(arguments.generation, arguments.metadata_filesystem, arguments.rom_id)
+    manifest, rom = configurations(arguments.metadata_filesystem, arguments.rom_id)
 
     sources = {name: Path(getattr(arguments, name)).resolve(strict=True) for name in PATHS}
     for name, source in sources.items():
@@ -457,6 +418,7 @@ def assemble(arguments: argparse.Namespace) -> None:
         prefix=f".{output.name}.assemble-", dir=output.parent
     ) as directory:
         work = Path(directory)
+        build_id, build_id_inputs = build_identity(sources, manifest, rom)
         init_boot = repack_init_boot(
             sources["stock_init_boot"],
             sources["esuinit"],
@@ -464,8 +426,9 @@ def assemble(arguments: argparse.Namespace) -> None:
             sources["avb_key"],
             work,
             {name: sources[key] for key, name in MODULES},
+            build_id,
         )
-        esp = build_esp(sources, manifest, rom, work, arguments.esp_size_mib)
+        esp = build_esp(sources, manifest, rom, work, arguments.esp_size_mib, build_id)
 
         images: dict[str, dict[str, object]] = {}
         for path in (init_boot, esp):
@@ -478,7 +441,7 @@ def assemble(arguments: argparse.Namespace) -> None:
         receipt = work / "payload.json"
         receipt.write_text(
             json.dumps(
-                {"schema_version": 1, "generation": arguments.generation, "images": images},
+                {"schema_version": 1, "build_id": build_id, "build_id_inputs": build_id_inputs, "images": images},
                 indent=2,
                 sort_keys=True,
             )
@@ -495,7 +458,6 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         parser.add_argument(f"--{name.replace('_', '-')}", required=True, metavar="FILE")
     parser.add_argument("--kmi-out", required=True, metavar="PATH")
     parser.add_argument("--metadata-filesystem", required=True, choices=("ext4", "f2fs"))
-    parser.add_argument("--generation", required=True, metavar="ID")
     parser.add_argument("--rom-id", required=True, metavar="ID")
     parser.add_argument("--output-dir", required=True, metavar="DIR")
     parser.add_argument("--esp-size-mib", type=int, default=None, metavar="MIB")

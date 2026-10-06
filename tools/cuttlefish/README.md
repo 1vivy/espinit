@@ -20,141 +20,57 @@ Cuttlefish run. **No stage of this lane is a claim that the payload boots.**
 
 ## Assemble the payload
 
-Required inputs, all explicit paths (`--flag` above each file):
-
-| Flag | Meaning |
-| --- | --- |
-| `--stock-init-boot` | stock AVB-signed Cuttlefish `init_boot.img`; its size is preserved |
-| `--avbtool`, `--avb-key` | pinned AVB tool and RSA-4096 key that verify the stock image and sign its replacement |
-| `--esu` | static PID-1 binary, installed as `/esu` in the initramfs |
-| `--esud` | daemon binary, installed as `esu/bin/esud` (install source, not the executed path) |
-| `--boot-hal` | generation-noted boot HAL executable, packaged under `modules/boot-hal/` |
-| `--tiny-espsu` | same-generation narrow bind/label helper, packaged under `modules/tiny-espsu/` |
-| `--metadata-filesystem` | explicit `ext4` or `f2fs` for the projected metadata mount; no filesystem fallback |
-| `--busybox` | static interpreter for ESP scripts, `esu/bin/busybox` |
-| `--thin-activate` | output of `build-thin-activate.sh`, `esu/bin/thin-activate` |
-| `--fw-views` | `fw-views` payload helper built for the CF guest's x86_64 Android: a clean r29 NDK (a `libc.a` bundling Rust std members, e.g. the local r30 or a contaminated install, fails the static link) plus `-C link-arg=$NDK/.../libclang_rt.builtins-x86_64-android.a`, `esu/bin/fw-views` |
-| `--core-module`, `--thin-module`, `--gpt-module`, `--efivarfs-module` | Four KMI-built modules, installed as `/lib/<name>.ko` in the ramdisk, never in the ESP image |
-| `--kmi-out` | Reference output containing Module.symvers, System.map and utsrelease.h |
-| `--generation` | one identifier, `[A-Za-z0-9._-]{1,63}`, written into every generation-bearing artifact |
-| `--rom-id` | required catalogue ID matching `androidboot.esu.rom`; generates `esu/roms/<id>.toml` with matching `id`, not a global/default ROM config |
-| `--output-dir` | target directory; must be empty (or hold only previous artifacts with `--overwrite`) |
-| `--esp-size-mib` | optional ESP image size in MiB (default 64). The lab lane copies this exact file over the pinned disposable `cuttlefish_example_custom.img` and regenerates that GPT entry from the file size, so any size the payload needs is acceptable |
-| `--overwrite` | replace `init_boot.img`, `esp.img`, `payload.json` in an output directory that holds them |
+The lane remains paused; packaging tests do not claim guest compatibility.
+All inputs are explicit:
 
 ```sh
 tools/cuttlefish/assemble.py \
-    --stock-init-boot  <pinned stock init_boot.img> \
-    --avbtool          <pinned avbtool> \
-    --avb-key          <matching Cuttlefish AVB key> \
-    --esuinit          <esu PID-1> \
-    --esud         <esud> \
-    --boot-hal         <gblbds-boot-hal> \
-    --tiny-espsu       <tiny-espsu> \
-    --metadata-filesystem ext4 \
-    --busybox          <static busybox> \
-    --thin-activate    <thin-activate> \
-    --fw-views         <fw-views> \
-    --core-module      <kernelesp.ko> \
-    --thin-module      <thin.ko> \
-    --gpt-module       <gpt.ko> \
-    --efivarfs-module  <efivarfs.ko> \
-    --kmi-out          <KMI reference output> \
-    --generation       <generation> \
-    --rom-id           <catalogue ROM ID> \
-    --esp-size-mib     <pinned custom partition size> \
-    --output-dir       <empty directory>
+  --stock-init-boot /build/stock/init_boot.img \
+  --avbtool /tools/avbtool --avb-key /keys/cuttlefish.pem \
+  --esuinit /build/esuinit --esud /build/esud \
+  --boot-hal /build/gblbds-boot-hal --busybox /build/busybox \
+  --thin-activate /build/thin-activate --fw-views /build/fw-views \
+  --core-module /build/kernelesp.ko --thin-module /build/thin.ko \
+  --gpt-module /build/gpt.ko --efivarfs-module /build/efivarfs.ko \
+  --kmi-out /build/kmi-out --metadata-filesystem ext4 \
+  --rom-id rom1 --output-dir /build/cf-payload
 ```
 
-The assembler runs the repository's shared `scripts/kmi_modules.py verify`
-before creating or replacing any payload image. Each module needs its matching
-schema-2 `<name>.ko.compat.json` beside it. CRC mismatches, missing kallsyms
-imports and stale receipts fail closed. The Cuttlefish device lane remains
-paused; this AArch64 gate is not a claim of x86_64 guest compatibility.
-See [build notes](../../README.md#build-notes).
+The four modules require schema-2 `.ko.compat.json` receipts beside them.
+The shared KMI verifier runs before image publication. It currently admits
+AArch64 phone modules; that is not x86_64 Cuttlefish guest compatibility.
+`--metadata-filesystem` validates the lane's requested ext4/f2fs selection;
+it no longer creates a platform staging manifest.
 
-Host tools used, each through a checked subprocess argument list (never a
-shell): the supplied `avbtool`, plus `unpack_bootimg`, `mkbootimg`, `cpio`,
-`gzip`/`lz4`, `mformat`, `mmd`, and `mcopy`. Temporary files are created beside
-the output directory for same-filesystem publication and removed on exit; a
-failed run leaves no partial artifact because the three files are moved into
-place only after every step succeeded.
+Outputs are `init_boot.img`, `esp.img`, and `payload.json`. The stock image must
+be kernel-free v3/v4 and the supplied key must authenticate it before re-signing.
+The ramdisk retains stock archives and appends `/esuinit`, `/esu-build-id`, and
+`/lib/{kernelesp,thin,gpt,efivarfs}.ko`. Compression and header fields are retained.
+The daemon lives directly in ESP `esu/bin/esud`; no metadata installation occurs.
 
-### Output contract
+The ESP contains schema-1 manifest/ROM config with `modules_order =
+["boot-hal", "thin", "fw-views"]`, no payload generation, no ROM number and no
+platform package table. Thin/fw-views carry `pid1.sh` and `pid1-recovery.sh`.
+The ordinary Boot HAL module has `module.prop`, `attrs`, `sepolicy.rule`, and
+`vendor/bin/hw/android.hardware.boot-service.qti` copied from the built HAL.
+Its fixed stock QTI target is not automatically compatible with a CF image.
+Kernel modules never enter the ESP filesystem.
 
-`init_boot.img` - the stock image with the static PID-1 binary installed as
-root member `/esu` (mode 0755). The ramdisk keeps its original compression
-(legacy LZ4, gzip or uncompressed are preserved; a frame-format LZ4 ramdisk is
-refused, because the lane kernel's `lib/decompress_unlz4.c` accepts only the
-legacy magic) and every stock archive byte-for-byte, followed by the `/esu`
-archive. `kernel_size`, `header_version`, `header_size`, `cmdline`,
-`os_version`/`os_patch_level` and the page layout are unchanged. The supplied
-AVB key must verify the stock image; the replacement receives a
-`SHA256_RSA4096` `init_boot` hash footer, is verified with the same key, and is
-padded by `avbtool` to the exact stock partition size.
+The managed ROM placeholder intentionally has an impossible backend; the lab
+must replace it with real projection data. Runtime selection and number are
+bdsvars BootedRom/Slot authority, not bootconfig or ROM TOML defaults.
 
-`esp.img` - a FAT image (VFAT long names, volume label `ESU`) containing
-exactly:
+`payload.json` records schema 1, `build_id`, `build_id_inputs`, and each image's
+SHA256 and size. Build ID hashes the sorted input SHA256 values (duplicates
+retained, each 64hex value followed by LF), taking the first 12 lowercase hex.
+Both ESP `esu/build-id` and cpio `/esu-build-id` contain those 12 characters plus
+LF. Input hashes include source files, generated configuration/scripts and
+checked-in module metadata. FAT timestamps need not be reproducible.
 
-```
-/esu/manifest.toml              schema_version = 1, the supplied generation,
-                                    rom = "roms", modules esu, thin, fw-views, gpt
-/esu/roms/<id>.toml             selected managed placeholder, replaced by the lab
-/esu/bin/busybox                static interpreter
-/esu/bin/thin-activate          x86_64 Android static helper
-/esu/bin/fw-views               per-ROM firmware-view helper
-/esu/bin/esud               daemon install source
-/lib/kernelesp.ko               ramdisk only, mode 0644
-/lib/thin.ko                    ramdisk only, mode 0644
-/lib/gpt.ko                     ramdisk only, mode 0644
-/lib/efivarfs.ko                dev=by-name:bdsvars after projection
-/esu/modules/thin/early.sh      #!/bin/sh, set -eu, exec thin-activate
-/esu/modules/fw-views/early.sh  #!/bin/sh, set -eu, exec fw-views
-/esu/modules/boot-hal/module.toml
-/esu/modules/boot-hal/android.hardware.boot-service.gblbds
-/esu/modules/boot-hal/boot-gblbds.rc
-/esu/modules/tiny-espsu/module.toml
-/esu/modules/tiny-espsu/tiny-espsu
-/esu/modules/tiny-espsu/install.sh
-/esu/modules/tiny-espsu/policy.cil
-/esu/receipts/                  directory; a missing receipt store is a
-                                    hard managed-boot failure
-```
-
-The placeholder `roms/<id>.toml` is structurally valid (`schema_version = 1`, the
-supplied generation and matching `id`, `managed = true`, one projection) but its backend is
-deliberately impossible, so an un-replaced payload fails closed instead of
-booting with a guessed partition view. The lab writes the real file with the
-same ID and generation before paused assembly, and supplies
-`androidboot.esu.rom=<id>` when booting. Missing, duplicate or conflicting
-boot selections fail; no global-file alias is accepted.
-
-The assembler stamps the checked-in package manifests with the supplied
-generation and validates the ELF generation notes of esud, boot HAL and
-tiny-espsu without executing them. PID1 repeats that validation and installs
-files with the exact modes in `module.toml`, independent of FAT modes. A real
-normal ROM config must project writable metadata, bdsvars and misc. Recovery
-uses a separate explicitly selected package list and excludes the normal HAL.
-The checked-in helper/RC target the source device's exact QTI executable and
-`vendor.boot-qti` service; a Cuttlefish build without that layout is not a
-runtime-compatible HAL target merely because the assembler accepts its ELF.
-Do not guess another bind destination. See the root README's platform contract.
-
-Executable intent: the initramfs copy of the PID-1 binary is the only member
-that carries a POSIX mode (root `/esu`, 0755, written by `cpio` with
-`--owner=0:0`). A FAT image stores no POSIX modes at all, and it does not need
-them: PID 1 runs each ESP script explicitly through the ESP busybox
-(`busybox sh <payload>/modules/<name>/early.sh`), so `bin/` and
-`modules/thin/early.sh` are ordinary FAT members. `mmd` creates
-`/esu/receipts` as a real directory, because esu treats a missing
-receipt store as a hard managed-boot failure.
-
-`payload.json` - `{"schema_version": 1, "generation": "<generation>",
-"images": {"init_boot.img": {"sha256", "size"}, "esp.img": {"sha256",
-"size"}}}`.
-
-The manifest and the placeholder are deterministic for a given generation; the
-ESP image is not required to be reproducible (FAT timestamps).
+Host tools are invoked by argument vector, not a shell: `avbtool`,
+`unpack_bootimg`, `mkbootimg`, `cpio`, gzip/lz4 and mtools. `--esp-size-mib`
+overrides the default 64 MiB. `--overwrite` only replaces the three known
+artifacts. Temporary files live beside the output and are removed on exit.
 
 ## `thin-activate`
 
@@ -186,7 +102,7 @@ It then builds `thin-pool` over the two linear devices with `128`-sector data
 blocks, a `128`-block low water mark and `1 skip_block_zeroing` (mandatory in
 this fork: a pool that would zero newly provisioned blocks is rejected), and
 finally `userdata_lp` as a thin volume of the tuple's length. `linear`,
-`thin-pool` and `thin` must be registered with the kernel (the ESP `thin.ko`
+`thin-pool` and `thin` must be registered with the kernel (ramdisk `thin.ko`
 provides the last two) or the helper stops before creating anything.
 
 Failures are one concrete stderr line and a non-zero exit: malformed or

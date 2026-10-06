@@ -1,12 +1,5 @@
-//! Per-ROM Android-side isolation: the read-only ESP session mount, the
-//! property overrides Android reads later, the shared credential store and the
-//! gatekeeper first-boot marker.
-//!
-//! [`early`] runs from the mandatory `esud early` service, which init
-//! declares `reboot_on_failure`, so any error fails the managed boot closed.
-//! [`post_fs_data`] runs later and its failures are recorded, never fatal.
-//! Nothing here executes from the ESP: the session mount is read-only, and the
-//! shared credential store is state, never code.
+//! Per-ROM Android properties and shared credential-store isolation.
+//! ESP and efivarfs are mounted by init, never by this module.
 
 // Everything below the decision tables runs on Android only; the host build
 // compiles this module for its tests, which use just a few of these items.
@@ -15,27 +8,21 @@
 use esuinit::config::RomConfig;
 
 #[cfg(target_os = "android")]
-use anyhow::{Context, Result, ensure};
+use crate::overlay::label;
 #[cfg(target_os = "android")]
-use esu_platform::staging::label;
+use anyhow::{Context, Result, ensure};
 #[cfg(target_os = "android")]
 use log::{error, info};
 #[cfg(target_os = "android")]
 use std::ffi::CString;
 #[cfg(target_os = "android")]
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 #[cfg(target_os = "android")]
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(target_os = "android")]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown};
 #[cfg(target_os = "android")]
 use std::path::Path;
-
-/// Physical partition name of the ESP, as sysfs publishes it.
-pub const ESP_PARTITION: &str = "esp";
-
-/// Read-only session mount point of the physical ESP.
-pub const ESP_MOUNT: &str = "/metadata/esp";
 
 /// Projected name of the shared physical credential store.
 pub const SHARED_PARTITION: &str = "metadata_shared";
@@ -71,18 +58,6 @@ pub const IMAGE_RUNNING_PROP: &str = "ro.gsid.image_running";
 /// never trigger KeyMint `deleteAllKeys` on the shared credential state.
 pub const DELETE_ALL_KEYS_PROP: &str = "ro.crypto.metadata_init_delete_all_keys.enabled";
 
-/// Session mount flags of the physical ESP: never writable, never executable,
-/// no device nodes and no setuid binaries. Code never runs from the ESP, but it
-/// is readable state for the whole Android session.
-pub const ESP_FLAGS: libc::c_ulong =
-    libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RELATIME;
-
-/// vfat mount data of the session ESP: fixed ownership and no access for
-/// anyone else. There is no `context=`: relabelling the mount needs
-/// `filesystem associate` from the new type to `vfat`, which the payload policy
-/// does not grant, and nothing executes from the ESP, so its genfs label stands.
-pub const ESP_DATA: &str = "uid=0,gid=0,fmask=0077,dmask=0077,utf8";
-
 /// Shared credential store flags: writable state that can never execute and
 /// carries no device nodes.
 pub const SHARED_FLAGS: libc::c_ulong =
@@ -110,12 +85,12 @@ pub struct Session {
 /// and above mark themselves as a numbered GSI image (ROM 1 must stay the
 /// `host` owner of the shared password slot map), and only a ROM that projects
 /// `metadata_shared` shares the store.
-pub fn session(rom: &RomConfig) -> Session {
+pub fn session(rom: &RomConfig, number: u32) -> Session {
     let mut properties = Vec::new();
 
     if rom.managed {
-        if rom.rom_number >= 2 {
-            properties.push((IMAGE_RUNNING_PROP, rom.rom_number.to_string()));
+        if number >= 2 {
+            properties.push((IMAGE_RUNNING_PROP, number.to_string()));
         }
         properties.push((DELETE_ALL_KEYS_PROP, "false".to_owned()));
     }
@@ -130,43 +105,34 @@ pub fn session(rom: &RomConfig) -> Session {
     }
 }
 
-/// The ROM configuration PID 1 installed for the ROM the boot selector named.
-///
-/// The staged tree is re-read here through the same root handles and re-parsed
-/// with the same strict parser as PID 1, including the generation and selection
-/// checks: a stale or foreign tree can never drive Android-side isolation.
 #[cfg(target_os = "android")]
-pub fn installed_rom() -> Result<RomConfig> {
-    let root = esu_platform::open_root(Path::new(esu_platform::ROOT))?;
-    installed_rom_in(&root)
+pub struct RuntimeRom {
+    pub config: RomConfig,
+    pub number: u32,
 }
 
-/// The same contract for a caller that already holds the state root open.
+/// Missing identity is unmanaged; a selected identity requires a valid Slot.
 #[cfg(target_os = "android")]
-pub fn installed_rom_in(root: &File) -> Result<RomConfig> {
-    let mut installed = String::new();
-    esu_platform::open_file(root, "rom.toml")?.read_to_string(&mut installed)?;
-    let selected = crate::utils::getprop("ro.boot.esu.rom").context("missing ro.boot.esu.rom")?;
-
-    esuinit::config::parse_selected_rom(
-        &installed,
-        esu_platform::generation::generation(),
-        &selected,
-    )
-    .map_err(|error| anyhow::anyhow!("{error}"))
+pub fn runtime_rom() -> Result<Option<RuntimeRom>> {
+    let vars = Path::new("/dev/efivars");
+    let Some(id) = esu_platform::efivars::booted_rom(vars)? else {
+        info!("no bdsvars ROM identity: unmanaged boot");
+        return Ok(None);
+    };
+    let number = esu_platform::efivars::rom_number(vars, &id)?;
+    let text = fs::read_to_string(format!("/dev/esp/esu/roms/{id}.toml"))?;
+    let config = esuinit::config::parse_selected_rom(&text, &id).map_err(anyhow::Error::msg)?;
+    esuinit::config::validate_rom(&config, number).map_err(anyhow::Error::msg)?;
+    Ok(Some(RuntimeRom { config, number }))
 }
 
-/// Early stage: mount the ESP read-only for the whole Android session, override
-/// the properties Android reads later, and share the credential store when this
-/// ROM projects it.
+/// Override Android properties and share the projected credential store.
 ///
 /// Errors reach init's `reboot_on_failure` service and stop the boot; there is
 /// no partial-isolation boot.
 #[cfg(target_os = "android")]
-pub fn early(rom: &RomConfig) -> Result<()> {
-    let session = session(rom);
-
-    mount_esp()?;
+pub fn early(rom: &RomConfig, number: u32) -> Result<()> {
+    let session = session(rom, number);
 
     for (name, value) in &session.properties {
         crate::resetprop::set_property(name, value)
@@ -178,7 +144,7 @@ pub fn early(rom: &RomConfig) -> Result<()> {
     } else if rom.managed {
         info!("credential store not shared: {SHARED_PARTITION} is not projected");
     }
-    if rom.managed && rom.rom_number >= 2 {
+    if rom.managed && number >= 2 {
         deny_ufs_bsg_writes()?;
     }
 
@@ -194,7 +160,9 @@ pub fn early(rom: &RomConfig) -> Result<()> {
 #[cfg(target_os = "android")]
 fn deny_ufs_bsg_writes() -> Result<()> {
     let node = Path::new("/dev/ufs-bsg0");
-    let label = match crate::restorecon::lgetfilecon(node) {
+    let label = match extattr::lgetxattr(node, "security.selinux")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    {
         Ok(label) => label,
         Err(error) => {
             report(&format!(
@@ -265,25 +233,6 @@ pub fn report(message: &str) {
     }
 }
 
-/// Mount the physical ESP read-only at [`ESP_MOUNT`] for the whole session.
-#[cfg(target_os = "android")]
-fn mount_esp() -> Result<()> {
-    let device = esu_platform::block::partition_by_name(ESP_PARTITION)
-        .context("cannot resolve the physical ESP partition")?;
-
-    prepare_directory(DEVICE_DIR, 0o700, 0, 0)?;
-    let node = format!("{DEVICE_DIR}/{ESP_PARTITION}");
-    create_block_node(&node, device)?;
-
-    prepare_directory(ESP_MOUNT, 0o700, 0, 0)
-        .context("cannot prepare the ESP session mount point")?;
-    mount(&node, ESP_MOUNT, "vfat", ESP_FLAGS, ESP_DATA)
-        .context("cannot mount the ESP session copy read-only")?;
-
-    info!("ESP {ESP_PARTITION} mounted read-only at {ESP_MOUNT}");
-    Ok(())
-}
-
 /// Mount the shared physical credential store and bind its slot directory over
 /// the Android-visible one, so every ROM uses one AOSP-managed slot map whose
 /// entries stay per-ROM (`host`, `gsi2`, ...).
@@ -298,15 +247,19 @@ fn mount_shared_credential_store() -> Result<()> {
 
     prepare_directory(SHARED_MOUNT, 0o700, 0, 0)
         .context("cannot prepare the shared credential mount point")?;
-    mount(&node, SHARED_MOUNT, "f2fs", SHARED_FLAGS, SHARED_DATA)
-        .context("cannot mount the shared credential store")?;
+    if !crate::overlay::mounted(SHARED_MOUNT, "f2fs")? {
+        mount(&node, SHARED_MOUNT, "f2fs", SHARED_FLAGS, SHARED_DATA)
+            .context("cannot mount the shared credential store")?;
+    }
 
     let slots = format!("{SHARED_MOUNT}/{SLOT_DIR}");
     prepare_directory(&slots, SLOT_MODE, 0, SYSTEM_UID)?;
     label_directory(&slots)?;
     prepare_directory(SLOT_MOUNT, SLOT_MODE, 0, SYSTEM_UID)?;
     label_directory(SLOT_MOUNT)?;
-    bind(&slots, SLOT_MOUNT)?;
+    if !crate::overlay::mounted(SLOT_MOUNT, "f2fs")? {
+        bind(&slots, SLOT_MOUNT)?;
+    }
 
     info!("shared credential store {slots} bound over {SLOT_MOUNT}");
     Ok(())
@@ -332,7 +285,8 @@ fn gatekeeper_first_boot() -> Result<()> {
                 .mode(0o600)
                 .open(&marker)
                 .with_context(|| format!("cannot create {marker}"))?;
-            label(&file, GATEKEEPER_LABEL).with_context(|| format!("cannot label {marker}"))?;
+            label(Path::new(&marker), GATEKEEPER_LABEL)
+                .with_context(|| format!("cannot label {marker}"))?;
             fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))?;
             chown(&marker, Some(SYSTEM_UID), Some(0))
                 .with_context(|| format!("cannot set the owner of {marker}"))?;
@@ -371,8 +325,7 @@ fn prepare_directory(path: &str, mode: u32, uid: u32, gid: u32) -> Result<()> {
 /// Apply a SELinux type to an existing directory inode.
 #[cfg(target_os = "android")]
 fn label_directory(path: &str) -> Result<()> {
-    let directory = File::open(path).with_context(|| format!("cannot open {path}"))?;
-    label(&directory, SLOT_LABEL).with_context(|| format!("cannot label {path}"))
+    label(Path::new(path), SLOT_LABEL).with_context(|| format!("cannot label {path}"))
 }
 
 /// Create the private block node of a sysfs-resolved device, replacing any
@@ -470,7 +423,7 @@ fn bind(source: &str, target: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn rom(managed: bool, rom_number: u32, partitions: &[&str]) -> RomConfig {
+    fn rom(managed: bool, partitions: &[&str]) -> RomConfig {
         use std::fmt::Write as _;
 
         let mut projections = String::new();
@@ -482,27 +435,24 @@ mod tests {
             )
             .unwrap();
         }
-        let text = format!(
-            "schema_version = 1\ngeneration = \"release-1\"\nid = \"rom1\"\n\
-             managed = {managed}\nrom_number = {rom_number}\n{projections}"
-        );
+        let text = format!("schema_version = 1\nid = \"rom1\"\nmanaged = {managed}\n{projections}");
 
-        esuinit::config::parse_rom(&text, "release-1").unwrap()
+        esuinit::config::parse_rom(&text).unwrap()
     }
 
     #[test]
     fn the_property_table_follows_the_rom_number() {
         let nothing: Vec<(&'static str, String)> = Vec::new();
-        assert_eq!(session(&rom(false, 1, &[])).properties, nothing);
+        assert_eq!(session(&rom(false, &[]), 1).properties, nothing);
 
         assert_eq!(
-            session(&rom(true, 1, &["metadata"])).properties,
+            session(&rom(true, &["metadata"]), 1).properties,
             vec![(DELETE_ALL_KEYS_PROP, "false".to_owned())]
         );
 
         for number in 2..=esuinit::config::MAX_ROM_NUMBER {
             assert_eq!(
-                session(&rom(true, number, &["metadata"])).properties,
+                session(&rom(true, &["metadata"]), number).properties,
                 vec![
                     (IMAGE_RUNNING_PROP, number.to_string()),
                     (DELETE_ALL_KEYS_PROP, "false".to_owned()),
@@ -514,24 +464,14 @@ mod tests {
 
     #[test]
     fn the_credential_store_is_shared_exactly_when_it_is_projected() {
-        assert!(session(&rom(true, 1, &["metadata", SHARED_PARTITION])).share_credential_store);
-        assert!(session(&rom(true, 3, &[SHARED_PARTITION])).share_credential_store);
-        assert!(!session(&rom(true, 1, &["metadata", "userdata"])).share_credential_store);
-        assert!(!session(&rom(false, 1, &[])).share_credential_store);
+        assert!(session(&rom(true, &["metadata", SHARED_PARTITION]), 1).share_credential_store);
+        assert!(session(&rom(true, &[SHARED_PARTITION]), 3).share_credential_store);
+        assert!(!session(&rom(true, &["metadata", "userdata"]), 1).share_credential_store);
+        assert!(!session(&rom(false, &[]), 1).share_credential_store);
     }
 
     #[test]
     fn mount_options_and_labels_pin_the_session_contract() {
-        assert_eq!(
-            ESP_FLAGS,
-            libc::MS_RDONLY
-                | libc::MS_NOSUID
-                | libc::MS_NODEV
-                | libc::MS_NOEXEC
-                | libc::MS_RELATIME
-        );
-        assert_eq!(ESP_DATA, "uid=0,gid=0,fmask=0077,dmask=0077,utf8");
-
         assert_eq!(
             SHARED_FLAGS,
             libc::MS_NOATIME | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC
@@ -539,7 +479,6 @@ mod tests {
         assert_eq!(SHARED_FLAGS & libc::MS_RDONLY, 0);
         assert_eq!(SHARED_DATA, "discard");
 
-        assert_eq!((ESP_PARTITION, ESP_MOUNT), ("esp", "/metadata/esp"));
         assert_eq!(
             (SHARED_PARTITION, SHARED_MOUNT),
             ("metadata_shared", "/metadata/shared")

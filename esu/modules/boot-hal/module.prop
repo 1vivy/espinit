@@ -1,0 +1,6 @@
+id=boot-hal
+name=ESP Boot HAL
+version=1
+versionCode=1
+author=ESU
+description=Stock boot HAL service backed by bdsvars efivarfs

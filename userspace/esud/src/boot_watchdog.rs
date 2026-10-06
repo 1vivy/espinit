@@ -120,8 +120,21 @@ mod android {
             sysrq(b"c");
             return Ok(());
         }
+        // /data logs are available only after post-fs-data created the root.
+        if !Path::new(crate::defs::LOG_DIR).is_dir() {
+            sysrq(b"b");
+            return Ok(());
+        }
         let dir = Path::new(crate::defs::LOG_DIR).join("hang");
-        fs::create_dir_all(&dir).context("create hang dump directory")?;
+        fs::create_dir(&dir)
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .context("create hang dump directory")?;
         capture(
             &dir,
             "ps.txt",

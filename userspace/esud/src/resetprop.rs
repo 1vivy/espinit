@@ -7,7 +7,6 @@ use prop_rs_android::sys_prop;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -276,36 +275,5 @@ pub fn set_property(name: &str, value: &str) -> Result<()> {
     }
 
     info!("Set {name} to {value}");
-    Ok(())
-}
-
-/// Load system.prop file using internal resetprop API.
-///
-/// Equivalent to `resetprop -n --file <path>`.
-pub fn load_system_prop_file(path: &Path) -> Result<()> {
-    sys_prop::init().context("Failed to initialize system property API")?;
-
-    let rp = ResetProp {
-        skip_svc: true,
-        persistent: false,
-        persist_only: false,
-        verbose: false,
-        show_context: false,
-        rebuild: false,
-    };
-
-    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    if rp
-        .load_props(reader.lines())
-        .with_context(|| format!("Failed to load properties from {}", path.display()))?
-    {
-        log::warn!(
-            "warning: after loaded prop file from {}, rebuild is needed!",
-            path.display()
-        );
-    }
-
-    info!("Loaded system.prop from {}", path.display());
     Ok(())
 }

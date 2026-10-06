@@ -11,7 +11,6 @@
     clippy::redundant_field_names
 )]
 
-mod assets;
 #[cfg(target_os = "linux")]
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod boot_patch;
@@ -21,8 +20,6 @@ mod cli;
 #[cfg(target_os = "android")]
 mod debug;
 mod defs;
-#[cfg(target_os = "android")]
-mod feature;
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "android")]
@@ -30,26 +27,17 @@ mod init_event;
 #[cfg(target_os = "android")]
 mod ksucalls;
 #[cfg(target_os = "android")]
-mod metamodule;
-#[cfg(target_os = "android")]
 mod module;
-#[cfg(target_os = "android")]
-mod module_config;
+mod overlay;
 #[cfg(target_os = "android")]
 mod resetprop;
-#[cfg(target_os = "android")]
-mod restorecon;
 mod rom_isolation;
-#[cfg(target_os = "android")]
 mod sepolicy;
-#[cfg(target_os = "android")]
-mod soft_reboot;
 #[cfg(target_os = "android")]
 mod unload;
 #[cfg(target_os = "android")]
 mod utils;
 
-#[cfg(target_os = "android")]
 #[allow(nonstandard_style, unused, unsafe_op_in_unsafe_fn)]
 mod ksu_uapi;
 
@@ -66,7 +54,6 @@ fn report_fatal(error: &anyhow::Error) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _ = esu_platform::generation::generation();
     #[cfg(target_os = "android")]
     {
         let result = cli::run();

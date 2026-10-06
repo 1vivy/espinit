@@ -1,3 +1,4 @@
+#![cfg_attr(not(target_os = "android"), allow(dead_code))]
 use anyhow::{Context, Result, bail};
 use derive_new::new;
 use nom::{
@@ -362,7 +363,7 @@ where
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
         }
-        if let Ok((_, statement)) = PolicyStatement::parse(trimmed_line) {
+        if let Ok(("", statement)) = PolicyStatement::parse(trimmed_line) {
             statements.push(statement);
         } else if strict {
             bail!("Failed to parse policy statement: {line}")
@@ -719,6 +720,7 @@ fn flatten_atomic_statements<'a>(
     Ok(policies)
 }
 
+#[cfg(target_os = "android")]
 fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) -> Result<()> {
     let policies = flatten_atomic_statements(statements)?;
     if policies.is_empty() {
@@ -756,20 +758,13 @@ fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) ->
 /// Apply a mandatory rule, failing if parsing or the kernel update fails.
 pub fn apply_strict(policy: &str) -> Result<()> {
     let statements = parse_sepolicy(policy.trim(), true)?;
-    apply_rules_batch(&statements, true)
-}
-pub fn live_patch(policy: &str) -> Result<()> {
-    let result = parse_sepolicy(policy.trim(), false)?;
-    for statement in &result {
-        println!("{statement:?}");
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = statements;
+        bail!("live SELinux updates require Android")
     }
-    apply_rules_batch(&result, false)?;
-    Ok(())
-}
-
-pub fn apply_file<P: AsRef<Path>>(path: P) -> Result<()> {
-    let input = std::fs::read_to_string(path)?;
-    live_patch(&input)
+    #[cfg(target_os = "android")]
+    apply_rules_batch(&statements, true)
 }
 
 pub fn check_rule(policy: &str) -> Result<()> {
@@ -781,4 +776,22 @@ pub fn check_rule(policy: &str) -> Result<()> {
     };
     parse_sepolicy(policy.trim(), true)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strict_rejects_malformed_and_trailing_input() {
+        for policy in ["allow", "allow a b file read garbage", "not_a_rule a b"] {
+            assert!(
+                super::apply_strict(policy)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("parse")
+            );
+        }
+        assert!(
+            super::check_rule("allow hal_bootctl_default esu_file file { read write }").is_ok()
+        );
+    }
 }

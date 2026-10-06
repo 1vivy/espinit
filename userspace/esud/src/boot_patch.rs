@@ -13,9 +13,9 @@ use android_bootimg::cpio::{Cpio, CpioEntry};
 use android_bootimg::parser::BootImage;
 use android_bootimg::patcher::BootImagePatchOption;
 use anyhow::{Context, Result, ensure};
-use esu_platform::{self as platform, BootMode};
+use esu_platform as platform;
 use esuinit::config;
-use goblin::elf::{Elf, header, program_header, section_header, sym};
+use goblin::elf::{Elf, header, program_header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -28,7 +28,7 @@ const LZ4_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(clap::Args, Debug)]
 pub struct BootPatchArgs {
-    /// Static ELF PID-1 binary, built for the payload generation (never executed)
+    /// Static ELF PID-1 binary (never executed)
     #[arg(long)]
     pub esuinit: PathBuf,
     /// Complete payload root containing manifest.toml, roms/, bin/, and modules/
@@ -63,10 +63,10 @@ struct Receipt {
     schema_version: u32,
     tool: &'static str,
     tool_version: &'static str,
-    tool_generation: &'static str,
     verifier_sha256: String,
     rom: String,
-    generation: String,
+    build_id: String,
+    build_id_inputs: BTreeMap<String, String>,
     archive_path: String,
     boot_contract: String,
     boot_image: &'static str,
@@ -98,6 +98,17 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 
 fn digest(bytes: &[u8]) -> String {
     lowercase_hex(&Sha256::digest(bytes))
+}
+
+fn artifact_build_id<'a>(hashes: impl Iterator<Item = &'a str>) -> String {
+    let mut hashes: Vec<_> = hashes.collect();
+    hashes.sort_unstable();
+    let mut digest = Sha256::new();
+    for hash in hashes {
+        digest.update(hash.as_bytes());
+        digest.update(b"\n");
+    }
+    lowercase_hex(&digest.finalize())[..12].to_owned()
 }
 
 fn absolute(path: &Path) -> Result<PathBuf> {
@@ -308,8 +319,7 @@ fn executable(data: &[u8], machine: Option<u16>, linkage: Linkage) -> Result<u16
     Ok(elf.header.e_machine)
 }
 
-fn check_binary(path: &Path, generation: &str, machine: u16, linkage: Linkage) -> Result<()> {
-    platform::check_artifact(&mut input_file(path)?, generation)?;
+fn check_binary(path: &Path, machine: u16, linkage: Linkage) -> Result<()> {
     executable(
         &read_bounded(input_file(path)?, MAX_BINARY)?,
         Some(machine),
@@ -318,72 +328,12 @@ fn check_binary(path: &Path, generation: &str, machine: u16, linkage: Linkage) -
     Ok(())
 }
 
-fn module_generation(data: &[u8], name: &str, generation: &str, machine: u16) -> Result<()> {
-    let elf = Elf::parse(data)?;
-    ensure!(
-        elf.header.e_type == header::ET_REL && elf.header.e_machine == machine,
-        "module architecture/type mismatch"
-    );
-    let symbol_name = if name == "kernelesp" {
-        "ksu_build_generation"
-    } else {
-        "generation"
-    };
-    let mut symbols = elf
-        .syms
-        .iter()
-        .filter(|symbol| elf.strtab.get_at(symbol.st_name) == Some(symbol_name));
-    let symbol = symbols
-        .next()
-        .context("module lacks retained generation symbol")?;
-    ensure!(
-        symbols.next().is_none() && symbol.st_type() == sym::STT_OBJECT,
-        "ambiguous module generation symbol"
-    );
-    let section = elf
-        .section_headers
-        .get(symbol.st_shndx)
-        .context("invalid generation section")?;
-    ensure!(
-        section.sh_type == section_header::SHT_PROGBITS
-            && section.sh_flags & u64::from(section_header::SHF_ALLOC) != 0,
-        "generation must be runtime data"
-    );
-    let end = symbol
-        .st_value
-        .checked_add(symbol.st_size)
-        .context("generation bounds overflow")?;
-    ensure!(
-        symbol.st_size > 1 && symbol.st_size <= 64 && end <= section.sh_size,
-        "invalid generation symbol bounds"
-    );
-    let start = usize::try_from(
-        section
-            .sh_offset
-            .checked_add(symbol.st_value)
-            .context("generation offset overflow")?,
-    )?;
-    let end = start
-        .checked_add(usize::try_from(symbol.st_size)?)
-        .context("generation size overflow")?;
-    let value = data.get(start..end).context("generation outside ELF")?;
-    ensure!(
-        value.last() == Some(&0) && &value[..value.len() - 1] == generation.as_bytes(),
-        "module generation mismatch: {name}"
-    );
-    Ok(())
-}
-
 fn configs(payload: &Path, id: &str) -> Result<(config::Manifest, config::RomConfig, String)> {
     let manifest = config::parse_manifest(&fs::read_to_string(payload.join("manifest.toml"))?)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let rom_path = config::rom_path(&manifest, id).map_err(|error| anyhow::anyhow!("{error}"))?;
-    let rom = config::parse_selected_rom(
-        &fs::read_to_string(payload.join(&rom_path))?,
-        &manifest.generation,
-        id,
-    )
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let rom = config::parse_selected_rom(&fs::read_to_string(payload.join(&rom_path))?, id)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     config::validate_managed(&manifest, &rom).map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok((manifest, rom, rom_path))
 }
@@ -391,8 +341,6 @@ fn configs(payload: &Path, id: &str) -> Result<(config::Manifest, config::RomCon
 fn validate_payload(
     payload: &Path,
     manifest: &config::Manifest,
-    rom: &config::RomConfig,
-    rom_path: &str,
     machine: u16,
     files: &BTreeMap<String, Artifact>,
 ) -> Result<()> {
@@ -400,99 +348,29 @@ fn validate_payload(
         !files.keys().any(|path| path.ends_with(".ko")),
         "kernel modules must be supplied in --modules-dir, not the ESP payload"
     );
+    ensure!(
+        !files.contains_key("build-id"),
+        "build-id is generated by boot-patch"
+    );
     let root = platform::open_root(payload)?;
-    let platform_config = manifest
-        .platform
-        .as_ref()
-        .context("complete payload requires [platform]")?;
-    let package_ids: BTreeSet<_> = platform_config
-        .packages
-        .iter()
-        .chain(&platform_config.recovery_packages)
-        .map(String::as_str)
-        .collect();
-    for path in files.keys().filter(|path| path.ends_with("/module.toml")) {
-        let id = path
-            .strip_prefix("modules/")
-            .and_then(|path| path.strip_suffix("/module.toml"))
-            .context("package manifest outside modules")?;
-        ensure!(
-            package_ids.contains(id),
-            "unlisted package manifest: {path}"
-        );
-    }
-    // Use the runtime planners, but never execute their mount/publication phase.
-    let mode = if rom.managed {
-        BootMode::Managed
-    } else {
-        BootMode::Unmanaged
-    };
-    platform::plan(
-        payload,
-        platform_config,
-        &manifest.generation,
-        rom_path,
-        mode,
-    )?;
-    platform::plan(
-        payload,
-        platform_config,
-        &manifest.generation,
-        rom_path,
-        BootMode::Recovery,
-    )?;
-    check_binary(
-        &payload.join("bin/esud"),
-        &manifest.generation,
-        machine,
-        Linkage::DynamicAllowed,
-    )?;
-    let busybox = read_bounded(platform::open_file(&root, "bin/busybox")?, MAX_BINARY)?;
-    executable(&busybox, Some(machine), Linkage::StaticRequired)?;
-    for path in ["bin/esud", "bin/busybox"] {
+    for (path, linkage) in [
+        ("bin/esud", Linkage::DynamicAllowed),
+        ("bin/busybox", Linkage::StaticRequired),
+        ("bin/thin-activate", Linkage::StaticRequired),
+    ] {
+        check_binary(&payload.join(path), machine, linkage)?;
         ensure!(
             files.get(path).is_some_and(|file| file.mode == 0o755),
             "payload binary is not executable: {path}"
         );
     }
-    for id in platform_config
-        .packages
-        .iter()
-        .chain(&platform_config.recovery_packages)
-    {
-        let package = platform::parse_package(
-            &fs::read_to_string(payload.join(format!("modules/{id}/module.toml")))?,
-            id,
-            &manifest.generation,
-        )?;
-        for entry in package.files {
-            let path = format!("modules/{id}/{}", entry.source);
-            let file = platform::open_file(&root, &path)?;
-            ensure!(file.metadata()?.len() > 0, "empty package source: {path}");
-            if entry.kind == platform::Kind::Binary {
-                check_binary(
-                    &payload.join(path),
-                    &manifest.generation,
-                    machine,
-                    Linkage::DynamicAllowed,
-                )?;
-            }
-        }
-    }
-    // Additional tools (notably thin-activate and fw-views) also carry
-    // generation notes; both are executed by PID 1 from the ESP, so both must be
-    // interpreter-free.
-    for path in files.keys().filter(|path| {
-        path.starts_with("bin/")
-            && !matches!(path.as_str(), "bin/busybox" | "bin/esuinit" | "bin/esud")
-    }) {
+    for path in files.keys().filter(|path| path.starts_with("bin/")) {
         let bytes = read_bounded(platform::open_file(&root, path)?, MAX_BINARY)?;
         if bytes.starts_with(b"\x7fELF") {
-            check_binary(
-                &payload.join(path),
-                &manifest.generation,
-                machine,
-                if matches!(path.as_str(), "bin/thin-activate" | "bin/fw-views") {
+            executable(
+                &bytes,
+                Some(machine),
+                if path == "bin/fw-views" {
                     Linkage::StaticRequired
                 } else {
                     Linkage::DynamicAllowed
@@ -500,7 +378,31 @@ fn validate_payload(
             )?;
         }
     }
-    // A complete copied ROM directory must not hide a stale generation.
+    for id in &manifest.modules_order {
+        let path = format!("modules/{id}/module.prop");
+        let prop = fs::read_to_string(payload.join(&path))?;
+        ensure!(
+            prop.lines().any(|line| line == format!("id={id}")),
+            "module.prop id mismatch: {id}"
+        );
+        for partition in crate::overlay::PARTITIONS {
+            let prefix = format!("modules/{id}/{partition}/");
+            for path in files.keys().filter(|path| path.starts_with(&prefix)) {
+                let bytes = read_bounded(platform::open_file(&root, path)?, MAX_BINARY)?;
+                if bytes.starts_with(b"\x7fELF") {
+                    executable(&bytes, Some(machine), Linkage::DynamicAllowed)?;
+                }
+            }
+        }
+        let attrs = payload.join(format!("modules/{id}/attrs"));
+        if attrs.exists() {
+            crate::overlay::parse_attrs(&fs::read_to_string(attrs)?)?;
+        }
+        let policy = payload.join(format!("modules/{id}/sepolicy.rule"));
+        if policy.exists() {
+            crate::sepolicy::check_rule(&fs::read_to_string(policy)?)?;
+        }
+    }
     let prefix = format!("{}/", manifest.rom);
     for path in files
         .keys()
@@ -510,16 +412,11 @@ fn validate_payload(
             .strip_prefix(&prefix)
             .and_then(|name| name.strip_suffix(".toml"))
             .context("invalid ROM path")?;
-        let other = config::parse_selected_rom(
-            &fs::read_to_string(payload.join(path))?,
-            &manifest.generation,
-            id,
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let other = config::parse_selected_rom(&fs::read_to_string(payload.join(path))?, id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         config::validate_managed(manifest, &other).map_err(|error| anyhow::anyhow!("{error}"))?;
         for partition in &other.partitions {
             if let Some(path) = partition.backend.strip_prefix("esp-file:") {
-                // esp-file is relative to the ESP mount, not /esu.
                 let path = path
                     .strip_prefix("esu/")
                     .context("ESP-file backend must be inside supplied esu payload")?;
@@ -534,12 +431,10 @@ fn validate_payload(
 }
 
 fn verify_modules(
-    payload: &Path,
     modules_dir: &Path,
     kmi_out: &Path,
     manifest: &config::Manifest,
     machine: u16,
-    files: &BTreeMap<String, Artifact>,
 ) -> Result<serde_json::Value> {
     let verifier = tempfile::tempdir()?;
     let script = verifier.path().join("kmi_modules.py");
@@ -553,28 +448,6 @@ fn verify_modules(
         .arg(kmi_out);
     let mut declared = BTreeSet::new();
     for module in &manifest.modules {
-        if !module.path.ends_with(".ko") {
-            ensure!(
-                module.name == "fw-views",
-                "KMI verifier does not admit helper module {}",
-                module.name
-            );
-            ensure!(module.params.is_empty(), "helper takes no parameters");
-            ensure!(
-                files
-                    .get(&module.path)
-                    .is_some_and(|file| file.mode == 0o755),
-                "helper module is not executable: {}",
-                module.path
-            );
-            check_binary(
-                &payload.join(&module.path),
-                &manifest.generation,
-                machine,
-                Linkage::StaticRequired,
-            )?;
-            continue;
-        }
         ensure!(
             module.path == format!("lib/{}.ko", module.name),
             "kernel module must use lib/<name>.ko: {}",
@@ -586,9 +459,11 @@ fn verify_modules(
         let bytes = input_file(&path)
             .and_then(|file| read_bounded(file, MAX_BINARY))
             .with_context(|| format!("required manifest module missing: {}", module.path))?;
-        if module.name != "efivarfs" {
-            module_generation(&bytes, &module.name, &manifest.generation, machine)?;
-        }
+        let elf = Elf::parse(&bytes)?;
+        ensure!(
+            elf.header.e_type == header::ET_REL && elf.header.e_machine == machine,
+            "module architecture/type mismatch"
+        );
         let receipt: CompatibilityReceipt = serde_json::from_slice(&read_bounded(
             input_file(&modules_dir.join(format!("{name}.compat.json")))?,
             MAX_BINARY,
@@ -600,6 +475,17 @@ fn verify_modules(
         );
         command.arg("--module").arg(path);
     }
+    ensure!(
+        [
+            "lib/kernelesp.ko",
+            "lib/thin.ko",
+            "lib/gpt.ko",
+            "lib/efivarfs.ko"
+        ]
+        .iter()
+        .all(|path| declared.contains(&path.to_string())),
+        "all four kernel modules are required"
+    );
     let output = command
         .output()
         .context("run embedded kmi_modules.py (Python 3.11+ required)")?;
@@ -621,10 +507,15 @@ fn takeover_cpio(
     binary: Vec<u8>,
     real_init: Vec<u8>,
     modules: BTreeMap<String, Vec<u8>>,
+    build_id: &str,
 ) -> Result<Vec<u8>> {
     let mut cpio = Cpio::new();
     cpio.add("init", CpioEntry::regular(0o755, Box::new(binary)))?;
     cpio.add("init.real", CpioEntry::regular(0o755, Box::new(real_init)))?;
+    cpio.add(
+        "esu-build-id",
+        CpioEntry::regular(0o644, Box::new(format!("{build_id}\n").into_bytes())),
+    )?;
     if !modules.is_empty() {
         cpio.add("lib", CpioEntry::dir(0o755))?;
     }
@@ -744,13 +635,13 @@ fn validate_cpio(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn boot_cmdline(original: &[u8], rom: &str) -> Result<String> {
+fn boot_cmdline(original: &[u8]) -> Result<String> {
     let end = original
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(original.len());
     let original = std::str::from_utf8(&original[..end])?;
-    let mut result = String::with_capacity(original.len() + rom.len() + 32);
+    let mut result = String::with_capacity(original.len());
     let mut quoted = false;
     let mut start = None;
     for (offset, ch) in original
@@ -776,11 +667,6 @@ fn boot_cmdline(original: &[u8], rom: &str) -> Result<String> {
         }
     }
     ensure!(!quoted, "unterminated quote in boot command line");
-    if !result.is_empty() {
-        result.push(' ');
-    }
-    result.push_str("androidboot.esu.rom=");
-    result.push_str(rom);
     ensure!(
         result.len() < 1536,
         "boot command line exceeds v3/v4 capacity"
@@ -788,7 +674,7 @@ fn boot_cmdline(original: &[u8], rom: &str) -> Result<String> {
     Ok(result)
 }
 
-fn patch_boot(source: &[u8], overlay: &[u8], rom: &str) -> Result<Vec<u8>> {
+fn patch_boot(source: &[u8], overlay: &[u8]) -> Result<Vec<u8>> {
     // Guard the upstream parser's fixed header slicing and avoid carrying invalid
     // signatures into a test image. Only Android boot/init_boot v3/v4 is supported.
     ensure!(
@@ -819,7 +705,7 @@ fn patch_boot(source: &[u8], overlay: &[u8], rom: &str) -> Result<Vec<u8>> {
         unsigned.to_mut()[1580..1584].fill(0);
     }
     let boot = BootImage::parse(&unsigned)?;
-    let cmdline = boot_cmdline(boot.get_header().get_cmdline(), rom)?;
+    let cmdline = boot_cmdline(boot.get_header().get_cmdline())?;
     let mut ramdisk = Vec::new();
     if let Some(original) = boot.get_blocks().get_ramdisk() {
         original.dump(&mut ramdisk, false)?;
@@ -915,7 +801,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
     )?;
     reserve_name(&payload, "bin")?;
     reserve_name(&payload, "receipts")?;
-    let (manifest, rom, rom_path) = configs(&payload, &args.rom)?;
+    let (manifest, _, _) = configs(&payload, &args.rom)?;
     let binary = read_bounded(input_file(&args.esuinit)?, MAX_BINARY)?;
     let machine = executable(&binary, None, Linkage::StaticRequired)?;
     // Validate exactly the captured bytes, not a reopened mutable source.
@@ -932,8 +818,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         fs::remove_file(&staged_binary)?;
     }
     let binary_artifact = write_file(&staged_binary, &binary, 0o755)?;
-    platform::check_artifact(&mut input_file(&staged_binary)?, &manifest.generation)?;
-    validate_payload(&payload, &manifest, &rom, &rom_path, machine, &source_files)?;
+    validate_payload(&payload, &manifest, machine, &source_files)?;
     let captured_modules = stage.path().join("modules");
     make_dir(&captured_modules)?;
     let mut module_files = BTreeMap::new();
@@ -946,12 +831,10 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         &mut module_files,
     )?;
     let module_verification = verify_modules(
-        &payload,
         &captured_modules,
         &absolute(&args.kmi_out)?,
         &manifest,
         machine,
-        &source_files,
     )?;
     let mut modules = BTreeMap::new();
     for entry in manifest
@@ -991,7 +874,20 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         },
     );
     let real_init = stock_init(&source, machine)?;
-    let overlay = takeover_cpio(binary, real_init, modules)?;
+    let build_id_inputs: BTreeMap<String, String> = sources
+        .iter()
+        .map(|(path, artifact)| (path.clone(), artifact.sha256.clone()))
+        .collect();
+    let build_id = artifact_build_id(build_id_inputs.values().map(String::as_str));
+    artifacts.insert(
+        "esp/esu/build-id".to_owned(),
+        write_file(
+            &payload.join("build-id"),
+            format!("{build_id}\n").as_bytes(),
+            0o644,
+        )?,
+    );
+    let overlay = takeover_cpio(binary, real_init, modules, &build_id)?;
     let archive = legacy_lz4(&overlay)?;
     artifacts.insert(
         "esu.cpio".to_owned(),
@@ -1010,7 +906,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         format!("esp/{archive_path}"),
         write_file(&staged.join("esp").join(&archive_path), &archive, 0o644)?,
     );
-    let patched = patch_boot(&source, &overlay, &args.rom)?;
+    let patched = patch_boot(&source, &overlay)?;
     artifacts.insert(
         "patched.img".to_owned(),
         write_file(&staged.join("patched.img"), &patched, 0o644)?,
@@ -1021,12 +917,12 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         schema_version: 1,
         tool: "esud boot-patch",
         tool_version: env!("CARGO_PKG_VERSION"),
-        tool_generation: platform::generation::generation(),
         verifier_sha256: digest(VERIFIER),
         rom: args.rom.clone(),
-        generation: manifest.generation,
+        build_id,
+        build_id_inputs,
         archive_path,
-        boot_contract: format!("androidboot.esu.rom={}", args.rom),
+        boot_contract: "bdsvars BootedRom via efivarfs".to_owned(),
         boot_image: "unsigned-conventional-test-only",
         sources,
         artifacts,

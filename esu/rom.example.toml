@@ -1,28 +1,21 @@
 # esu ROM configuration
 #
 # Deployed path: /debug_ramdisk/esp/esu/roms/android-a.toml
-# `generation` must equal the manifest generation. This file selects projected
-# names and existing whole block-device backends; it does not define a new
-# physical partition table, offsets, sizes, or implicit slot suffixes.
+# This file selects projected names and existing whole block-device backends;
+# it does not define a new physical partition table, offsets, sizes, or
+# implicit slot suffixes. bdsvars BootedRom selects the file.
 #
 # Early failures use ESP /esu/receipts/failure.json, not projected metadata.
 # The ESP is normally RO; only failure replacement opens a bounded RW remount
 # window: temporary file + fsync + atomic rename + directory fsync, then sync
-# the ESP and remount RO. After successful projection, PID1 privately mounts
-# projected metadata and installs esud/packages before Android handoff.
+# the ESP and remount RO. There is no metadata staging step.
 
 schema_version = 1
-generation = "release-1"
 id = "android-a"
 
-# The managed ROM number, identical to this ROM's `Slot-<id>` record (the boot
-# HAL never gates its startup on the two agreeing): 1 is the stock ROM
-# (also the default when the field is absent, so payloads predating it stay
-# valid), and 2..=5 are the additional ROMs sharing the firmware storage. Five
-# ROMs exactly fill DeviceInfo's per-ROM anti-rollback windows, so no other
-# value is accepted. A 2..=5 ROM also sets `firmware_views` (see the end of this
-# file) and may project writable `esp-file:` backends.
-rom_number = 1
+# The managed ROM number comes only from the bdsvars Slot-<id> record via
+# efivarfs. Values 1..=5 are valid; missing/invalid records fail managed boot.
+# Secondary ROMs may declare firmware_views and writable ESP-file backends.
 
 # managed = true requires successful gpt.ko projection of the complete list
 # below before Android handoff, with no stock-ROM fallback. managed = false
@@ -85,12 +78,8 @@ name = "vendor"
 backend = "esp-file:esu/backing/vendor.img"
 read_only = true
 
-# Platform staging requires writable projected metadata. A ROM that shares the
-# physical credential store with the other ROMs projects its own per-ROM view
-# here (the operator payload uses the thin view `/dev/mapper/rom-metadata_1`)
-# and adds the shared projection below; a lone ROM may instead project
-# `/dev/block/by-name/metadata` directly. Select the actual filesystem
-# explicitly in manifest.platform.metadata_filesystem.
+# Each ROM projects its own metadata view. A multi-ROM payload also projects
+# the shared physical credential store under metadata_shared below.
 [[partitions]]
 name = "metadata"
 backend = "/dev/mapper/rom-metadata_1"
