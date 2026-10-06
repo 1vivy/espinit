@@ -1,8 +1,8 @@
 # Managed boot-control HAL
 
-**Status (2026-10-04)** - Ported AIDL V1 service and per-ROM state/storage adapter.
-The original state/storage tests are retained. Verification of this esu port
-is a separate gate; no phone, Binder guest, OTA or recovery execution is claimed.
+**Status (2026-10-06)** - AIDL V1 service uses shared `esu-platform::efivars`.
+Registration is never gated on efivarfs, BootedRom, managed Slot state or misc.
+Host verification does not claim phone, Binder guest, OTA or recovery execution.
 
 ## Build and Binder choice
 
@@ -21,10 +21,10 @@ The ESP package installs it as
 `/metadata/esu/modules/boot-hal/android.hardware.boot-service.gblbds`.
 It carries the same retained `.note.esu` generation as PID1/esud/tiny-espsu.
 
-Rust, the state machine and the vendored `varstore` are **statically linked**. Binder
+Rust, the state machine and shared `esu-platform` are **statically linked**. Binder
 uses the platform `libbinder_ndk.so` C ABI; no AOSP build tree, generated AIDL
-shared library, vendor QTI library, C++ runtime or downloaded Rust crate is
-needed. `android.rs` implements the frozen V1 transaction order, status headers,
+shared library, vendor QTI library or C++ runtime is needed.
+`android.rs` implements the frozen V1 transaction order, status headers,
 Boolean/string/int replies and the two stable-interface metadata transactions.
 NDK headers supply the public ABI; four platform-only symbols are resolved with
 checked `dlsym`, since app-NDK stubs omit service registration/thread-pool/VINTF
@@ -40,10 +40,10 @@ loading the platform Binder library. Do not advertise this artifact as a
 fully static executable or deploy it before the system linker is available.
 The HAL runs as `early_hal`, after system/vendor mounts, not as ramdisk PID 1.
 
-Retained tests cover record/confirm versus record-only selection,
-cancellation/retry/success, malformed slots/state, source-slot VAB reversion,
-and durable append/readback preserving other-ROM, BCB and bootloader-control
-contents. These host tests do not prove Binder or power-cut behavior.
+Tests cover record/confirm versus record-only selection, cancellation/retry/success,
+malformed state, source-slot VAB reversion, lazy identity recovery, AIDL storage
+failures, byte-exact efivarfs writes and preservation of other-ROM variables,
+BCB/bootloader-control bytes and valid V2 VAB reserved bytes.
 
 ## Installation and identity
 
@@ -62,22 +62,25 @@ storage or use a shell, arbitrary command, app-root API or generic policy loader
 - Keep the existing VINTF manifest unchanged; no second service is registered.
 - Label the bound source inode `gblbds_hal_exec`; policy transitions init into
   existing `hal_bootctl_default`. Do not use an explicit rc `seclabel` to bypass
-  the entrypoint contract. Label the actual bdsvars block inode
-  `gblbds_bdsvars_block_device`, not just its symlink; allow read/write, getattr,
-  open and cooperative file locking for this HAL. Existing misc access remains.
-- esu must project validated `/dev/block/by-name/bdsvars` and
-  `/dev/block/by-name/misc` onto their intended backends. The HAL never opens a
-  whole LU, GPT, UFS sysfs node, boot partition or other firmware partition.
+  the entrypoint contract. Existing misc access remains; the HAL accesses EFI
+  variables through `/dev/efivars`, not the raw bdsvars block device.
+- The HAL opens only project efivarfs variables and `/dev/block/by-name/misc`;
+  never a whole LU, GPT, UFS sysfs node, boot partition or firmware partition.
 
-The immutable `ro.boot.esu.rom` property (from `androidboot.esu.rom`)
-selects the catalogue id (1-59 ASCII letters/digits/`-_.`; the filename adds
-`.toml` within a 64-byte path-component limit). `ro.boot.slot_suffix` must be
-exactly `_a` or `_b`; it is
-**the only current-slot authority**, never the pending/selected record. ROM
-number/class comes from the provisioned record, not a guess from the id string.
-Missing properties, missing/malformed variables or initial misc failure abort
-startup before registration; there is no guessed default, automatic format or
-fallback to the stock physical writer.
+`BootedRom` in the project EFI namespace selects the managed catalogue ID.
+Missing identity or `direct` means unmanaged. Invalid/unavailable identity is
+retried on state-dependent transactions. No `ro.boot.esu.rom` property is read.
+`ro.boot.slot_suffix` must be exactly `_a` or `_b` and remains **the only
+current-slot authority**, never the pending/selected record.
+
+ROM number/class comes from the provisioned Slot record, never an ID guess.
+The Phase 3.2 fail-closed contract deliberately overrides the generic Phase
+3.5b missing-state default: without Slot there is no authoritative ROM number.
+Missing/invalid managed Slot returns `COMMAND_FAILED`; missing merge defaults
+to NONE/source current. Unmanaged identity also fails managed operations.
+Storage/identity/misc failure never prevents registration: initial mirror repair
+is best effort and deferred to the next state-dependent transaction on failure.
+Current-slot, slot-count, suffix and frozen version/hash replies remain available.
 
 Recovery retains its projection and recovery scripts but stages only explicitly
 listed `platform.recovery_packages`; the normal HAL and tiny-espsu are excluded.
@@ -87,25 +90,18 @@ suppression of stock activation routes are unproven integration prerequisites.
 This port does not intercept OTA payload writes; esu's partition projection
 is mandatory before any managed OTA.
 
-The built-in policy deliberately gives neither new object type `file_type` nor
-`dev_type` attributes. In addition to the source CIL, integration requires:
-`blk_file lock` for the unchanged `flock(LOCK_EX)` transaction adapter;
-`filesystem associate` from the HAL type to labeledfs and the bdsvars type to
-tmpfs; and `init -> hal_bootctl_default:process2 nosuid_transition` because the
-bound HAL source lives on nosuid metadata. The packaged CIL mirrors built-in
-second-stage policy, rather than serving as a late installation path.
+Integration must permit project efivarfs reads/writes and existing misc access.
+The HAL uses only an in-process Mutex, not block-device `flock`. The bound HAL
+source on nosuid metadata still requires the existing process transition policy.
 
 ## Variable namespace and wire layout
 
 Vendor namespace GUID: **`7a5e4b1c-0d3f-4e62-9b8a-1c2d3e4f5a6b`**.
-`VENDOR_GUID` uses EFI mixed-endian bytes:
-`1c 4b 5e 7a 3f 0d 62 4e 9b 8a 1c 2d 3e 4f 5a 6b`.
-This is the **variable namespace**, not the GPT bdsvars partition type GUID.
-Names use edk2 UTF-16LE plus its terminating NUL, handled by `crates/varstore`.
-Attributes are exactly **7 (NV | BS | RT)**. The 1 MiB partition is an edk2 FV;
-provisioning uses `Layout::Authenticated` for `virt-fw-vars` interoperability.
-These particular variables are ordinary unauthenticated NV variables inside
-that store. The adapter accepts either layout validated by `crates/varstore`.
+`esu-platform::efivars::PROJECT_GUID` is the shared namespace authority.
+efivarfs filenames are `<variable-name>-<GUID>`; files contain a four-byte
+little-endian attributes prefix followed by the variable payload. Attributes
+are exactly **7 (NV | BS | RT)**. Store parsing, append/reclaim and persistence
+belong to the EFI backend, not to this HAL.
 
 ### `Slot-<id>`: 24 bytes
 
@@ -139,11 +135,11 @@ guard belong to Surfacer, not this userspace HAL.
 The physical VAB mirror occupies **misc byte 32768 through 32831 only**:
 version 2 at +0; LE magic `0x56740ab0` at +1; status at +5; source at +6; 57
 reserved bytes at +7. Existing valid V2 reserved bytes are preserved. No BCB or
-stock `bootloader_control` bytes are touched. Startup mirrors the selected
-booted ROM's stored raw status/source; setters persist that ROM's variable
-before flushing/readback of the physical mirror. A mirror failure returns an
-error but leaves the authoritative variable committed; retry/startup reconciles
-it. No other ROM's variable is inferred from or overwritten by misc.
+stock `bootloader_control` bytes are touched. Startup attempts to mirror the
+booted ROM's raw status/source; failure is retried before a state-dependent
+transaction. Setters persist that ROM's variable before flushing/readback of
+the physical mirror. Mirror failure leaves authority committed for reconciliation.
+No other ROM's variable is inferred from or overwritten by misc.
 
 ### Provisioning seed
 
@@ -191,17 +187,14 @@ retain Binder status. Unknown transaction codes return `STATUS_UNKNOWN_TRANSACTI
 
 ## Durability and evidence limits
 
-`Storage` takes an exclusive `flock` on bdsvars for each transaction and reloads
-its bytes, so cooperative Linux writers preserve each other's variables. All
-other Linux bdsvars writers must honor that lock. Two allocated image buffers
-are reused; there is no new 1 MiB allocation per method. The shared varstore
-crate exclusively owns parsing/encoding. The persistence adapter writes old
-record TRANSITION, new header, HEADER_VALID, payload, ADDED, then old DELETED,
-with `fsync` between phases and full readback comparison. It never writes a
-final image wholesale. Unchanged updates avoid another record. Full stores
-return an error; reclaim belongs to Surfacer/provisioning, never implicit Android
-erase-and-rewrite. Torn/malformed media fails closed; no power-cut durability or
-physical sector atomicity claim follows from the regular-file test.
+The HAL Mutex serializes its read-modify-write operations within this process.
+Each read goes directly through shared efivarfs, without a private image cache;
+each save performs one EFI set-variable operation (attributes 7 plus payload).
+The backend owns synchronization and durable flushing; there is no block flock,
+private append algorithm, whole-store rewrite or HAL reclaim.
+Misc retains the same ordered write, sync and readback verification.
+Host regular-file tests prove operation/error mapping and bytes, not EFI backend
+power-cut durability, physical atomicity or inter-process read-modify-write safety.
 
 Upstream source/evidence (not new port verification): lab record
 `20261004T013922Z-phone-layout`, `analysis/layout-audit-boot.md` section 5 and
@@ -229,5 +222,5 @@ Ported from `gbl-bds-rs` worktree `pink-dormouse`, source revision
 as supplied on 2026-10-04: `payloads/boot-hal` and `crates/varstore`.
 The policy source was `payloads/qshim/sepolicy/qshim.cil` (historical provenance
 only, no compatibility property or path). `LICENSE` preserves Apache-2.0.
-The vendored parser/encoder and storage/state wire formats are unchanged;
-the port changes packaging, generation embedding and the ROM property spelling.
+The private vendored parser/encoder was removed in the efivarfs cutover.
+State/merge payload layouts and frozen AIDL V1 transactions remain unchanged.

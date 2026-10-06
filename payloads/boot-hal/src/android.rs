@@ -1,5 +1,8 @@
 //! Frozen AIDL V1 dispatch using the NDK C ABI (no vendor QTI libraries).
-use gblbds_boot_hal::{COMMAND_FAILED, Merge, slot_index, storage::Storage};
+use gblbds_boot_hal::{
+    COMMAND_FAILED,
+    service::{Hal, Reply},
+};
 use std::ffi::{CStr, c_char, c_void};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -32,79 +35,15 @@ unsafe extern "C" {
     fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
 }
 
-struct Hal {
-    storage: Storage,
-    current: u8,
-}
+// Only this Mutex serializes read-modify-write HAL transactions.
 static HAL: OnceLock<Mutex<Hal>> = OnceLock::new();
 
-enum Reply {
-    Int(i32),
-    Bool(bool),
-    Text(&'static CStr),
-    Void,
-}
-
 fn execute(code: u32, input: i32) -> Result<Reply, i32> {
-    if code == 16_777_214 {
-        return Ok(Reply::Text(c"2400346954240a5de495a1debc81429dd012d7b7"));
-    }
-    if code == 16_777_215 {
-        return Ok(Reply::Int(1));
-    }
-    let mut hal = HAL
-        .get()
+    HAL.get()
         .ok_or(COMMAND_FAILED)?
         .lock()
-        .map_err(|_| COMMAND_FAILED)?;
-    let current = hal.current;
-    match code {
-        2 => return Ok(Reply::Int(i32::from(current))),
-        3 => return Ok(Reply::Int(2)),
-        5 => {
-            return Ok(Reply::Text(match input {
-                0 => c"_a",
-                1 => c"_b",
-                _ => c"",
-            }));
-        }
-        6 | 7 | 9 | 10 => {
-            slot_index(input)?;
-        }
-        11 if !(0..=4).contains(&input) => return Err(COMMAND_FAILED),
-        _ => {}
-    }
-    hal.storage
-        .transaction(|storage| {
-            match code {
-                4 => return Ok(Reply::Int(i32::from(storage.merge()?.visible(current)))),
-                11 => {
-                    storage.save_merge(Merge {
-                        status: input as u8,
-                        source: current,
-                    })?;
-                    return Ok(Reply::Void);
-                }
-                _ => {}
-            }
-            let mut state = storage.state()?;
-            let result = match code {
-                1 => return Ok(Reply::Int(i32::from(state.active()))),
-                6 => return Ok(Reply::Bool(state.slots[input as usize].bootable())),
-                7 => return Ok(Reply::Bool(state.slots[input as usize].successful)),
-                8 => state.mark_successful(current),
-                9 => state.set_active(input),
-                10 => state.set_unbootable(input),
-                _ => return Err(std::io::Error::other("unsupported transaction")),
-            };
-            result.map_err(|error| std::io::Error::other(error.to_string()))?;
-            storage.save_state(state)?;
-            Ok(Reply::Void)
-        })
-        .map_err(|error| {
-            eprintln!("boot-hal transaction {code}: {error}");
-            COMMAND_FAILED
-        })
+        .map_err(|_| COMMAND_FAILED)?
+        .execute(code, input)
 }
 
 unsafe extern "C" fn create(args: *mut Opaque) -> *mut Opaque {
@@ -171,28 +110,20 @@ fn property(name: &CStr) -> Result<String, String> {
 }
 
 pub fn run() -> Result<(), String> {
-    let id = property(c"ro.boot.esu.rom")?;
-    if id.len() > 59 {
-        return Err("ROM ID exceeds 59 bytes".into());
-    }
     let current = match property(c"ro.boot.slot_suffix")?.as_str() {
         "_a" => 0,
         "_b" => 1,
         _ => return Err("invalid ro.boot.slot_suffix".into()),
     };
-    let mut storage = Storage::open(
-        Path::new("/dev/block/by-name/bdsvars"),
+    let mut hal = Hal::new(
+        Path::new("/dev/efivars"),
         Path::new("/dev/block/by-name/misc"),
-        &id,
-    )
-    .map_err(|e| e.to_string())?;
-    storage
-        .transaction(|s| {
-            s.state()?;
-            s.mirror(s.merge()?)
-        })
-        .map_err(|e| e.to_string())?;
-    HAL.set(Mutex::new(Hal { storage, current }))
+        current,
+    );
+    if hal.reconcile().is_err() {
+        eprintln!("boot-hal storage unavailable; registering service and retrying on transaction");
+    }
+    HAL.set(Mutex::new(hal))
         .map_err(|_| "HAL already initialized")?;
 
     // These stable platform C entrypoints are exported on Android, but excluded

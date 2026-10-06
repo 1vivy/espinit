@@ -9,7 +9,7 @@ build = "../../userspace/esuinit/build.rs"
 [workspace]
 
 [dependencies]
-varstore = { path = "varstore" }
+esu-platform = { path = "../../userspace/esu-platform" }
 
 [[bin]]
 name = "gblbds-boot-hal"

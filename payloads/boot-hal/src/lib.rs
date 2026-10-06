@@ -1,9 +1,7 @@
 //! Per-ROM boot authority. No GPT or UFS operations are present in this crate.
+pub mod service;
 pub mod storage;
 
-pub const VENDOR_GUID: varstore::Guid = [
-    0x1c, 0x4b, 0x5e, 0x7a, 0x3f, 0x0d, 0x62, 0x4e, 0x9b, 0x8a, 0x1c, 0x2d, 0x3e, 0x4f, 0x5a, 0x6b,
-];
 pub const INVALID_SLOT: i32 = -1;
 pub const COMMAND_FAILED: i32 = -2;
 pub const NO_PENDING: u8 = 0xff;

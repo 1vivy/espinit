@@ -1,4 +1,5 @@
 //! Emit tools/provision's --seed JSON; never opens a device or input image.
+use esu_platform::efivars::PROJECT_GUID;
 use gblbds_boot_hal::{Merge, State};
 use std::fmt::Write;
 
@@ -40,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             write!(hex, "{byte:02x}")?;
         }
         println!(
-            "  {{\"name\":\"{prefix}-{id}\",\"guid\":\"7a5e4b1c-0d3f-4e62-9b8a-1c2d3e4f5a6b\",\"attributes\":7,\"data_hex\":\"{hex}\"}}{}",
+            "  {{\"name\":\"{prefix}-{id}\",\"guid\":\"{PROJECT_GUID}\",\"attributes\":7,\"data_hex\":\"{hex}\"}}{}",
             if index == 0 { "," } else { "" }
         );
     }
