@@ -108,6 +108,14 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
 
     config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
 
+    if rom.has_writable_esp_file() {
+        // A writable `esp-file:` projection (only a managed ROM >= 2 may have
+        // one) needs its preallocated image reachable for writing, so the ESP
+        // is remounted read-write for this boot before any module runs. The
+        // mount is still detached before handoff like every other early mount.
+        esp::make_payload_writable(mount)?;
+    }
+
     if rom.managed {
         // Backend resolution is deliberately deferred until immediately before
         // the `gpt` entry, after every earlier ordered module and script has
@@ -194,6 +202,23 @@ fn load_and_check_payload(
             // is visible here. The resolved set keeps every ESP-file loop guard
             // open until APPLY has returned.
             resolve_backends(rom, esp_mount)?;
+        }
+
+        if !loader::is_kernel_module(entry) {
+            // A userspace helper module carries no kernel image and has no
+            // `/sys/module` self-check: `<payload>/modules/<name>/early.sh`
+            // executes the helper from the ESP and its exit status is the whole
+            // contract, so a nonzero exit fails the managed boot. The binary
+            // itself was already checked against the payload generation by the
+            // packer, and `resolve_payload_file` above proved it is a regular
+            // ESP file inside the payload.
+            log::info!(
+                "Payload helper module {} is present at {}",
+                entry.name,
+                path.display()
+            );
+            scripts::run_module_scripts(payload_root, &entry.name, generation)?;
+            continue;
         }
 
         if loader::module_loaded(&entry.name) {
@@ -415,7 +440,11 @@ fn resolve_backends(rom: &RomConfig, esp_mount: &str) -> Result<(), Failure> {
 }
 pub(crate) fn resolve_native_metadata() -> std::io::Result<block::ResolvedBackend> {
     retry_native_metadata(ENUMERATION_WINDOW, ENUMERATION_RETRY, || {
-        block::resolve("/dev/block/by-name/metadata", esp::ESP_MOUNT_POINT)
+        block::resolve(
+            "/dev/block/by-name/metadata",
+            esp::ESP_MOUNT_POINT,
+            block::Access::ReadOnly,
+        )
     })
 }
 

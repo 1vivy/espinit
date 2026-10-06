@@ -33,6 +33,7 @@ Required inputs, all explicit paths (`--flag` above each file):
 | `--metadata-filesystem` | explicit `ext4` or `f2fs` for the projected metadata mount; no filesystem fallback |
 | `--busybox` | static interpreter for ESP scripts, `espinit/bin/busybox` |
 | `--thin-activate` | output of `build-thin-activate.sh`, `espinit/bin/thin-activate` |
+| `--fw-views` | `fw-views` payload helper built for the CF guest's x86_64 Android: a clean r29 NDK (a `libc.a` bundling Rust std members, e.g. the local r30 or a contaminated install, fails the static link) plus `-C link-arg=$NDK/.../libclang_rt.builtins-x86_64-android.a`, `espinit/bin/fw-views` |
 | `--core-module`, `--thin-module`, `--gpt-module` | `espinit.ko`, `thin.ko`, `gpt.ko` built for the session kernel |
 | `--kernel-src`, `--kernel-out`, `--kernel-config` | exact source/output and independent target config; shared LKM admission requires MODVERSIONS, matching imports/export CRCs, vermagic/BTF, and build receipts |
 | `--generation` | one identifier, `[A-Za-z0-9._-]{1,63}`, written into every generation-bearing artifact |
@@ -53,6 +54,7 @@ tools/cuttlefish/assemble.py \
     --metadata-filesystem ext4 \
     --busybox          <static busybox> \
     --thin-activate    <thin-activate> \
+    --fw-views         <fw-views> \
     --core-module      <espinit.ko> \
     --thin-module      <thin.ko> \
     --gpt-module       <gpt.ko> \
@@ -96,15 +98,17 @@ exactly:
 
 ```
 /espinit/manifest.toml              schema_version = 1, the supplied generation,
-                                    rom = "roms", modules espinit, thin, gpt
+                                    rom = "roms", modules espinit, thin, fw-views, gpt
 /espinit/roms/<id>.toml             selected managed placeholder, replaced by the lab
 /espinit/bin/busybox                static interpreter
 /espinit/bin/thin-activate          x86_64 Android static helper
+/espinit/bin/fw-views               per-ROM firmware-view helper
 /espinit/bin/espinitd               daemon install source
 /espinit/modules/espinit.ko
 /espinit/modules/thin.ko
 /espinit/modules/gpt.ko
 /espinit/modules/thin/early.sh      #!/bin/sh, set -eu, exec thin-activate
+/espinit/modules/fw-views/early.sh  #!/bin/sh, set -eu, exec fw-views
 /espinit/modules/boot-hal/module.toml
 /espinit/modules/boot-hal/android.hardware.boot-service.gblbds
 /espinit/modules/boot-hal/boot-gblbds.rc

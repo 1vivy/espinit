@@ -20,7 +20,8 @@ id = "android-a"
 # (also the default when the field is absent, so payloads predating it stay
 # valid), and 2..=5 are the additional ROMs sharing the firmware storage. Five
 # ROMs exactly fill DeviceInfo's per-ROM anti-rollback windows, so no other
-# value is accepted.
+# value is accepted. A 2..=5 ROM also sets `firmware_views` (see the end of this
+# file) and may project writable `esp-file:` backends.
 rom_number = 1
 
 # managed = true requires successful gpt.ko projection of the complete list
@@ -42,9 +43,14 @@ managed = true
 #   /dev/mapper/<name>                  exact, unique /sys/class/block/dm-*/dm/name
 #   /dev/loopN                          an existing loop device
 #   esp-file:<relative-path>            preallocated regular file on the
-#                                       already-mounted read-only ESP, attached
-#                                       read-only by the loader with zero offset
-#                                       and no size limit (writable is fatal)
+#                                       mounted ESP, attached by the loader
+#                                       with zero offset and no size limit and
+#                                       the access this entry requests:
+#                                       read-only for every ROM, and writable
+#                                       only for a managed ROM >= 2 whose OTA
+#                                       rewrites its own preallocated image
+#                                       (the loader then holds the ESP
+#                                       read-write for that boot)
 #
 # What an earlier module may do first, e.g. activate a thick or thin LV with
 # `dmsetup`, is a module/script concern; the projection that follows only ever
@@ -111,4 +117,47 @@ read_only = false
 [[partitions]]
 name = "misc"
 backend = "/dev/block/by-name/misc"
+read_only = false
+
+# ---------------------------------------------------------------------------
+# Per-ROM firmware views (managed ROM >= 2 only)
+#
+# These entries belong to a ROM file whose `rom_number` is 2..=5: a ROM 1 or
+# unmanaged file must not contain `firmware_views` at all, and validation
+# rejects it there. They are the only part of this catalogue that is not
+# interchangeable between ROM numbers.
+#
+# A ROM >= 2 must not write the shared physical firmware partitions while still
+# being able to "flash" firmware in an OTA. Every entry below names one physical
+# `<base>_a`/`<base>_b` PARTNAME and gets a thin device of the shared pool with
+# that partition as its external origin: unwritten blocks read the physical
+# bytes, this ROM's writes provision private blocks, and the pool is the shared
+# scratch space. The `thin` module activates the pool, then the `fw-views`
+# module (listed between `thin` and `gpt`) creates these devices and the `gpt`
+# entry projects them.
+#
+# Rules enforced by the loader:
+#   * only with `rom_number >= 2`, and only on a managed ROM;
+#   * `name` must be a `<base>_a`/`<base>_b` PARTNAME whose base is not one the
+#     kernel selects from the current slot (boot, init_boot, vendor_boot, dtbo,
+#     vbmeta, vbmeta_system, vbmeta_vendor), and must be unique;
+#   * `thin_id` must be `(rom_number << 16) | index`, with the 1-based position
+#     of the entry in this list, so ids are deterministic, belong to this ROM
+#     alone, and can never collide with an LVM2-owned id below 0x10000;
+#   * every view must also appear as a writable projection with the exact
+#     backend `/dev/mapper/rom<N>-fw-<name>`.
+#
+# Authoring rule for the phone: one view per physical `<base>_a`/`<base>_b` pair
+# on LU0-LU5 except the seven kernel-set bases and `super`, plus `super_N`,
+# `metadata`, `userdata`, `metadata_shared`, `bdsvars`, `misc` and the 14
+# kernel-set `esp-file:` projections; about 103 projections, within the
+# 128-projection gpt ABI.
+
+[[firmware_views]]
+name = "xbl_a"
+thin_id = 131073
+
+[[partitions]]
+name = "xbl_a"
+backend = "/dev/mapper/rom2-fw-xbl_a"
 read_only = false

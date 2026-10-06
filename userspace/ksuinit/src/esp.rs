@@ -9,14 +9,16 @@
 //! major/minor pair discovered through sysfs. The mount stays executable so the
 //! payload busybox can run from it, and it is detached again before the real
 //! init is executed; the block device identity is kept so a failed handoff can
-//! re-attach it for the failure receipt.
+//! re-attach it for the failure receipt. Only a ROM whose config projects a
+//! writable `esp-file:` backend remounts it read-write for the boot, so its own
+//! loops can rewrite the preallocated image.
 
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
-use rustix::mount::{UnmountFlags, mount, unmount};
+use rustix::mount::{UnmountFlags, mount, mount_remount, unmount};
 
 use crate::gpt;
 use crate::receipt::{ESP_MOUNT_FLAGS_RO, ESP_MOUNT_FLAGS_RW, Failure, Stage};
@@ -211,6 +213,28 @@ pub fn mount_esp() -> Result<Mount, Failure> {
         minor: device.minor,
         path: ESP_MOUNT_POINT.to_owned(),
         detached: false,
+    })
+}
+
+/// Remount the selected payload ESP read-write for a ROM that projects writable
+/// `esp-file:` backends.
+///
+/// Only the loader's own loop devices below the mount write through it: the
+/// module scripts still run from the same mount, no Android process ever sees it
+/// (it is detached before handoff exactly like the read-only mount), and the
+/// base flag set is the one the bounded failure-receipt window already uses, so
+/// the remount only toggles `RDONLY` and cannot widen the block device's
+/// exposure.
+pub fn make_payload_writable(mount: &Mount) -> Result<(), Failure> {
+    mount_remount(&mount.path, ESP_MOUNT_FLAGS_RW, "").map_err(|error| {
+        Failure::new(
+            Stage::Storage,
+            "EspMountWritable",
+            format!(
+                "cannot remount the ESP at {} read-write for writable ESP-file backends: {error}",
+                mount.path
+            ),
+        )
     })
 }
 

@@ -482,6 +482,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dm"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "lvm2-meta",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -675,6 +683,16 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "fw-views"
+version = "0.1.0"
+dependencies = [
+ "dm",
+ "espinit",
+ "espinit-platform",
+ "libc",
 ]
 
 [[package]]
@@ -1618,6 +1636,7 @@ dependencies = [
 name = "thin-activate"
 version = "0.1.0"
 dependencies = [
+ "dm",
  "libc",
  "lvm2-meta",
 ]

@@ -471,7 +471,9 @@ fn validate_payload(
             }
         }
     }
-    // Additional tools (notably thin-activate) also carry generation notes.
+    // Additional tools (notably thin-activate and fw-views) also carry
+    // generation notes; both are executed by PID 1 from the ESP, so both must be
+    // interpreter-free.
     for path in files.keys().filter(|path| {
         path.starts_with("bin/")
             && !matches!(
@@ -485,7 +487,7 @@ fn validate_payload(
                 &payload.join(path),
                 &manifest.generation,
                 machine,
-                if path == "bin/thin-activate" {
+                if matches!(path.as_str(), "bin/thin-activate" | "bin/fw-views") {
                     Linkage::StaticRequired
                 } else {
                     Linkage::DynamicAllowed
@@ -559,6 +561,36 @@ fn verify_modules(
     command.arg("-I").arg(script).arg("verify");
     let mut first: Option<CompatibilityReceipt> = None;
     for module in &manifest.modules {
+        if !module.path.ends_with(".ko") {
+            // A userspace helper module has no kernel ABI and no compatibility
+            // receipt: it is executed by its own module script from the ESP, so
+            // only its presence, its executability and its generation note are
+            // checked. Its parameters must stay empty for the same reason.
+            ensure!(
+                matches!(module.name.as_str(), "fw-views"),
+                "phone verifier does not admit helper module {}",
+                module.name
+            );
+            ensure!(
+                module.params.is_empty(),
+                "helper module {} takes no parameters",
+                module.name
+            );
+            ensure!(
+                files
+                    .get(&module.path)
+                    .is_some_and(|file| file.mode == 0o755),
+                "helper module is not executable: {}",
+                module.path
+            );
+            check_binary(
+                &payload.join(&module.path),
+                &manifest.generation,
+                machine,
+                Linkage::StaticRequired,
+            )?;
+            continue;
+        }
         ensure!(
             matches!(module.name.as_str(), "espinit" | "thin" | "gpt"),
             "phone verifier does not admit module {}",

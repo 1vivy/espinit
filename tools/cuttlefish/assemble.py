@@ -47,11 +47,17 @@ PATHS = (
     "tiny_espsu",
     "busybox",
     "thin_activate",
+    "fw_views",
     "core_module",
     "thin_module",
     "gpt_module",
 )
-BINARIES = (("busybox", "bin/busybox"), ("thin_activate", "bin/thin-activate"), ("espinitd", "bin/espinitd"))
+BINARIES = (
+    ("busybox", "bin/busybox"),
+    ("thin_activate", "bin/thin-activate"),
+    ("fw_views", "bin/fw-views"),
+    ("espinitd", "bin/espinitd"),
+)
 MODULES = (("core_module", "espinit"), ("thin_module", "thin"), ("gpt_module", "gpt"))
 ESP_DIRECTORIES = (
     "espinit",
@@ -59,11 +65,13 @@ ESP_DIRECTORIES = (
     "espinit/roms",
     "espinit/modules",
     "espinit/modules/thin",
+    "espinit/modules/fw-views",
     "espinit/modules/boot-hal",
     "espinit/modules/tiny-espsu",
     "espinit/receipts",
 )
 EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
+FW_EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec fw-views\n"
 DEFAULT_ESP_MIB = 64
 MIN_ESP_MIB = 8
 
@@ -95,8 +103,16 @@ def configurations(generation: str, metadata_filesystem: str, rom_id: str) -> tu
         f'\n[platform]\nmetadata_filesystem = "{metadata_filesystem}"\n'
         'packages = ["boot-hal", "tiny-espsu"]\nrecovery_packages = []\n'
     )
-    for name in ("espinit", "thin", "gpt"):
-        manifest += f'\n[[modules]]\nname = "{name}"\npath = "modules/{name}.ko"\nparams = ""\n'
+    for name, path in (
+        ("espinit", "modules/espinit.ko"),
+        ("thin", "modules/thin.ko"),
+        # An ordered userspace helper: it runs `bin/fw-views` through its own
+        # early.sh between `thin` and `gpt`, and a ROM without firmware views
+        # makes it a no-op.
+        ("fw-views", "bin/fw-views"),
+        ("gpt", "modules/gpt.ko"),
+    ):
+        manifest += f'\n[[modules]]\nname = "{name}"\npath = "{path}"\nparams = ""\n'
 
     # Valid managed shape with a deliberately impossible backend: the lab lane
     # replaces this file with the complete generated GPT projection before boot.
@@ -348,18 +364,29 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
     tree = work / "espinit"
     import tomllib
     rom_relative = f"roms/{tomllib.loads(rom)['id']}.toml"
-    for directory in ("bin", "roms", "modules/thin", "receipts"):
+    for directory in ("bin", "roms", "modules/thin", "modules/fw-views", "receipts"):
         (tree / directory).mkdir(parents=True)
     (tree / "manifest.toml").write_text(manifest)
     (tree / rom_relative).write_text(rom)
-    (tree / "modules/thin/early.sh").write_text(EARLY_SCRIPT)
-    (tree / "modules/thin/early.sh").chmod(0o755)
+
+    scripts = (("thin", EARLY_SCRIPT), ("fw-views", FW_EARLY_SCRIPT))
+    for name, script in scripts:
+        path = tree / "modules" / name / "early.sh"
+        path.write_text(script)
+        path.chmod(0o755)
 
     files: list[tuple[Path, str, int]] = [
         (tree / "manifest.toml", "espinit/manifest.toml", 0o644),
         (tree / rom_relative, f"espinit/{rom_relative}", 0o644),
-        (tree / "modules/thin/early.sh", "espinit/modules/thin/early.sh", 0o755),
     ]
+    for name, _ in scripts:
+        files.append(
+            (
+                tree / "modules" / name / "early.sh",
+                f"espinit/modules/{name}/early.sh",
+                0o755,
+            )
+        )
     for key, target in BINARIES:
         files.append((sources[key], f"espinit/{target}", 0o755))
     for key, name in MODULES:

@@ -688,6 +688,88 @@ fn malformed_boot_and_dynamic_pid1_are_rejected() {
     fixture.reject("statically linked");
 }
 
+/// List `bin/fw-views` as an ordered userspace helper module with the given
+/// manifest name, parameters, file mode and generation note.
+fn with_helper(fixture: &Fixture, name: &str, params: &str, mode: u32, generation: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let payload = &fixture.args.payload;
+    let manifest = payload.join("manifest.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[[modules]]\nname = \"{name}\"\npath = \"bin/fw-views\"\nparams = \"{params}\"\n",
+            fs::read_to_string(&manifest).unwrap()
+        ),
+    )
+    .unwrap();
+    let path = payload.join("bin/fw-views");
+    fs::write(&path, binary_fixture(generation)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn an_ordered_helper_module_must_be_an_executable_static_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A listed helper is admitted when it is an executable, interpreter-free
+    // binary of this payload generation: PID 1 runs it from the ESP through its
+    // own early.sh and never loads it into the kernel.
+    let fixture = Fixture::new();
+    with_helper(&fixture, "fw-views", "", 0o755, GENERATION);
+    patch(&fixture.args).unwrap();
+
+    for (name, params, mode, generation, expected) in [
+        (
+            "fw-views",
+            "",
+            0o644,
+            GENERATION,
+            "helper module is not executable",
+        ),
+        (
+            "fw-views",
+            "debug=1",
+            0o755,
+            GENERATION,
+            "takes no parameters",
+        ),
+        ("fw-views", "", 0o755, "release-9", "generation"),
+        (
+            "helper",
+            "",
+            0o755,
+            GENERATION,
+            "does not admit helper module",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        with_helper(&fixture, name, params, mode, generation);
+        fixture.reject(expected);
+    }
+
+    // A dynamic helper cannot run where PID 1 has no linker.
+    let fixture = Fixture::new();
+    with_helper(&fixture, "fw-views", "", 0o755, GENERATION);
+    fs::write(
+        fixture.args.payload.join("bin/fw-views"),
+        binary_fixture_kind(GENERATION, true),
+    )
+    .unwrap();
+    fs::set_permissions(
+        fixture.args.payload.join("bin/fw-views"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fixture.reject("statically linked");
+
+    // A manifest that lists the helper without shipping it fails closed.
+    let fixture = Fixture::new();
+    with_helper(&fixture, "fw-views", "", 0o755, GENERATION);
+    fs::remove_file(fixture.args.payload.join("bin/fw-views")).unwrap();
+    fixture.reject("helper module is not executable");
+}
+
 #[test]
 fn managed_payload_stages_both_packages_and_rejects_stale_or_missing_sources() {
     let mut fixture = Fixture::new();
