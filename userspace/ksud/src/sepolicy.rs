@@ -753,6 +753,11 @@ fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) ->
     Ok(())
 }
 
+/// Apply a mandatory rule, failing if parsing or the kernel update fails.
+pub fn apply_strict(policy: &str) -> Result<()> {
+    let statements = parse_sepolicy(policy.trim(), true)?;
+    apply_rules_batch(&statements, true)
+}
 pub fn live_patch(policy: &str) -> Result<()> {
     let result = parse_sepolicy(policy.trim(), false)?;
     for statement in &result {
