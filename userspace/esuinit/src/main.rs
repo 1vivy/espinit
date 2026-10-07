@@ -12,10 +12,9 @@ use esuinit::{handoff, init, receipt};
 /// gets a nonzero exit status immediately, without touching the platform. As
 /// PID 1, any failure stops the handoff, persists a bounded receipt, and enters
 /// the fatal-boot stop path; the real init is never executed after an init
-/// error. Both fatal paths record the receipt and then run the same stop, which
-/// honors the exact `androidboot.init_fatal_panic=true` opt-in by requesting a
-/// kernel panic before falling back to reboot. On success `/init.real` is
-/// executed with the original `argv`/`envp`, preserving PID 1 and `/init` argv[0].
+/// error. Both fatal paths record the receipt and then reboot and park PID 1.
+/// On success `/init.real` is executed with the original `argv`/`envp`,
+/// preserving PID 1 and `/init` argv[0].
 ///
 /// # Safety
 /// Called by the kernel as the process entry point.

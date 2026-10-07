@@ -266,70 +266,132 @@ pub fn mount_point(target: &str) -> Result<bool> {
 /// partition later than `on init` on some devices: a partition that is not a
 /// mount point yet is skipped instead of being covered by an overlay that would
 /// block recovery's own mount.
+///
+/// Policy/attribute/staging failures omit that module's layers. A failed combined
+/// partition mount leaves the stock partition visible. Either failure stops
+/// normal Android when the affected module/partition has a critical contributor.
 pub fn apply(root: &Path, order: &[String], recovery: bool) -> Result<()> {
-    let mut layers: BTreeMap<&str, Vec<PathBuf>> = BTreeMap::new();
+    let mut layers: BTreeMap<&str, Vec<(PathBuf, bool)>> = BTreeMap::new();
     for id in order {
         let module = root.join(id);
-        let policy = module.join("sepolicy.rule");
-        if policy.exists() {
-            crate::sepolicy::apply_strict(&fs::read_to_string(policy)?)
-                .with_context(|| format!("module {id} sepolicy"))?;
-        }
-        let attrs_path = module.join("attrs");
-        let attrs = if attrs_path.exists() {
-            parse_attrs(&fs::read_to_string(attrs_path)?)?
-        } else {
-            BTreeMap::new()
+        // The shared admission markers decide which modules take part: a
+        // disabled/removed module and, in recovery, a module PID 1 did not
+        // admit contribute no overlay either, and an admitted module must still
+        // be identifiable.
+        let Some(critical) = crate::module::admission(&module, id, recovery)? else {
+            continue;
         };
-        for partition in PARTITIONS {
-            let source = module.join(partition);
-            if !source.exists() {
-                continue;
-            }
-            let target = format!("/{partition}");
-            if recovery && !mount_point(&target)? {
-                log::warn!("recovery: {target} is not a mount point; skipping its overlay");
-                continue;
-            }
-            let destination = Path::new(STAGING).join(id).join(partition);
-            if !mounted(&target, "overlay")? {
-                if !mounted(STAGING, "tmpfs")? {
-                    fs::create_dir_all(STAGING)?;
-                    mount(
-                        "tmpfs",
-                        STAGING,
-                        "tmpfs",
-                        0, // metadata_shared block node must be openable here.
-                        "mode=0700,uid=0,gid=0",
-                    )?;
+        match stage_module(&module, id, recovery) {
+            Ok(entries) => {
+                for (partition, destination) in entries {
+                    layers
+                        .entry(partition)
+                        .or_default()
+                        .push((destination, critical));
                 }
-                let private = Path::new(STAGING).join(id);
-                fs::create_dir_all(&private)?;
-                fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
-                stage(&source, &destination, Path::new(&target), &target, &attrs)?;
             }
-            layers.entry(partition).or_default().push(destination);
+            Err(error) => escalate_or_skip(critical, id, recovery, error)?,
         }
     }
-    for (partition, paths) in layers {
+    for (partition, entries) in layers {
         let target = format!("/{partition}");
-        if mounted(&target, "overlay")? {
+        let result = (|| -> Result<()> {
+            if mounted(&target, "overlay")? {
+                return Ok(());
+            }
+            let mut lowerdirs = entries
+                .iter()
+                .map(|(path, _)| path.to_str().context("invalid staging path"))
+                .collect::<Result<Vec<_>>>()?;
+            lowerdirs.push(&target);
+            mount(
+                "overlay",
+                &target,
+                "overlay",
+                libc::MS_RDONLY,
+                &format!("lowerdir={}", lowerdirs.join(":")),
+            )
+        })();
+        let Err(error) = result else {
             continue;
+        };
+        let error = error.context(format!("{target} overlay"));
+        if !recovery && entries.iter().any(|(_, critical)| *critical) {
+            return Err(crate::module::CriticalModuleError::new(error).into());
         }
-        let mut lowerdirs = paths
-            .iter()
-            .map(|p| p.to_str().context("invalid staging path"))
-            .collect::<Result<Vec<_>>>()?;
-        lowerdirs.push(&target);
-        mount(
-            "overlay",
-            &target,
-            "overlay",
-            libc::MS_RDONLY,
-            &format!("lowerdir={}", lowerdirs.join(":")),
-        )?;
+        log::warn!("{error:#}");
     }
     Ok(())
+}
+
+/// Apply one module's automatic policy and stage its partition trees. Any error
+/// leaves the module out of the overlay stack; the caller decides whether that
+/// is fatal, so the disposition never depends on where the failure happened.
+fn stage_module(module: &Path, id: &str, recovery: bool) -> Result<Vec<(&'static str, PathBuf)>> {
+    let policy = module.join("sepolicy.rule");
+    if policy.exists() {
+        crate::sepolicy::apply_strict(&std::fs::read_to_string(policy)?)
+            .with_context(|| format!("module {id} sepolicy"))?;
+    }
+    if skip_mount(module) {
+        // `skip_mount` keeps the module's scripts and policy; only its Android
+        // partitions are left alone.
+        return Ok(Vec::new());
+    }
+    let attrs_path = module.join("attrs");
+    let attrs = if attrs_path.exists() {
+        parse_attrs(&std::fs::read_to_string(attrs_path)?)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut entries = Vec::new();
+    for partition in PARTITIONS {
+        let source = module.join(partition);
+        if !source.exists() {
+            continue;
+        }
+        let target = format!("/{partition}");
+        if recovery && !mount_point(&target)? {
+            log::warn!("recovery: {target} is not a mount point; skipping {id}'s overlay");
+            continue;
+        }
+        let destination = Path::new(STAGING).join(id).join(partition);
+        if !mounted(&target, "overlay")? {
+            if !mounted(STAGING, "tmpfs")? {
+                fs::create_dir_all(STAGING)?;
+                mount(
+                    "tmpfs",
+                    STAGING,
+                    "tmpfs",
+                    0, // metadata_shared block node must be openable here.
+                    "mode=0700,uid=0,gid=0",
+                )?;
+            }
+            let private = Path::new(STAGING).join(id);
+            fs::create_dir_all(&private)?;
+            fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
+            stage(&source, &destination, Path::new(&target), &target, &attrs)?;
+        }
+        entries.push((partition, destination));
+    }
+    Ok(entries)
+}
+
+/// `skip_mount` is a mount-layer flag, not an admission filter, so it is read
+/// here: only a regular marker file counts.
+fn skip_mount(module: &Path) -> bool {
+    fs::symlink_metadata(module.join("skip_mount")).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Report a module's overlay failure, or stop a normal Android boot when the
+/// module is critical. Recovery only logs it.
+fn escalate_or_skip(critical: bool, id: &str, recovery: bool, error: anyhow::Error) -> Result<()> {
+    let error = error.context(format!("module {id} overlay"));
+    if recovery || !critical {
+        log::warn!("{error:#}");
+        return Ok(());
+    }
+    Err(crate::module::CriticalModuleError::new(error).into())
 }
 
 #[cfg(test)]
@@ -370,13 +432,78 @@ mod tests {
         assert!(error.to_string().contains("OverlayAttrsMissing"));
         assert!(!temp.path().join("destination").exists());
     }
+    fn bad_module(root: &Path, id: &str, markers: &[&str]) {
+        let module = root.join(id);
+        fs::create_dir(&module).unwrap();
+        fs::write(module.join("module.prop"), format!("id={id}\n")).unwrap();
+        fs::write(module.join("sepolicy.rule"), "allow broken").unwrap();
+        for marker in markers {
+            fs::write(module.join(marker), b"").unwrap();
+        }
+    }
+
     #[test]
-    fn policy_error_propagates_before_overlay_work() {
+    fn optional_policy_failure_cannot_hide_a_later_critical_failure() {
+        for recovery in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            bad_module(temp.path(), "optional", &["recovery-ok"]);
+            bad_module(temp.path(), "critical", &["critical", "recovery-ok"]);
+            let result = apply(
+                temp.path(),
+                &["optional".to_owned(), "critical".to_owned()],
+                recovery,
+            );
+            if recovery {
+                assert!(result.is_ok());
+            } else {
+                assert!(crate::module::is_critical_failure(&result.unwrap_err()));
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_and_removed_modules_are_never_read() {
+        for marker in ["disable", "remove"] {
+            let temp = tempfile::tempdir().unwrap();
+            bad_module(temp.path(), "bad", &["critical"]);
+            fs::write(temp.path().join("bad/module.prop"), "id=other\n").unwrap();
+            let error = apply(temp.path(), &["bad".to_owned()], false).unwrap_err();
+            assert!(crate::module::is_critical_failure(&error));
+            fs::write(temp.path().join("bad").join(marker), b"").unwrap();
+            apply(temp.path(), &["bad".to_owned()], false).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unidentifiable_module_contributes_no_overlay() {
+        for prop in ["id=other\n", ""] {
+            let temp = tempfile::tempdir().unwrap();
+            bad_module(temp.path(), "bad", &[]);
+            fs::write(temp.path().join("bad/module.prop"), prop).unwrap();
+            // Optional: reported and skipped.
+            apply(temp.path(), &["bad".to_owned()], false).unwrap();
+            // Critical: normal Android stops instead.
+            fs::write(temp.path().join("bad/critical"), b"").unwrap();
+            let error = apply(temp.path(), &["bad".to_owned()], false).unwrap_err();
+            assert!(crate::module::is_critical_failure(&error), "{prop:?}");
+            // Recovery only reports it.
+            fs::write(temp.path().join("bad/recovery-ok"), b"").unwrap();
+            apply(temp.path(), &["bad".to_owned()], true).unwrap();
+        }
+    }
+
+    #[test]
+    fn skip_mount_bypasses_unused_overlay_attributes() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join("bad")).unwrap();
-        fs::write(temp.path().join("bad/sepolicy.rule"), "allow broken").unwrap();
+        bad_module(temp.path(), "bad", &["critical"]);
+        let module = temp.path().join("bad");
+        fs::remove_file(module.join("sepolicy.rule")).unwrap();
+        fs::write(module.join("attrs"), "invalid attributes").unwrap();
+        fs::create_dir(module.join("vendor")).unwrap();
         let error = apply(temp.path(), &["bad".to_owned()], false).unwrap_err();
-        assert!(format!("{error:#}").contains("parse policy"));
+        assert!(crate::module::is_critical_failure(&error));
+        fs::write(module.join("skip_mount"), b"").unwrap();
+        apply(temp.path(), &["bad".to_owned()], false).unwrap();
     }
     #[test]
     fn mount_point_reads_this_mount_namespace() {

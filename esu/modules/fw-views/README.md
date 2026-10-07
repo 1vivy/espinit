@@ -4,7 +4,10 @@
 lists it after `thin`; PID1 runs `modules/fw-views/pid1.sh` before GPT APPLY.
 Recovery requires `recovery-ok` and runs `pid1-recovery.sh`. The helper reads
 `ESU_ROM` and `ESU_ROM_NUMBER` exported by PID1 from efivarfs, validates the
-selected ESP ROM config, and treats any failure as fatal.
+selected ESP ROM config, and returns an error on failure. This module ships a
+`critical` marker: an admitted PID1 failure blocks the managed handoff in Android
+and recovery. Removing the marker makes helper failure best effort, but the
+final GPT/backend checks still refuse missing required firmware views.
 
 ## What it does
 

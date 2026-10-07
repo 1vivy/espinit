@@ -31,8 +31,8 @@ ESP /
         attrs
         sepolicy.rule
         vendor/bin/hw/android.hardware.boot-service.qti
-      thin/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
-      fw-views/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
+      thin/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok,critical}
+      fw-views/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok,critical}
       avb-graft/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
     receipts/
 
@@ -71,13 +71,13 @@ carrying the selected major/minor and RO/RW mode. After the root switch, stock
 toybox recreates the block node; init mounts the ESP with matching access and
 no security context override, creates a new staging tmpfs, and copies binaries.
 The core's existing `on init` action labels staging `u:object_r:esu_file:s0`
-with toybox before starting `esu-early`. Module ordering and stage flags do not
-change; the bootstrap and module RC share the existing 65536-byte limit.
+with toybox before executing `esud early`. Bootstrap and admitted module RC
+share the existing 65536-byte limit.
 
 esud checks the staging filesystem and every inode label, selected ESP device
 identity and exact `u:object_r:vfat:s0` root label before creating the
-per-mount-RO `/dev/esp` bind. Android's early-service failure remains fatal;
-recovery logs it without `reboot_on_failure`. Host disposable FAT/loop runs
+per-mount-RO `/dev/esp` bind. Optional module failures are reported without
+rebooting Android; see the critical-module policy below. Host disposable FAT/loop runs
 passed detach, init-style overmount, contextless reattachment and continued
 inner-loop reads/writes in separate RO/RW lanes. These do not qualify Android
 policy loading or ROM >= 2 boot; phone proof remains required.
@@ -90,23 +90,25 @@ PID 1 checks the core UAPI and readiness, obtains bdsvars identity, loads the ot
 
 The generic [`avb-graft` tool/module](esu/modules/avb-graft/README.md) seeds configured `[[partitions]].metadata` on writable ROM-local views after firmware views and before GPT projection. It never writes physical origins; existing thin/ESP state wins over stale metadata. The module documentation includes host `apply`/`extract` usage, a real avbtool smoke recipe, drop interaction and release package inputs.
 
-Before init handoff PID 1 concatenates `modules/<id>/initrc/*.rc` in module order, prefixes each file with its source name, caps the result at 65536 bytes and sends the root-only set-once module-RC ioctl. It sends an empty buffer too: unset is not equivalent to empty. Recovery includes only modules carrying `recovery-ok`. No metadata-staged RC exists.
+Before init handoff PID 1 concatenates admitted `modules/<id>/initrc/*.rc` in module order and sends the root-only set-once module-RC ioctl. Bootstrap space is reserved within the 65536-byte total; an invalid or oversized optional module's RC is skipped as a unit, never truncated. Missing optional RC never makes stock init's own RC unreadable. Recovery includes only modules carrying `recovery-ok`. No metadata-staged RC exists.
 
-The core boot-mode ioctl is root-only and set-once (`1` Android, `2` recovery). Init's synchronous `esu-early` service runs before early HAL startup in both Android and recovery, so a managed recovery or fastbootd launch gets the same ESP lifecycle, staged binaries, module RC and managed mounts. Its core RC has two variants: Android arms `reboot_on_failure`, while recovery has no rescue path to fall back to and omits the line, so init logs a failed service instead of looping the recovery session. `esud early`:
+The core boot-mode ioctl is root-only and set-once (`1` Android, `2` recovery). Both modes use upstream-style synchronous `exec` callbacks, including `esud early` before early HAL startup; there is no blanket `reboot_on_failure` service. Modules are optional unless their directory contains a regular `critical` marker. The supplied `thin` and `fw-views` modules carry it; `boot-hal` and `avb-graft` do not. An admitted critical module's PID-1 failure blocks handoff in either mode. After stock init starts, an observed critical-module failure stops normal Android through the generic reboot/park path; recovery reports it and continues. Optional failure does not suppress Android's own AVB or init failure behavior.
 
-1. Reads every selected module's `sepolicy.rule` strictly. Malformed rules or failed kernel updates propagate as boot failure.
+`disable` and `remove` skip a module without modifying the read-only ESP. `recovery-ok` admits it in recovery; `skip_mount` skips its partition overlays, not its scripts. Daemon safe mode follows KernelSU's Android properties and volume-down ioctl and skips module work; it does not rewrite ESP flags. Required kernel modules, ROM identity and final backend/GPT validation remain independent safety checks. `esud early`:
+
+1. Applies each admitted module's `sepolicy.rule`. Invalid rules or failed updates are reported under that module's optional/critical policy; explicit `esud sepolicy` commands still return errors.
 2. Stages partition trees on executable tmpfs `/dev/esu`, mode 0700, without `nosuid`. Supported roots are `system`, `vendor`, `product`, `system_ext`, and `odm`; there is no `system/vendor` remapping.
 3. Applies per-inode attrs from lines `/<partition>/<path> <octal-mode> <uid> <gid> <SELinux-context>`. Without an explicit entry it copies mode, owner and label from the existing target using no-follow metadata/xattr reads. A missing target/label is `OverlayAttrsMissing`, not an invented label.
-4. Mounts one read-only, lowerdir-only overlay per partition: ordered module trees followed by the stock partition. There is no unobserved bind-mount fallback. Recovery overlays only partitions that are already mount points; one that recovery mounts later is left untouched so the overlay cannot block it. The lab boot watchdog stays Android-only because recovery never sets `sys.boot_completed`.
-5. Runs `early.sh` with staged tmpfs BusyBox in module order, failing on nonzero status, then applies ROM isolation.
+4. Mounts read-only, lowerdir-only overlays from usable module trees followed by the stock partition. Optional policy/staging failures omit that module's layers; a failed combined partition mount leaves the stock partition visible. Normal Android stops if a failed mount has a critical contributor. No guessed labels or bind fallback is used. Recovery overlays only partitions already mounted.
+5. Runs bounded `early.sh` scripts with staged tmpfs BusyBox in module order, reporting optional failures and continuing while the stage deadline permits, then applies required ROM isolation.
 
-Post-fs, post-fs-data, services, boot-completed and recovery run the corresponding KernelSU scripts from the ESP in module order. Stages may be re-run from a root shell and are gated by the core boot mode, not manager state or a one-shot service event. `esud platform reload` reapplies policies and mounts missing overlays without running scripts.
+Post-fs, post-fs-data, services, boot-completed and recovery run the corresponding KernelSU scripts from the ESP in module order. Stages may be re-run from a root shell and respect boot mode, safe mode and module flags. Service and boot-completed scripts remain detached, not monitored daemons. `esud platform reload` reapplies policies and mounts missing overlays without running scripts.
 
 ROM isolation preserves the shared `/metadata/shared/password_slots` bind, managed vold key-preservation property and numbered GSI password-slot identity. ROMs numbered 2 or higher deny boot HAL writes/ioctls to the UFS BSG node. The Boot HAL persists Slot and MergeStatus using efivarfs and retains the existing misc VAB mirror.
 
 ## Boot HAL module
 
-The payload assembler places the built `gblbds-boot-hal` at `modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`. The checked-in attrs use `hal_bootctl_default_exec`, preserving the stock `vendor.boot-qti` service and domain transition. The module grants exactly the three efivarfs rules in [`sepolicy.rule`](esu/modules/boot-hal/sepolicy.rule); it introduces no new SELinux type or block-node access.
+When a Boot HAL executable is supplied, the payload assembler places it at `modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`; it can also assemble without this module. The checked-in attrs use `hal_bootctl_default_exec`, preserving the stock `vendor.boot-qti` service and domain transition. The module grants exactly the three efivarfs rules in [`sepolicy.rule`](esu/modules/boot-hal/sepolicy.rule); it introduces no new SELinux type or block-node access.
 
 This fixed QTI target is device-specific. Merely assembling it does not establish another device's service compatibility. If device evidence later proves a tmpfs association denial, evaluate that specific rule then; no speculative fallback is shipped.
 
@@ -145,9 +147,9 @@ Build identity is the first 12 lowercase hex digits of SHA256 over the lexicogra
 
 ## Failure evidence and diagnostic boundaries
 
-Managed parse, module, projection, policy or handoff failures stop boot rather than falling back to stock. Early failure JSON under ESP `/esu/receipts/failure.json` records schema, nullable build_id, stage, component, stable error and bounded detail. A bounded RW-remount/temp-file/fsync/rename/fsync/RO-remount window preserves prior evidence until replacement succeeds. Receipt failure is also logged to kmsg; it never permits partial handoff.
+Required managed-boot identity, kernel-module, storage/projection or handoff failures stop boot rather than falling back to a different filesystem view. Admitted ESP module failures follow the explicit optional/critical policy above. PID-1 failure JSON under ESP `/esu/receipts/failure.json` records schema, nullable build_id, stage, component, stable error and bounded detail. A bounded RW-remount/temp-file/fsync/rename/fsync/RO-remount window preserves prior evidence until replacement succeeds. Receipt failure is also logged to kmsg; it never permits partial handoff.
 
-`androidboot.init_fatal_panic=true` requests the AOSP sysrq panic path after recording failure, with sync/reboot/park fallback. `androidboot.esu.apss_minidump=true` preloads the vendor minidump dependency closure before ESP discovery. Lab-only `androidboot.esu.probe=<stage>` and the daemon boot watchdog diagnose stage reachability/stalls; they are not proof of an otherwise successful boot. Hang files are written only once post-fs-data has created the log directory.
+Generic evidence remains Android logging (`esu` tag), fatal error details in kmsg, and best-effort `logcat.log`/`dmesg.log` captures under `/data/adb/esu/log` after post-fs-data. Capture failure does not fail a boot stage. The product has no stage-crash probes, APSS minidump preloader, fatal SysRq override or boot watchdog. Crash forcing and Qualcomm 900e collection belong to the external lab. AOSP init may still honor its own `androidboot.init_fatal_panic` setting after handoff.
 
 The explicit `androidboot.mode=recovery` plus `androidboot.esu.recovery_passthrough=true` rescue path bypasses managed payload work and hands off to stock recovery. Normal recovery retains projection. Recovery OTA and device enforcing overlay behavior remain separate verification requirements.
 

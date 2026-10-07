@@ -239,6 +239,20 @@ pub fn report_boot_complete() {
     report_event(ksu_uapi::EVENT_BOOT_COMPLETED);
 }
 
+/// True when the core module reports the volume-key safe mode. The kernel is
+/// the only place the boot-time signal is observable, so an unrecognized or
+/// failed query stays out of safe mode.
+pub fn check_safemode() -> bool {
+    let mut cmd = ksu_uapi::ksu_check_safemode_cmd { in_safe_mode: 0 };
+    match ksuctl(ksu_uapi::KSU_IOCTL_CHECK_SAFEMODE, &raw mut cmd) {
+        Ok(_) => cmd.in_safe_mode != 0,
+        Err(error) => {
+            log::warn!("cannot query core safe mode: {error}");
+            false
+        }
+    }
+}
+
 pub fn set_sepolicy(payload: *const u8, payload_len: u64) -> Result<i32> {
     let mut ioctl_cmd = crate::ksu_uapi::ksu_set_sepolicy_cmd {
         data_len: payload_len,

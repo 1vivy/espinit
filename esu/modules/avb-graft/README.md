@@ -1,8 +1,8 @@
 # `avb-graft`: generic AVB metadata grafts
 
-**Status (2026-10-06)** — Source integration; host/build verification and device qualification are separate gates. This module does not authorize physical writes or manufacture a valid AVB signature.
+**Status (2026-10-07)** — Optional module by default; host/build verification and device qualification are separate gates. This module does not authorize physical writes or manufacture a valid AVB signature.
 
-Install the static `avb-graft` executable at `esu/bin/avb-graft` and this module at `esu/modules/avb-graft`. Add `avb-graft` after `fw-views` in `modules_order`. All PID1 scripts finish before GPT projection; normal and recovery scripts run the same helper, and `recovery-ok` opts into recovery/fastbootd. Any error exits nonzero and stops managed boot.
+Install the static `avb-graft` executable at `esu/bin/avb-graft` and this module at `esu/modules/avb-graft`. Add `avb-graft` after `fw-views` in `modules_order`. All PID1 scripts finish before GPT projection; normal and recovery scripts run the same helper, and `recovery-ok` opts into recovery/fastbootd. The helper returns errors without bypassing AVB checks. By default esu reports a failed graft and continues; Android may still reject the resulting view. Add a regular `critical` marker to this module to make an admitted PID1 failure stop the managed handoff.
 
 ## Generic host operations
 

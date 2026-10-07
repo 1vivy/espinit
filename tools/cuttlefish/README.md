@@ -28,13 +28,19 @@ tools/cuttlefish/assemble.py \
   --stock-init-boot /build/stock/init_boot.img \
   --avbtool /tools/avbtool --avb-key /keys/cuttlefish.pem \
   --esuinit /build/esuinit --esud /build/esud \
-  --boot-hal /build/gblbds-boot-hal --busybox /build/busybox \
+  --busybox /build/busybox \
   --thin-activate /build/thin-activate --fw-views /build/fw-views \
   --core-module /build/kernelesp.ko --thin-module /build/thin.ko \
   --gpt-module /build/gpt.ko --efivarfs-module /build/efivarfs.ko \
   --kmi-out /build/kmi-out --metadata-filesystem ext4 \
   --rom-id rom1 --output-dir /build/cf-payload
 ```
+
+`--boot-hal /build/gblbds-boot-hal` is the one optional input: supply the built
+replacement binary to package the Boot HAL module exactly as before, or omit it
+to assemble a payload without a Boot HAL directory, module-order entry, binary
+or required-file check. Every other input is required, and an explicitly
+supplied HAL must be a nonempty regular file like the rest.
 
 The four modules require schema-2 `.ko.compat.json` receipts beside them.
 The shared KMI verifier runs before image publication. It currently admits
@@ -49,10 +55,17 @@ The ramdisk retains stock archives and appends `/esuinit`, `/esu-build-id`, and
 The daemon lives directly in ESP `esu/bin/esud`; no metadata installation occurs.
 
 The ESP contains schema-1 manifest/ROM config with `modules_order =
-["boot-hal", "thin", "fw-views"]`, no payload generation, no ROM number and no
-platform package table. Thin/fw-views carry `pid1.sh` and `pid1-recovery.sh`.
-The ordinary Boot HAL module has `module.prop`, `attrs`, `sepolicy.rule`, and
-`vendor/bin/hw/android.hardware.boot-service.qti` copied from the built HAL.
+["thin", "fw-views"]` — prepended with `"boot-hal"` only when `--boot-hal` is
+supplied — no payload generation, no ROM number and no platform package table.
+Every regular file a shipped module declares at its root is copied to
+`esu/modules/<id>/`, except `pid1.sh`/`pid1-recovery.sh`, which the assembler
+generates itself. Flag files therefore travel by presence: `thin` and `fw-views`
+ship `critical`, which makes them critical, and `boot-hal` ships none, so it
+stays optional; `disable`, `remove` and `skip_mount` would be carried the same
+way.
+With `--boot-hal`, the ordinary Boot HAL module has `module.prop`, `attrs`,
+`sepolicy.rule`, and `vendor/bin/hw/android.hardware.boot-service.qti` copied
+from the built HAL; without it none of those paths exist in the ESP.
 Its fixed stock QTI target is not automatically compatible with a CF image.
 Kernel modules never enter the ESP filesystem.
 
@@ -64,8 +77,8 @@ bdsvars BootedRom/Slot authority, not bootconfig or ROM TOML defaults.
 SHA256 and size. Build ID hashes the sorted input SHA256 values (duplicates
 retained, each 64hex value followed by LF), taking the first 12 lowercase hex.
 Both ESP `esu/build-id` and cpio `/esu-build-id` contain those 12 characters plus
-LF. Input hashes include source files, generated configuration/scripts and
-checked-in module metadata. FAT timestamps need not be reproducible.
+LF. Input hashes include source files, generated configuration/scripts and the
+copied module metadata. FAT timestamps need not be reproducible.
 
 Host tools are invoked by argument vector, not a shell: `avbtool`,
 `unpack_bootimg`, `mkbootimg`, `cpio`, gzip/lz4 and mtools. `--esp-size-mib`

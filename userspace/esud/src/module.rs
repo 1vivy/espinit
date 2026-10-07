@@ -1,6 +1,8 @@
 //! KernelSU scripts from the immutable ESP module tree.
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 use anyhow::{Context, Result, bail, ensure};
+use std::fmt;
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -12,17 +14,104 @@ pub fn manifest() -> Result<esuinit::config::Manifest> {
         .map_err(anyhow::Error::msg)
 }
 
+/// Admission policy of one ESP module, from the same markers PID 1 uses:
+/// `disable`/`remove` skip it, recovery admits only `recovery-ok` modules, and
+/// only an admitted module's `critical` marker escalates its failures.
+///
+/// The caller applies safe mode first, so ordering is safe mode, skip markers,
+/// recovery filter, and only then module identity. Returns the module's
+/// criticality, or `None` when it must be left alone; a critical module that
+/// cannot be identified escalates instead of being silently dropped.
+pub fn admission(directory: &Path, id: &str, recovery: bool) -> Result<Option<bool>> {
+    let critical = match esuinit::platform::module_policy(directory, recovery) {
+        Ok(esuinit::platform::ModulePolicy::Admitted { critical }) => critical,
+        Ok(esuinit::platform::ModulePolicy::Skipped) => return Ok(None),
+        Err(failure) => {
+            // A malformed marker never turns optional work into a boot stop.
+            log::warn!(
+                "ignoring module {}: {}: {}",
+                directory.display(),
+                failure.error,
+                failure.detail
+            );
+            return Ok(None);
+        }
+    };
+    if let Err(error) = identify(directory, id) {
+        if critical && !recovery {
+            return Err(CriticalModuleError::new(error).into());
+        }
+        // An optional module that cannot be identified contributes nothing, so
+        // invalid input never reaches scripts, policy or overlays.
+        log::warn!("{error:#}");
+        return Ok(None);
+    }
+    Ok(Some(critical))
+}
+
+/// Identify one admitted module: `module.prop` must declare exactly its own id,
+/// the same check PID 1 performs before the handoff. The read is bounded so an
+/// oversized module can never be pulled into memory.
+fn identify(directory: &Path, id: &str) -> Result<()> {
+    let path = directory.join("module.prop");
+    let mut prop = String::new();
+    std::fs::File::open(&path)
+        .and_then(|file| file.take(65537).read_to_string(&mut prop))
+        .with_context(|| format!("module {id} module.prop: {}", path.display()))?;
+    let mut ids = prop
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| *key == "id")
+        .map(|(_, value)| value);
+    ensure!(
+        prop.len() <= 65536 && ids.next() == Some(id) && ids.next().is_none(),
+        "module {id} module.prop id mismatch"
+    );
+    Ok(())
+}
+
+/// A failure of a module marked `critical`. Normal Android boot must not
+/// continue past it; recovery and optional modules only log it.
+#[derive(Debug)]
+pub struct CriticalModuleError(anyhow::Error);
+
+impl CriticalModuleError {
+    pub fn new(error: impl Into<anyhow::Error>) -> Self {
+        Self(error.into())
+    }
+}
+
+impl fmt::Display for CriticalModuleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "critical module failed: {:#}", self.0)
+    }
+}
+
+impl std::error::Error for CriticalModuleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+/// True when the error came from a module marked `critical`, anywhere in its
+/// context chain. The daemon escalates these to a boot-stopping failure in
+/// normal Android; everything else is logged.
+pub fn is_critical_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(<dyn std::error::Error>::is::<CriticalModuleError>)
+}
+
 #[derive(Clone, Copy)]
 enum ScriptWait {
-    Strict,
     Until(Instant),
+    /// `service`/`boot-completed` daemons outlive the stage, as upstream.
     Detached,
 }
 
 impl ScriptWait {
     fn for_stage(stage: &str, timeout: Duration) -> Self {
         match stage {
-            "early" => Self::Strict,
             "service" | "boot-completed" => Self::Detached,
             _ => Self::Until(Instant::now() + timeout),
         }
@@ -34,6 +123,7 @@ pub fn scripts(
     order: &[String],
     stage: &str,
     rom: Option<&crate::rom_isolation::RuntimeRom>,
+    recovery: bool,
 ) -> Result<()> {
     scripts_in(
         Path::new(crate::defs::MODULE_DIR),
@@ -42,6 +132,7 @@ pub fn scripts(
         &[crate::defs::BUSYBOX, "sh"],
         rom.map(|rom| (rom.config.id.as_str(), rom.number)),
         Duration::from_secs(35),
+        recovery,
     )
 }
 
@@ -52,13 +143,18 @@ fn scripts_in(
     interpreter: &[&str],
     rom: Option<(&str, u32)>,
     timeout: Duration,
+    recovery: bool,
 ) -> Result<()> {
     let wait = ScriptWait::for_stage(stage, timeout);
     for id in order {
         let directory = root.join(id);
-        if stage == "recovery" && !directory.join("recovery-ok").is_file() {
+        // The shared admission markers decide which modules run at all: a
+        // disabled/removed module and, in recovery, a module PID 1 did not
+        // admit do no work here either, and an admitted module must still be
+        // identifiable.
+        let Some(critical) = admission(&directory, id, recovery)? else {
             continue;
-        }
+        };
         let script = directory.join(format!("{stage}.sh"));
         if !script.exists() {
             continue;
@@ -89,15 +185,16 @@ fn scripts_in(
         } else {
             command.env_remove("ESU_ROM").env_remove("ESU_ROM_NUMBER");
         }
-        if let Err(error) = execute(&mut command, wait)
+        match execute(&mut command, wait)
             .with_context(|| format!("module {id} {stage}: {}", script.display()))
         {
-            if matches!(wait, ScriptWait::Strict) {
-                return Err(error);
-            }
-            // Ordinary KernelSU lifecycle scripts are best effort. A failed
-            // module must not suppress later modules or fail Android init.
-            log::warn!("{error:#}");
+            Ok(()) => {}
+            // Ordinary KernelSU lifecycle scripts are best effort: their
+            // failures must not suppress later modules or fail Android init.
+            // A critical module is the exception, and only in normal Android.
+            // Later detached exits are not observed here.
+            Err(error) if recovery || !critical => log::warn!("{error:#}"),
+            Err(error) => return Err(CriticalModuleError::new(error).into()),
         }
     }
     Ok(())
@@ -120,11 +217,6 @@ fn execute(command: &mut Command, wait: ScriptWait) -> Result<()> {
     let mut child = command.spawn().context("spawn module script")?;
     match wait {
         ScriptWait::Detached => Ok(()),
-        ScriptWait::Strict => {
-            let status = child.wait()?;
-            ensure!(status.success(), "script failed: {status}");
-            Ok(())
-        }
         ScriptWait::Until(deadline) => wait_until(&mut child, deadline),
     }
 }
@@ -163,10 +255,15 @@ mod tests {
     fn script(root: &Path, id: &str, stage: &str, body: &str) {
         let module = root.join(id);
         fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("module.prop"), format!("id={id}\n")).unwrap();
         fs::write(module.join(format!("{stage}.sh")), body).unwrap();
     }
 
-    fn run(root: &Path, stage: &str, timeout: Duration) -> Result<()> {
+    fn mark(root: &Path, id: &str, name: &str) {
+        fs::write(root.join(id).join(name), b"").unwrap();
+    }
+
+    fn run(root: &Path, stage: &str, timeout: Duration, recovery: bool) -> Result<()> {
         scripts_in(
             root,
             &["first".into(), "second".into()],
@@ -174,6 +271,7 @@ mod tests {
             &["/bin/sh"],
             Some(("rom2", 2)),
             timeout,
+            recovery,
         )
     }
 
@@ -191,18 +289,112 @@ mod tests {
     }
 
     #[test]
-    fn early_failure_is_fatal_and_does_not_run_later_modules() {
+    fn optional_failure_is_best_effort_and_later_modules_run() {
         let root = tempfile::tempdir().unwrap();
         script(root.path(), "first", "early", "exit 17\n");
+        script(root.path(), "second", "early", "echo ran > ../later\n");
+        run(root.path(), "early", Duration::from_secs(1), false).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("later")).unwrap(),
+            "ran\n"
+        );
+    }
+
+    #[test]
+    fn critical_failure_stops_normal_android_and_classifies_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        script(root.path(), "first", "early", "exit 17\n");
+        script(root.path(), "second", "early", "echo ran > ../later\n");
+        mark(root.path(), "first", "critical");
+        let error = run(root.path(), "early", Duration::from_secs(1), false).unwrap_err();
+        assert!(is_critical_failure(&error));
+        assert!(is_critical_failure(&error.context("lifecycle caller")));
+        assert!(!root.path().join("later").exists());
+    }
+
+    #[test]
+    fn recovery_logs_critical_failures_and_keeps_running_modules() {
+        let root = tempfile::tempdir().unwrap();
+        script(root.path(), "first", "early", "exit 17\n");
+        script(root.path(), "second", "early", "echo ran > ../later\n");
+        for id in ["first", "second"] {
+            mark(root.path(), id, "recovery-ok");
+        }
+        mark(root.path(), "first", "critical");
+        run(root.path(), "early", Duration::from_secs(1), true).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("later")).unwrap(),
+            "ran\n"
+        );
+    }
+
+    #[test]
+    fn an_unidentifiable_module_runs_no_script() {
+        for prop in ["id=other\n", ""] {
+            let root = tempfile::tempdir().unwrap();
+            for id in ["first", "second"] {
+                script(
+                    root.path(),
+                    id,
+                    "early",
+                    &format!("echo {id} > ../{id}-ran\n"),
+                );
+            }
+            fs::write(root.path().join("first/module.prop"), prop).unwrap();
+            // Optional: reported and skipped while the next module still runs.
+            run(root.path(), "early", Duration::from_secs(1), false).unwrap();
+            assert!(!root.path().join("first-ran").exists(), "{prop:?}");
+            assert!(root.path().join("second-ran").exists(), "{prop:?}");
+
+            // Critical: normal Android stops instead.
+            mark(root.path(), "first", "critical");
+            fs::remove_file(root.path().join("second-ran")).unwrap();
+            let error = run(root.path(), "early", Duration::from_secs(1), false).unwrap_err();
+            assert!(is_critical_failure(&error), "{prop:?}");
+            assert!(!root.path().join("first-ran").exists(), "{prop:?}");
+            for id in ["first", "second"] {
+                mark(root.path(), id, "recovery-ok");
+            }
+            run(root.path(), "early", Duration::from_secs(1), true).unwrap();
+            assert!(!root.path().join("first-ran").exists(), "{prop:?}");
+            assert_eq!(await_file(&root.path().join("second-ran")), "second\n");
+        }
+    }
+
+    #[test]
+    fn disable_and_remove_markers_skip_module_scripts() {
+        let root = tempfile::tempdir().unwrap();
+        script(root.path(), "first", "early", "echo first > ../first-ran\n");
         script(
             root.path(),
             "second",
             "early",
-            "echo unexpected > ../later\n",
+            "echo second > ../second-ran\n",
         );
-        let error = run(root.path(), "early", Duration::from_secs(1)).unwrap_err();
-        assert!(format!("{error:#}").contains("script failed"));
-        assert!(!root.path().join("later").exists());
+        mark(root.path(), "first", "disable");
+        mark(root.path(), "second", "remove");
+        run(root.path(), "early", Duration::from_secs(1), false).unwrap();
+        assert!(!root.path().join("first-ran").exists());
+        assert!(!root.path().join("second-ran").exists());
+    }
+
+    #[test]
+    fn recovery_only_runs_modules_admitted_by_recovery_ok() {
+        let root = tempfile::tempdir().unwrap();
+        script(root.path(), "first", "early", "echo first > ../first-ran\n");
+        script(
+            root.path(),
+            "second",
+            "early",
+            "echo second > ../second-ran\n",
+        );
+        mark(root.path(), "second", "recovery-ok");
+        run(root.path(), "early", Duration::from_secs(1), true).unwrap();
+        assert!(!root.path().join("first-ran").exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join("second-ran")).unwrap(),
+            "second\n"
+        );
     }
 
     #[test]
@@ -216,7 +408,7 @@ mod tests {
             "echo \"$ESU_MODULE:$ESU_ROM:$ESU_ROM_NUMBER\" >> ../later\n",
         );
         for _ in 0..2 {
-            run(root.path(), "post-fs-data", Duration::from_secs(1)).unwrap();
+            run(root.path(), "post-fs-data", Duration::from_secs(1), false).unwrap();
         }
         assert_eq!(
             fs::read_to_string(root.path().join("later")).unwrap(),
@@ -225,34 +417,32 @@ mod tests {
     }
 
     #[test]
-    fn post_fs_data_has_one_bounded_stage_deadline() {
-        let root = tempfile::tempdir().unwrap();
-        script(
-            root.path(),
-            "first",
-            "post-fs-data",
-            "echo $$ > ../pid\nwhile :; do sleep 1; done\n",
-        );
-        script(
-            root.path(),
-            "second",
-            "post-fs-data",
-            "echo unexpected > ../later\n",
-        );
-        let start = Instant::now();
-        run(root.path(), "post-fs-data", Duration::from_millis(200)).unwrap();
-        assert!(start.elapsed() < Duration::from_secs(2));
-        assert!(!root.path().join("later").exists());
-        let pid: i32 = await_file(&root.path().join("pid")).trim().parse().unwrap();
-        // The timed-out shell has been killed and reaped, not merely abandoned.
-        assert_eq!(
-            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
-            -1
-        );
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ECHILD)
-        );
+    fn early_and_post_fs_data_share_one_bounded_stage_deadline() {
+        for stage in ["early", "post-fs-data"] {
+            let root = tempfile::tempdir().unwrap();
+            script(
+                root.path(),
+                "first",
+                stage,
+                "echo $$ > ../pid\nwhile :; do sleep 1; done\n",
+            );
+            script(root.path(), "second", stage, "echo unexpected > ../later\n");
+            let start = Instant::now();
+            run(root.path(), stage, Duration::from_millis(200), false).unwrap();
+            assert!(start.elapsed() < Duration::from_secs(2), "{stage}");
+            assert!(!root.path().join("later").exists(), "{stage}");
+            let pid: i32 = await_file(&root.path().join("pid")).trim().parse().unwrap();
+            // The timed-out shell has been killed and reaped, not abandoned.
+            // SAFETY: this is our fixture child's PID; a null status pointer is permitted.
+            assert_eq!(
+                unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+        }
     }
 
     #[test]
@@ -272,14 +462,16 @@ mod tests {
                 "echo $$ > ../second-pid\necho launched > ../later\n",
             );
             let start = Instant::now();
-            run(root.path(), stage, Duration::from_millis(50)).unwrap();
+            run(root.path(), stage, Duration::from_millis(50), false).unwrap();
             assert!(start.elapsed() < Duration::from_millis(750));
             let pid: i32 = await_file(&root.path().join("pid")).trim().parse().unwrap();
+            // SAFETY: getpgid takes only the fixture child's process ID.
             assert_eq!(unsafe { libc::getpgid(pid) }, pid);
             assert_eq!(await_file(&root.path().join("later")), "launched\n");
             assert_eq!(await_file(&root.path().join("finished")), "finished\n");
             for name in ["pid", "second-pid"] {
                 let pid: i32 = await_file(&root.path().join(name)).trim().parse().unwrap();
+                // SAFETY: these are our child PIDs; waitpid permits a null status pointer.
                 assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
             }
         }

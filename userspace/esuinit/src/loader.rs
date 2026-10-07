@@ -245,13 +245,6 @@ impl VendorModules {
         Ok(())
     }
 
-    /// Whether `modules.dep` declares this module, and therefore its path and
-    /// its hard dependencies. A targeted preload requires this, so a spelling
-    /// that resolves to nothing cannot silently load an empty closure.
-    fn declared_by_dep(&self, name: &str) -> bool {
-        self.dependencies.contains_key(name)
-    }
-
     fn parse(
         list: &str,
         dep: &str,
@@ -453,11 +446,6 @@ impl VendorModules {
     }
 }
 
-/// The vendor module whose dependency closure carries the Qualcomm APSS
-/// minidump transport. Loading it alone is not enough: its closure is what
-/// registers the minidump, DMA-heap, SCM, SMEM and Gunyah pieces.
-const APSS_MINIDUMP_MODULE: &str = "qcom-dload-mode.ko";
-
 /// Read one metadata file inside the selected module directory.
 fn read_vendor_metadata(base: &Path, name: &str, optional: bool) -> Result<String, Failure> {
     let path = base.join(name);
@@ -503,7 +491,7 @@ fn vendor_module_source(
 /// What one `finit_module` result means for the load sequence.
 ///
 /// A module the kernel already has is success, not a duplicate-load failure,
-/// so the targeted APSS preload and the later full vendor load compose.
+/// exactly as Android's libmodprobe treats an already loaded module.
 fn finit_outcome(result: Result<(), Errno>) -> Result<bool, Errno> {
     match result {
         Ok(()) => Ok(true),
@@ -579,52 +567,6 @@ pub fn load_vendor_modules() -> Result<(), Failure> {
     )?;
 
     modules.load(|name, module_path, params| load_vendor_module(&base, name, module_path, params))
-}
-
-/// Load the dependency closure of the APSS minidump transport module.
-///
-/// This is the opt-in path only: the caller has already confirmed the exact
-/// `androidboot.esu.apss_minidump=true`. It reuses the same module
-/// directory selection, `modules.dep` resolution, dependency ordering and
-/// `finit_module` call as the full vendor preload, so that preload continues
-/// over modules this one already inserted instead of failing on them.
-pub fn preload_apss_minidump() -> Result<(), Failure> {
-    let cmdline = read_metadata(Path::new("/proc/cmdline"), false)?.unwrap_or_default();
-    let bootconfig = read_metadata(Path::new("/proc/bootconfig"), true)?.unwrap_or_default();
-    let mode = classify_boot_mode(
-        &bootconfig,
-        &cmdline,
-        Path::new(RECOVERY_EXECUTABLE).exists(),
-    );
-    let release =
-        read_metadata(Path::new("/proc/sys/kernel/osrelease"), false)?.unwrap_or_default();
-
-    let (base, _list_name) = vendor_module_source(&release, mode)?.ok_or_else(|| {
-        vendor_error(format!(
-            "no vendor module directory for the {APSS_MINIDUMP_MODULE} preload"
-        ))
-    })?;
-
-    let modules = VendorModules::parse(
-        APSS_MINIDUMP_MODULE,
-        &read_vendor_metadata(&base, "modules.dep", true)?,
-        &read_vendor_metadata(&base, "modules.softdep", true)?,
-        &read_vendor_metadata(&base, "modules.options", true)?,
-        &cmdline,
-    )?;
-
-    let target = module_name(APSS_MINIDUMP_MODULE);
-    if !modules.declared_by_dep(&target) {
-        return Err(vendor_error(format!(
-            "{APSS_MINIDUMP_MODULE} is not declared by modules.dep"
-        )));
-    }
-
-    modules
-        .load(|name, module_path, params| load_vendor_module(&base, name, module_path, params))?;
-
-    log::info!("APSS minidump transport {target} and its dependency closure are loaded");
-    Ok(())
 }
 
 /// Resolve kernel modules from the ramdisk root and helpers from the ESP,
@@ -860,139 +802,11 @@ mod tests {
         loaded.iter().map(|(name, _, _)| name.as_str()).collect()
     }
 
-    /// A trimmed but real-shaped `modules.dep` for the APSS transport closure:
-    /// the qcom dload-mode transport transitively needs minidump, the DMA heap
-    /// and mem-buf device, SCM, the debug symbol table and SMEM.
-    const APSS_DEP: &str = concat!(
-        "kernel/qcom_dma_heaps.ko:\n",
-        "kernel/mem_buf_dev.ko: kernel/qcom_dma_heaps.ko\n",
-        "kernel/qcom-scm.ko:\n",
-        "kernel/debug_symbol.ko:\n",
-        "kernel/smem.ko:\n",
-        "kernel/minidump.ko: kernel/debug_symbol.ko\n",
-        "kernel/qcom-dload-mode.ko: kernel/minidump.ko kernel/qcom-scm.ko ",
-        "kernel/mem_buf_dev.ko kernel/smem.ko\n",
-        "kernel/unrelated.ko: kernel/qcom_dma_heaps.ko\n",
-    );
-
-    /// The full Android list: every module, in `modules.dep` order.
-    const APSS_LIST: &str = concat!(
-        "kernel/qcom_dma_heaps.ko\n",
-        "kernel/mem_buf_dev.ko\n",
-        "kernel/qcom-scm.ko\n",
-        "kernel/debug_symbol.ko\n",
-        "kernel/smem.ko\n",
-        "kernel/minidump.ko\n",
-        "kernel/qcom-dload-mode.ko\n",
-        "kernel/unrelated.ko\n",
-    );
-
-    #[test]
-    fn a_targeted_preload_loads_only_the_transport_closure() {
-        let modules = VendorModules::parse(APSS_MINIDUMP_MODULE, APSS_DEP, "", "", "").unwrap();
-        assert!(modules.declared_by_dep(&module_name(APSS_MINIDUMP_MODULE)));
-
-        let loaded = order(&modules).unwrap();
-
-        assert_eq!(
-            names(&loaded),
-            [
-                "debug_symbol",
-                "minidump",
-                "qcom_scm",
-                "qcom_dma_heaps",
-                "mem_buf_dev",
-                "smem",
-                "qcom_dload_mode",
-            ]
-        );
-        assert!(!names(&loaded).contains(&"unrelated"));
-    }
-
-    #[test]
-    fn a_targeted_preload_requires_the_module_to_be_declared() {
-        let modules =
-            VendorModules::parse(APSS_MINIDUMP_MODULE, "kernel/other.ko:\n", "", "", "").unwrap();
-        assert!(!modules.declared_by_dep(&module_name(APSS_MINIDUMP_MODULE)));
-
-        // A malformed dependency database is refused before any load.
-        assert!(
-            VendorModules::parse(
-                APSS_MINIDUMP_MODULE,
-                "kernel/a.ko kernel/b.ko\n",
-                "",
-                "",
-                ""
-            )
-            .is_err()
-        );
-        // A closure whose dependency has no path is fatal, not a partial load.
-        let incomplete = VendorModules::parse(
-            APSS_MINIDUMP_MODULE,
-            "kernel/qcom-dload-mode.ko: kernel/minidump.ko\n",
-            "",
-            "",
-            "",
-        )
-        .unwrap();
-        assert!(order(&incomplete).is_err());
-    }
-
     #[test]
     fn an_already_loaded_module_is_not_a_duplicate_load_failure() {
         assert_eq!(finit_outcome(Ok(())), Ok(true));
         assert_eq!(finit_outcome(Err(Errno::EXIST)), Ok(false));
         assert_eq!(finit_outcome(Err(Errno::INVAL)), Err(Errno::INVAL));
-    }
-
-    #[test]
-    fn a_targeted_preload_then_the_full_load_composes() {
-        // Device model: `finit_module` reports EEXIST for a module the kernel
-        // already holds, exactly as the real one does.
-        fn device(
-            inserted: &mut BTreeSet<String>,
-            calls: &mut Vec<(String, bool)>,
-            name: &str,
-        ) -> Result<(), Failure> {
-            let outcome = if inserted.contains(name) {
-                finit_outcome(Err(Errno::EXIST))
-            } else {
-                inserted.insert(name.to_owned());
-                finit_outcome(Ok(()))
-            };
-            let loaded_now = outcome.map_err(|error| {
-                Failure::new(Stage::ModuleLoad, "VendorModuleLoad", error.to_string())
-            })?;
-            calls.push((name.to_owned(), loaded_now));
-            Ok(())
-        }
-
-        let mut inserted = BTreeSet::new();
-        let targeted = VendorModules::parse(APSS_MINIDUMP_MODULE, APSS_DEP, "", "", "").unwrap();
-        let mut preload_calls = Vec::new();
-        targeted
-            .load(|name, _, _| device(&mut inserted, &mut preload_calls, name))
-            .unwrap();
-
-        let full = VendorModules::parse(APSS_LIST, APSS_DEP, "", "", "").unwrap();
-        let mut full_calls = Vec::new();
-        full.load(|name, _, _| device(&mut inserted, &mut full_calls, name))
-            .unwrap();
-
-        // Every module the preload inserted is reported already loaded by the
-        // full pass, and the full pass still loads the rest.
-        let preloaded: Vec<&str> = preload_calls
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
-        assert!(
-            full_calls
-                .iter()
-                .filter(|(name, _)| preloaded.contains(&name.as_str()))
-                .all(|(_, loaded_now)| !loaded_now)
-        );
-        assert!(full_calls.contains(&("unrelated".to_owned(), true)));
-        assert_eq!(preloaded.len(), 7);
     }
 
     #[test]
@@ -1094,42 +908,24 @@ mod tests {
     fn malformed_softdep_lines_are_skipped_and_the_closure_still_loads() {
         // The vendor set really ships this shape: a glued `pre:<dep>` marker,
         // three tokens where Android's libmodprobe wants at least four. Android
-        // warns and keeps loading, so the preload must too, including when the
-        // malformed line names the transport itself.
+        // warns and keeps loading, so the vendor load must too.
+        let dep = "kernel/a.ko: kernel/b.ko\nkernel/b.ko:\nkernel/s.ko:\n";
         let softdep = concat!(
-            "softdep oplus_bsp_uff_fp_driver pre:mtk_disp_notify\n",
+            "softdep a pre:b\n",
             "require unrelated\n",
-            "softdep qcom_dload_mode pre:minidump\n",
-            "softdep unrelated post: smem\n",
-            "softdep smem pre: debug_symbol\n",
+            "softdep a pre: s\n",
+            "softdep a post: b\n",
         );
 
-        let modules =
-            VendorModules::parse(APSS_MINIDUMP_MODULE, APSS_DEP, softdep, "", "").unwrap();
+        let modules = VendorModules::parse("kernel/a.ko\n", dep, softdep, "", "").unwrap();
 
-        // Malformed lines are skipped whole, whether or not they name the target.
-        assert!(!modules.pre_softdeps.contains_key("oplus_bsp_uff_fp_driver"));
-        assert!(!modules.pre_softdeps.contains_key("qcom_dload_mode"));
-        // A valid pre-softdep survives, and a post-softdep is never loaded here.
-        assert_eq!(
-            modules.pre_softdeps.get("smem"),
-            Some(&vec!["debug_symbol".to_owned()])
-        );
-        assert!(!modules.pre_softdeps.contains_key("unrelated"));
+        // Malformed lines are skipped whole, while the valid pre-softdep
+        // survives and a post-softdep is never treated as one.
+        assert_eq!(modules.pre_softdeps.get("a"), Some(&vec!["s".to_owned()]));
 
-        // The transport closure still loads, in dependency order.
-        assert_eq!(
-            names(&order(&modules).unwrap()),
-            [
-                "debug_symbol",
-                "minidump",
-                "qcom_scm",
-                "qcom_dma_heaps",
-                "mem_buf_dev",
-                "smem",
-                "qcom_dload_mode",
-            ]
-        );
+        // The hard closure still loads, with the pre-softdep after the hard
+        // dependencies and before the module itself.
+        assert_eq!(names(&order(&modules).unwrap()), ["b", "s", "a"]);
     }
 
     #[test]

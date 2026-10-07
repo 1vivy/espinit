@@ -2,34 +2,39 @@
 
 The Android binary is generic KernelSU lifecycle/policy support without the manager. esuinit detaches its ESP and executable tmpfs before handing off to stock init. After the root switch, init recreates the contextless ESP with esuinit's selected device identity and RO/RW mode, copies `esu/bin` onto fresh `/debug_ramdisk/esu` tmpfs, and relabels it with stock toybox chcon in the esu domain. esud executes from `/debug_ramdisk/esu/bin/esud`; before running helpers or module scripts it verifies every staging label is exactly `esu_file` and the ESP root is exactly `vfat`. It creates a per-mount read-only, nosuid/nodev/noexec bind at `/dev/esp`; module home remains `/dev/esp/esu/modules`. Init also owns efivarfs. Writable persistent state is limited to `/data/adb/esu/log`, created at post-fs-data.
 
-Android commands: `early`, `post-fs`, `post-fs-data`, `services`, `boot-completed`, `recovery`, `sepolicy`, `insmod`, `unload`, `resetprop`, `core set-boot-mode`, `platform reload`, and the internal boot watchdog. The executable also recognizes the `resetprop` invocation name. There is no install/uninstall, manager, module mutation, metamodule or profile command.
+Android commands: `early`, `post-fs`, `post-fs-data`, `services`, `boot-completed`, `recovery`, `sepolicy`, `insmod`, `unload`, `resetprop`, `core set-boot-mode`, and `platform reload`. The executable also recognizes the `resetprop` invocation name. There is no install/uninstall, manager, module mutation, metamodule or profile command.
 
-Stages use the core boot mode rather than a manager/safe-mode/one-shot gate. They can be re-run by root. `platform reload` reapplies strict policy and mounts missing overlays, without executing scripts. The core RC publishes the `on init` path in recovery too, so a managed recovery or fastbootd launch runs the same `early` stage; only recovery's RC variant drops `reboot_on_failure`, and init logs a failed service instead of restarting the rescue path. `post-fs-data` and `boot-completed` stay defined but never fire where recovery has no `/data` root or completed boot. Identity and ROM number come from bdsvars through `esu_platform::efivars`; a selected ROM with an invalid Slot fails, rather than defaulting to number 1. Configuration is `/dev/esp/esu/roms/<id>.toml`.
+Stages respect the core boot mode and upstream KernelSU safe mode (Android safe-mode properties or the kernel volume-down ioctl). They can be re-run by root. Safe mode skips module work without writing flags onto the ESP. `platform reload` reapplies admitted policies and mounts missing overlays without executing scripts. The same upstream-style plain `exec` RC callbacks serve Android and recovery; no callback has `reboot_on_failure`. Recovery therefore remains available after second-stage module errors. `post-fs-data` and `boot-completed` stay defined but never fire where recovery has no `/data` root or completed boot. Identity and ROM number come from bdsvars through `esu_platform::efivars`; an invalid selected Slot is a required-core error, not a default to ROM 1. Configuration is `/dev/esp/esu/roms/<id>.toml`.
 
-`early.sh` is synchronous and strict: spawn or exit failure aborts the early
-stage. Post-fs, post-fs-data and recovery scripts share a 35-second deadline
-per stage; failures are logged and later modules still run while time remains.
-Recovery scripts are per-module opt-in through a `recovery-ok` regular file,
-the same marker PID 1 uses before publishing `initrc/*.rc` fragments in
-recovery. A timed-out script process group is killed and its shell reaped. `service.sh`
-and `boot-completed.sh` are launched in module order without waiting, so daemon
-loops cannot block Android init. Scripts have separate process groups and
-escape init's service cgroups before exec; background jobs from a successful
-script survive the stage. Bootlog captures use the same cgroup escape.
+`early.sh`, post-fs, post-fs-data and recovery scripts share a 35-second deadline
+per stage. Optional spawn, exit and timeout failures are logged; later modules
+run while time remains. An admitted module's regular `critical` marker opts
+into stopping normal Android on observed failure. Recovery logs critical
+module errors and continues. PID1 critical failures still block handoff in both
+modes, independently of this second-stage rescue policy.
+
+Recovery admits only modules with `recovery-ok`, including their scripts,
+policies and overlays. `disable` and `remove` skip a module entirely;
+`skip_mount` skips only its partition overlays. A timed-out process group is
+killed and its shell reaped. `service.sh` and `boot-completed.sh` remain
+detached, so their later exit status is not monitored. Scripts have separate
+process groups and escape init's service cgroups before exec; background jobs
+from a successful script survive the stage. Best-effort bootlog captures use
+the same cgroup escape; logging failure never aborts a stage.
 
 ## ESP modules
 
-Manifest `modules_order` defines policy/script ordering and overlay precedence (first is highest). Modules use `module.prop`, optional `sepolicy.rule`, `attrs`, lifecycle scripts, `initrc/*.rc`, and partition trees `system`, `vendor`, `product`, `system_ext`, `odm`. There is no remapping of `system/vendor`.
+Manifest `modules_order` defines policy/script ordering and overlay precedence (first is highest). Modules use `module.prop`, optional `sepolicy.rule`, `attrs`, lifecycle scripts, `initrc/*.rc`, and partition trees `system`, `vendor`, `product`, `system_ext`, `odm`. There is no remapping of `system/vendor`. Modules are optional unless marked `critical`; supplied `thin` and `fw-views` are critical, while `boot-hal` and `avb-graft` are optional. Final required storage and identity checks are not module policy and cannot be disabled with a flag.
 
-Early processing applies policies strictly, stages trees into tmpfs `/dev/esu/<id>/<partition>` (private root 0700, no nosuid), mounts read-only lowerdir-only overlays, executes every `early.sh` through ESP BusyBox, then runs ROM isolation. In recovery only partitions that are already mount points are overlaid, so a partition recovery mounts later is not blocked, and the lab boot watchdog is armed only in Android because recovery never sets `sys.boot_completed`. Attr lines are:
+Early processing applies admitted policies, stages usable trees into tmpfs `/dev/esu/<id>/<partition>` (private root 0700, no nosuid), mounts read-only lowerdir-only overlays, runs `early.sh` through staged BusyBox, then applies required ROM isolation. Malformed policy, failed staging, missing labels and overlay failures are reported under the module's optional/critical policy; no guessed-label or bind fallback is introduced. Recovery overlays only partitions already mounted. There is no product boot watchdog or forced-crash path. Attr lines are:
 
 ```text
 /vendor/bin/hw/android.hardware.boot-service.qti 0755 0 2000 u:object_r:hal_bootctl_default_exec:s0
 ```
 
-Directory attrs may name `/vendor` itself. Every staged inode takes explicit attrs or existing target lstat/SELinux xattr metadata. Missing metadata fails `OverlayAttrsMissing`; vfat labels/modes are never inherited. No bind fallback is implemented without device overlayfs EINVAL evidence. Module source symlinks and special inodes are not supported by the host package contract.
+Directory attrs may name `/vendor` itself. Every staged inode takes explicit attrs or existing target lstat/SELinux xattr metadata. Missing metadata is `OverlayAttrsMissing`; vfat labels/modes are never inherited. The affected optional layer is skipped rather than aborting every other module. Module source symlinks and special inodes are not supported by the host package contract.
 
-The Boot HAL's ordinary module is generated from its built executable using the checked-in `esu/modules/boot-hal/{module.prop,attrs,sepolicy.rule}`. It replaces the fixed stock QTI executable without changing the service name or SELinux transition.
+When supplied, the optional Boot HAL module is generated from its built executable and checked-in `esu/modules/boot-hal/{module.prop,attrs,sepolicy.rule}`. It replaces the fixed stock QTI executable without changing the service name or SELinux transition. The Cuttlefish assembler also accepts payloads without a Boot HAL.
 
 ## Linux host boot-patch
 
@@ -48,6 +53,11 @@ esud boot-patch \
 ```
 
 `--payload` is the contents of ESP `/esu`, not the ESP root. It contains strict schema-1 `manifest.toml`, `roms/<id>.toml`, `bin/esud`, static `bin/busybox`, static `bin/thin-activate`, any additional script helpers, and the declared module directories. The ROM's required ID must match the filename. There are no payload generation pins, binary generation notes or `[platform]` package manifests. Number-dependent runtime ROM constraints remain the responsibility of the authoritative Slot record.
+
+The packager reports invalid optional module metadata/policy without treating
+it as a core payload failure; admitted critical modules remain strict.
+`disable` and `remove` skip module validation. Supplied executable architecture,
+path containment and input integrity checks remain mandatory.
 
 `--modules-dir` must contain `kernelesp.ko`, `thin.ko`, `gpt.ko`, `efivarfs.ko` and each corresponding schema-2 `.ko.compat.json`. All four must be declared as `lib/<name>.ko`. The embedded unmodified `scripts/kmi_modules.py verify` runs with Python 3.11+ against explicit `--kmi-out`; stale receipts, absent imports and CRC mismatches fail closed. Compatibility receipts are inputs, not ESP kernel modules. Any `.ko` anywhere inside the payload is rejected.
 
@@ -87,6 +97,6 @@ Generated `esu/build-id`, takeover archives, patched image and output receipt ar
 
 ## Verification
 
-Host tests construct synthetic ELF, KMI receipts and stock init_boot fixtures but exercise the real boot-patch path and embedded verifier, then inspect output ESP files, receipt hashes and decoded newc members. They also cover deterministic build-ID framing, rejected inputs, preserved stock init, malformed strict policy and overlay attr parsing/failure propagation. They do not establish real-kernel compatibility or device boot success.
+Host tests construct synthetic ELF, KMI receipts and stock init_boot fixtures but exercise the real boot-patch path and embedded verifier, then inspect output ESP files, receipt hashes and decoded newc members. They cover deterministic build-ID framing, rejected unsafe inputs, preserved stock init, module admission/escalation, and strict policy/attribute parsing without imposing blanket boot failure on optional modules. They do not establish real-kernel compatibility or device boot success.
 
 Run workspace fmt/clippy/tests, Android esud clippy with NDK r29, `python3 -m unittest tools.cuttlefish.test_assemble`, real module KMI verification, and separate device gates before deployment.

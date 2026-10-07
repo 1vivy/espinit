@@ -108,14 +108,12 @@ fn check_staging_mount(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fail before scripts, helpers or overlays when policy or recreated mounts differ.
-/// The Android early service's reboot_on_failure makes a failed gate fatal to
-/// boot; recovery's RC omits it and init logs the failure.
+/// Refuse an unsafe module view before running scripts, helpers or overlays.
 pub fn prepare() -> Result<()> {
     let text = fs::read_to_string("/proc/self/mountinfo")?;
     check_staging_mount(&text)?;
     check_staging(Path::new(EXECUTABLE_ROOT))?;
-    for binary in ["esud", "busybox", "thin-activate"] {
+    for binary in ["esud", "busybox"] {
         ensure!(
             fs::symlink_metadata(Path::new(EXECUTABLE_BIN).join(binary))?.is_file(),
             "staged {binary} missing"

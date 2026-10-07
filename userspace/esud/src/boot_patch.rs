@@ -374,19 +374,6 @@ fn validate_payload(
             "payload binary is not executable: {path}"
         );
     }
-    if manifest.modules_order.iter().any(|id| id == "avb-graft") {
-        check_binary(
-            &payload.join("bin/avb-graft"),
-            machine,
-            Linkage::StaticRequired,
-        )?;
-        ensure!(
-            files
-                .get("bin/avb-graft")
-                .is_some_and(|file| file.mode == 0o755),
-            "avb-graft module requires executable bin/avb-graft"
-        );
-    }
     for path in files.keys().filter(|path| path.starts_with("bin/")) {
         let bytes = read_bounded(platform::open_file(&root, path)?, MAX_BINARY)?;
         if bytes.starts_with(b"\x7fELF") {
@@ -402,12 +389,35 @@ fn validate_payload(
         }
     }
     for id in &manifest.modules_order {
-        let path = format!("modules/{id}/module.prop");
-        let prop = fs::read_to_string(payload.join(&path))?;
-        ensure!(
-            prop.lines().any(|line| line == format!("id={id}")),
-            "module.prop id mismatch: {id}"
-        );
+        let directory = payload.join("modules").join(id);
+        let esuinit::platform::ModulePolicy::Admitted { critical } =
+            esuinit::platform::module_policy(&directory, false)
+                .map_err(|failure| anyhow::anyhow!("{}: {}", failure.error, failure.detail))?
+        else {
+            continue;
+        };
+        let metadata = (|| -> Result<()> {
+            let prop = fs::read_to_string(directory.join("module.prop"))?;
+            ensure!(
+                prop.lines().any(|line| line == format!("id={id}")),
+                "module.prop id mismatch: {id}"
+            );
+            let attrs = directory.join("attrs");
+            if attrs.exists() {
+                crate::overlay::parse_attrs(&fs::read_to_string(attrs)?)?;
+            }
+            let policy = directory.join("sepolicy.rule");
+            if policy.exists() {
+                crate::sepolicy::check_rule(&fs::read_to_string(policy)?)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = metadata {
+            if critical {
+                return Err(error.context(format!("critical module {id}")));
+            }
+            eprintln!("warning: optional module {id}: {error:#}");
+        }
         for partition in crate::overlay::PARTITIONS {
             let prefix = format!("modules/{id}/{partition}/");
             for path in files.keys().filter(|path| path.starts_with(&prefix)) {
@@ -416,14 +426,6 @@ fn validate_payload(
                     executable(&bytes, Some(machine), Linkage::DynamicAllowed)?;
                 }
             }
-        }
-        let attrs = payload.join(format!("modules/{id}/attrs"));
-        if attrs.exists() {
-            crate::overlay::parse_attrs(&fs::read_to_string(attrs)?)?;
-        }
-        let policy = payload.join(format!("modules/{id}/sepolicy.rule"));
-        if policy.exists() {
-            crate::sepolicy::check_rule(&fs::read_to_string(policy)?)?;
         }
     }
     let prefix = format!("{}/", manifest.rom);

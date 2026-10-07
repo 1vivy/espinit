@@ -42,7 +42,7 @@ PATHS = (
     "avb_key",
     "esuinit",
     "esud",
-    "boot_hal",
+    "boot_hal",  # optional: omit to assemble the payload without the Boot HAL module
     "busybox",
     "thin_activate",
     "fw_views",
@@ -58,6 +58,7 @@ BINARIES = (
     ("esud", "bin/esud"),
 )
 MODULES = (("core_module", "kernelesp"), ("thin_module", "thin"), ("gpt_module", "gpt"), ("efivarfs_module", "efivarfs"))
+GENERATED_MODULE_FILES = ("pid1.sh", "pid1-recovery.sh")
 ESP_DIRECTORIES = (
     "esu",
     "esu/bin",
@@ -65,11 +66,13 @@ ESP_DIRECTORIES = (
     "esu/modules",
     "esu/modules/thin",
     "esu/modules/fw-views",
+    "esu/receipts",
+)
+BOOT_HAL_DIRECTORIES = (
     "esu/modules/boot-hal",
     "esu/modules/boot-hal/vendor",
     "esu/modules/boot-hal/vendor/bin",
     "esu/modules/boot-hal/vendor/bin/hw",
-    "esu/receipts",
 )
 EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
 FW_EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec fw-views\n"
@@ -89,7 +92,7 @@ def run(arguments: list[str | Path], *, cwd: Path | None = None, data: bytes | N
     return completed.stdout
 
 
-def configurations(metadata_filesystem: str, rom_id: str) -> tuple[str, str]:
+def configurations(metadata_filesystem: str, rom_id: str, *, boot_hal: bool = False) -> tuple[str, str]:
     """Render the manifest and the structurally valid placeholder ROM config."""
     if metadata_filesystem not in ("ext4", "f2fs"):
         raise ValueError("metadata filesystem must be explicitly ext4 or f2fs")
@@ -97,7 +100,10 @@ def configurations(metadata_filesystem: str, rom_id: str) -> tuple[str, str]:
         raise ValueError("ROM ID must be 1..59 ASCII letters/digits plus . _ -, excluding . and ..")
 
     head = 'schema_version = 1\n'
-    manifest = head + 'rom = "roms"\nmodules_order = ["boot-hal", "thin", "fw-views"]\n'
+    order = ["thin", "fw-views"]
+    if boot_hal:
+        order.insert(0, "boot-hal")
+    manifest = head + f'rom = "roms"\nmodules_order = {json.dumps(order)}\n'
     for name, path in (
         ("kernelesp", "lib/kernelesp.ko"),
         ("thin", "lib/thin.ko"),
@@ -312,15 +318,31 @@ def esp_image_size(content: int, requested_mib: int | None) -> int:
     return max(DEFAULT_ESP_MIB * 1024 * 1024, -(-needed // (1024 * 1024)) * 1024 * 1024)
 
 
+def module_metadata(module: str) -> list[Path]:
+    """Regular files the module ships at its root, in name order.
+
+    A flag such as `critical`, `disable`, `remove` or `skip_mount` travels
+    because the file's presence is the flag; the assembler generates the stage
+    scripts itself, so those are not copied from the module directory.
+    """
+    directory = REPOSITORY / "esu/modules" / module
+    return sorted(
+        (path for path in directory.iterdir() if path.is_file() and path.name not in GENERATED_MODULE_FILES),
+        key=lambda path: path.name,
+    )
+
+
 def platform_files(sources: dict[str, Path], tree: Path) -> list[tuple[Path, str, int]]:
-    """Assemble the ordinary KernelSU Boot HAL module from its built binary."""
-    files = []
-    directory = tree / "modules/boot-hal/vendor/bin/hw"
-    directory.mkdir(parents=True)
-    for module in ("boot-hal", "thin", "fw-views"):
-        for name in (("module.prop", "attrs", "sepolicy.rule") if module == "boot-hal" else ("module.prop", "recovery-ok")):
-            files.append((REPOSITORY / "esu/modules" / module / name, f"esu/modules/{module}/{name}", 0o644))
-    files.append((sources["boot_hal"], "esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti", 0o755))
+    """Package thin/fw-views and, when supplied, the ordinary Boot HAL module."""
+    files: list[tuple[Path, str, int]] = []
+    modules = ["thin", "fw-views"]
+    if "boot_hal" in sources:
+        (tree / "modules/boot-hal/vendor/bin/hw").mkdir(parents=True)
+        modules.insert(0, "boot-hal")
+        files.append((sources["boot_hal"], "esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti", 0o755))
+    for module in modules:
+        for path in module_metadata(module):
+            files.append((path, f"esu/modules/{module}/{path.name}", 0o644))
     return files
 
 
@@ -353,7 +375,8 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
         files.append((sources[key], f"esu/{target}", 0o755))
     files.extend(platform_files(sources, tree))
 
-    missing = [directory for directory in ESP_DIRECTORIES if not (work / directory).is_dir()]
+    directories = ESP_DIRECTORIES + (BOOT_HAL_DIRECTORIES if "boot_hal" in sources else ())
+    missing = [directory for directory in directories if not (work / directory).is_dir()]
     if missing:
         raise ValueError(f"internal error: missing ESP directories {missing}")
 
@@ -365,7 +388,7 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
     # FAT carries no POSIX mode, so executable intent is expressed by the layout
     # and by the initramfs copy of the PID-1 binary.
     run(["mformat", "-i", image, "-v", "ESU", "-N", "45535031", "::"])
-    run(["mmd", "-i", image, *(f"::/{directory}" for directory in ESP_DIRECTORIES)])
+    run(["mmd", "-i", image, *(f"::/{directory}" for directory in directories)])
     for source, target, _ in files:
         run(["mcopy", "-i", image, "-o", source, f"::/{target}"])
 
@@ -380,16 +403,23 @@ def build_identity(sources: dict[str, Path], manifest: str, rom: str) -> tuple[s
     for module, script in (("thin", EARLY_SCRIPT), ("fw-views", FW_EARLY_SCRIPT)):
         for stage in ("pid1.sh", "pid1-recovery.sh"):
             inputs[f"{module}/{stage}"] = hashlib.sha256(script.encode()).hexdigest()
-    for module in ("boot-hal", "thin", "fw-views"):
-        for name in (("module.prop", "attrs", "sepolicy.rule") if module == "boot-hal" else ("module.prop", "recovery-ok")):
-            inputs[f"{module}/{name}"] = hashlib.sha256((REPOSITORY / "esu/modules" / module / name).read_bytes()).hexdigest()
+    modules = ("boot-hal", "thin", "fw-views") if "boot_hal" in sources else ("thin", "fw-views")
+    for module in modules:
+        for path in module_metadata(module):
+            inputs[f"{module}/{path.name}"] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashlib.sha256("".join(value + "\n" for value in sorted(inputs.values())).encode()).hexdigest()[:12], inputs
 
 
 def assemble(arguments: argparse.Namespace) -> None:
-    manifest, rom = configurations(arguments.metadata_filesystem, arguments.rom_id)
-
-    sources = {name: Path(getattr(arguments, name)).resolve(strict=True) for name in PATHS}
+    # --boot-hal is the one optional input: absent means the payload carries no
+    # Boot HAL module at all. Every other PATHS entry is required.
+    boot_hal = getattr(arguments, "boot_hal", None)
+    sources = {
+        name: Path(getattr(arguments, name)).resolve(strict=True)
+        for name in PATHS
+        if name != "boot_hal" or boot_hal is not None
+    }
+    manifest, rom = configurations(arguments.metadata_filesystem, arguments.rom_id, boot_hal="boot_hal" in sources)
     for name, source in sources.items():
         if not source.is_file() or source.stat().st_size == 0:
             raise ValueError(f"--{name.replace('_', '-')}: input must be a nonempty regular file")
@@ -455,7 +485,10 @@ def assemble(arguments: argparse.Namespace) -> None:
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in PATHS:
-        parser.add_argument(f"--{name.replace('_', '-')}", required=True, metavar="FILE")
+        parser.add_argument(
+            f"--{name.replace('_', '-')}", required=name != "boot_hal", metavar="FILE",
+            help="optional Boot HAL replacement binary" if name == "boot_hal" else None,
+        )
     parser.add_argument("--kmi-out", required=True, metavar="PATH")
     parser.add_argument("--metadata-filesystem", required=True, choices=("ext4", "f2fs"))
     parser.add_argument("--rom-id", required=True, metavar="ID")

@@ -31,9 +31,8 @@
 #include "hook/syscall_event_bridge.h"
 #include "runtime/platform_boot.h"
 
-/* Android aborts the boot when esu-early fails; recovery logs it instead. */
-static const char KERNEL_SU_RC[] = ESU_PLATFORM_RC_ANDROID(KSUD_PATH, KERNEL_SU_DOMAIN);
-static const char KERNEL_SU_RC_RECOVERY[] = ESU_PLATFORM_RC_RECOVERY(KSUD_PATH, KERNEL_SU_DOMAIN);
+/* Module failures do not change stock init's execution policy. */
+static const char KERNEL_SU_RC[] = ESU_PLATFORM_RC(KSUD_PATH, KERNEL_SU_DOMAIN);
 
 static int platform_boot_mode;
 static const char *ksu_rc = KERNEL_SU_RC;
@@ -49,13 +48,7 @@ int esu_set_platform_boot_mode(int mode)
     if (previous != ESU_PLATFORM_UNSET && previous != mode)
         return -EPERM;
     WRITE_ONCE(platform_boot_mode, mode);
-    if (mode == ESU_PLATFORM_RECOVERY) {
-        ksu_rc = KERNEL_SU_RC_RECOVERY;
-        ksu_rc_len = sizeof(KERNEL_SU_RC_RECOVERY) - 1;
-    } else {
-        ksu_rc = KERNEL_SU_RC;
-        ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
-    }
+    ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
     return 0;
 }
 
@@ -243,9 +236,8 @@ out:
 }
 
 /* The read proxies append core rc first, then this immutable userspace payload. */
-static int load_module_rc_once(void)
+static void load_module_rc_once(void)
 {
-    int ret = 0;
     int mode;
 
     mutex_lock(&module_rc_lock);
@@ -255,19 +247,10 @@ static int load_module_rc_once(void)
     if (ksu_no_custom_rc || (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)) {
         ksu_rc_len = 0;
         module_rc_len = 0;
-    } else {
-        /* Both Android and recovery publish the core RC: the `on init` path
-         * runs the ESP lifecycle there too, and recovery's RC variant only
-         * drops reboot_on_failure. */
-        if (!module_rc_set) {
-            ret = -ENODATA;
-            goto out;
-        }
     }
     module_rc_loaded = true;
 out:
     mutex_unlock(&module_rc_lock);
-    return ret;
 }
 
 static void free_module_rc(void)
@@ -423,13 +406,10 @@ static bool is_init_rc(struct file *fp)
 static int ksu_install_rc_hook(struct file *file)
 {
     static bool rc_hooked;
-    int ret;
 
     if (!is_init_rc(file) || rc_hooked)
         return 0;
-    ret = load_module_rc_once();
-    if (ret)
-        return ret;
+    load_module_rc_once();
     rc_hooked = true;
     stop_init_rc_hook();
 
@@ -574,11 +554,7 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
         if (is_init_rc(file)) {
             pr_info("stat init.rc");
             is_rc = true;
-            ret = load_module_rc_once();
-            if (ret) {
-                fput(file);
-                return ret;
-            }
+            load_module_rc_once();
         }
         fput(file);
     }

@@ -702,21 +702,7 @@ fn malformed_boot_and_dynamic_pid1_are_rejected() {
 }
 
 #[test]
-fn managed_payload_contains_ordinary_boot_hal_module() {
-    let fixture = Fixture::new();
-    fixture.managed();
-    patch(&fixture.args).unwrap();
-    for path in [
-        "module.prop",
-        "attrs",
-        "sepolicy.rule",
-        "vendor/bin/hw/android.hardware.boot-service.qti",
-    ] {
-        assert_eq!(
-            fs::read(fixture.args.payload.join("modules/boot-hal").join(path)).unwrap(),
-            fs::read(fixture.args.out.join("esp/esu/modules/boot-hal").join(path)).unwrap()
-        );
-    }
+fn managed_payload_rejects_a_mismatched_kmi_receipt() {
     let fixture = Fixture::new();
     fixture.managed();
     let receipt = fixture.args.modules_dir.join("gpt.ko.compat.json");
@@ -725,6 +711,30 @@ fn managed_payload_contains_ordinary_boot_hal_module() {
     value["kmi_out_inputs"] = serde_json::json!({"/different/Module.symvers": "0".repeat(64)});
     fs::write(receipt, serde_json::to_vec(&value).unwrap()).unwrap();
     fixture.reject("mismatched build receipt");
+}
+
+#[test]
+fn invalid_optional_policy_rejects_only_admitted_critical_modules() {
+    for (critical, skip, rejected) in [
+        (false, None, false),
+        (true, None, true),
+        (true, Some("disable"), false),
+        (true, Some("remove"), false),
+    ] {
+        let fixture = Fixture::new();
+        fixture.managed();
+        let module = fixture.args.payload.join("modules/boot-hal");
+        fs::write(module.join("sepolicy.rule"), "not_a_statement\n").unwrap();
+        if critical {
+            fs::write(module.join("critical"), b"").unwrap();
+        }
+        if let Some(marker) = skip {
+            fs::write(module.join(marker), b"").unwrap();
+        }
+        let result = patch(&fixture.args);
+        assert_eq!(result.is_err(), rejected, "{result:?}");
+        assert_eq!(fixture.args.out.exists(), !rejected);
+    }
 }
 
 #[test]

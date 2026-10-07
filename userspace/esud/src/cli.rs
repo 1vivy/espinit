@@ -18,10 +18,6 @@ enum Commands {
     Services,
     BootCompleted,
     Recovery,
-    #[command(hide = true)]
-    BootWatchdog {
-        seconds: u64,
-    },
     Insmod {
         module: PathBuf,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
@@ -82,7 +78,6 @@ pub fn run() -> Result<()> {
         Commands::Services => init_event::on_stage(init_event::Stage::Service),
         Commands::BootCompleted => init_event::on_stage(init_event::Stage::BootCompleted),
         Commands::Recovery => init_event::on_stage(init_event::Stage::Recovery),
-        Commands::BootWatchdog { seconds } => crate::boot_watchdog::run(seconds),
         Commands::Insmod { module, params } => crate::debug::insmod(&module, &params),
         Commands::Unload => crate::unload::unload(),
         Commands::Core {

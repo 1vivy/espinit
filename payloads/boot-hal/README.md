@@ -16,7 +16,7 @@ ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh
 The build uses the explicitly supplied NDK, API 35 and the installed
 `aarch64-linux-android` Rust target. Output:
 `payloads/boot-hal/target/aarch64-linux-android/release/gblbds-boot-hal`.
-The packager installs it under the read-only ESP module tree at
+When supplied, the packager installs it as an optional read-only ESP module at
 `/esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`.
 There is no ELF generation note; `esu/build-id` and cpio `/esu-build-id`
 identify the complete payload, and a mismatch is logged rather than pinned.
@@ -48,6 +48,9 @@ BCB/bootloader-control bytes and valid V2 VAB reserved bytes.
 ## Installation and identity
 
 The ESP `boot-hal/module.prop` declares this ordinary KernelSU module.
+It has no `critical` marker. Its policy or overlay failure is reported without
+making the generic module loader reboot Android; omitting or disabling it
+leaves the stock target executable in place.
 `esu/modules/boot-hal/attrs` supplies mode 0755, root:shell ownership and
 the stock target's `hal_bootctl_default_exec` label. During `esud early`,
 the file is copied to `/dev/esu/boot-hal/vendor/bin/hw/` on tmpfs and a

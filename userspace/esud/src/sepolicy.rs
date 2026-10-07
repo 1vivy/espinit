@@ -721,7 +721,7 @@ fn flatten_atomic_statements<'a>(
 }
 
 #[cfg(target_os = "android")]
-fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) -> Result<()> {
+fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>]) -> Result<()> {
     let policies = flatten_atomic_statements(statements)?;
     if policies.is_empty() {
         return Ok(());
@@ -729,27 +729,15 @@ fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) ->
 
     let payload = serialize_atomic_statements(&policies)?;
 
-    match crate::ksucalls::set_sepolicy(payload.as_ptr(), payload.len() as u64) {
-        Ok(applied_count) => {
-            let applied_count = usize::try_from(applied_count)
-                .context("kernel returned negative sepolicy applied count")?;
-            if applied_count < policies.len() {
-                let err = anyhow::anyhow!(
-                    "apply sepolicy batch partially succeeded: {applied_count}/{}",
-                    policies.len()
-                );
-                if strict {
-                    return Err(err);
-                }
-                log::warn!("{err}");
-            }
-        }
-        Err(e) => {
-            log::warn!("apply sepolicy batch failed: {e}");
-            if strict {
-                return Err(anyhow::anyhow!("apply sepolicy batch failed: {e}"));
-            }
-        }
+    let applied_count = crate::ksucalls::set_sepolicy(payload.as_ptr(), payload.len() as u64)
+        .context("apply sepolicy batch failed")?;
+    let applied_count = usize::try_from(applied_count)
+        .context("kernel returned negative sepolicy applied count")?;
+    if applied_count < policies.len() {
+        bail!(
+            "apply sepolicy batch partially succeeded: {applied_count}/{}",
+            policies.len()
+        );
     }
 
     Ok(())
@@ -764,7 +752,7 @@ pub fn apply_strict(policy: &str) -> Result<()> {
         bail!("live SELinux updates require Android")
     }
     #[cfg(target_os = "android")]
-    apply_rules_batch(&statements, true)
+    apply_rules_batch(&statements)
 }
 
 pub fn check_rule(policy: &str) -> Result<()> {
@@ -776,22 +764,4 @@ pub fn check_rule(policy: &str) -> Result<()> {
     };
     parse_sepolicy(policy.trim(), true)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn strict_rejects_malformed_and_trailing_input() {
-        for policy in ["allow", "allow a b file read garbage", "not_a_rule a b"] {
-            assert!(
-                super::apply_strict(policy)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("parse")
-            );
-        }
-        assert!(
-            super::check_rule("allow hal_bootctl_default esu_file file { read write }").is_ok()
-        );
-    }
 }

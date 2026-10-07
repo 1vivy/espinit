@@ -92,10 +92,12 @@ pub fn is_recovery() -> bool {
 
 /// Run the module's early or recovery script when the ESP provides one.
 ///
-/// An absent script is not a failure: the stage simply does not exist for that
-/// module. A present script must run successfully through the staged busybox
-/// within a fixed deadline; a script that outlives it is killed, reaped, and
-/// reported as a classified `ScriptTimeout` failure rather than blocking PID 1.
+/// Admission follows the module markers. An absent script is not a failure:
+/// the stage simply does not exist for that module. An optional module whose
+/// script cannot be prepared, spawned, or finished within the fixed deadline is
+/// logged and skipped so the remaining modules still run; a critical module's
+/// failure is returned and rejects the handoff. A script that outlives the
+/// deadline is killed and reaped before that decision.
 pub fn run_module_scripts(
     payload_root: &Path,
     module: &str,
@@ -103,9 +105,27 @@ pub fn run_module_scripts(
     rom_number: u32,
 ) -> Result<(), Failure> {
     let directory = payload_root.join("modules").join(module);
-    if is_recovery() && !crate::platform::recovery_allowed(&directory)? {
+    let crate::platform::ModulePolicy::Admitted { critical } =
+        crate::platform::module_policy(&directory, is_recovery())?
+    else {
         return Ok(());
+    };
+    match run_script(&directory, module, rom, rom_number) {
+        Ok(()) => Ok(()),
+        Err(failure) if critical => Err(failure),
+        Err(failure) => {
+            log::warn!(
+                "Skipping optional module {module} script: {}: {}",
+                failure.error,
+                failure.detail
+            );
+            Ok(())
+        }
     }
+}
+
+/// Prepare, spawn, and wait for one admitted module's PID1 script.
+fn run_script(directory: &Path, module: &str, rom: &str, rom_number: u32) -> Result<(), Failure> {
     let script_name = if is_recovery() {
         "pid1-recovery.sh"
     } else {
@@ -174,7 +194,7 @@ pub fn run_module_scripts(
         .env("PATH", bin)
         .env("ESU_ROM", rom)
         .env("ESU_ROM_NUMBER", rom_number.to_string())
-        .current_dir(&directory)
+        .current_dir(directory)
         .stdin(Stdio::null())
         .spawn()
         .map_err(|error| {
@@ -315,6 +335,34 @@ mod tests {
         );
         assert_eq!(mode("", true), BootMode::Recovery);
         assert_eq!(mode("", false), BootMode::Normal);
+    }
+
+    #[test]
+    fn optional_module_script_failures_are_skipped_and_critical_ones_are_returned() {
+        let root = std::env::temp_dir().join(format!("esu-scripts-{}", std::process::id()));
+        let directory = root.join("modules").join("a");
+        fs::create_dir_all(&directory).unwrap();
+        for name in ["pid1.sh", "pid1-recovery.sh"] {
+            std::os::unix::fs::symlink("missing", directory.join(name)).unwrap();
+        }
+        // Admitted in both boot modes, so the case does not depend on the mode.
+        fs::write(directory.join(crate::platform::RECOVERY_OK_MARKER), b"").unwrap();
+
+        // An optional module's broken script is skipped.
+        assert!(run_module_scripts(&root, "a", "rom", 1).is_ok());
+
+        // The same script in a critical module rejects the handoff.
+        fs::write(directory.join(crate::platform::CRITICAL_MARKER), b"").unwrap();
+        assert_eq!(
+            run_module_scripts(&root, "a", "rom", 1).unwrap_err().error,
+            "ScriptSymlink"
+        );
+
+        // A deliberate skip wins over the critical marker.
+        fs::write(directory.join(crate::platform::DISABLE_MARKER), b"").unwrap();
+        assert!(run_module_scripts(&root, "a", "rom", 1).is_ok());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

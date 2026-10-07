@@ -1,27 +1,16 @@
 //! esu PID-1 early managed boot.
 //!
-//! The order is fixed by the boot contract: minimal mounts and logging, the
-//! opt-in APSS minidump transport preload when
-//! `androidboot.esu.apss_minidump=true` is active, normal vendor module
-//! loading, ESP discovery and read-only mount, strict manifest
-//! and ROM validation, efivarfs identity, ordered payload module loading with
-//! self-checks, the single projection boundary immediately before the `gpt`
-//! entry, and finally the real-init handoff. Any managed-boot failure stops the
-//! handoff, persists a receipt, and enters the fatal-boot stop path: a reboot by
-//! default, or the AOSP sysrq crash when the exact
-//! `androidboot.init_fatal_panic=true` opt-in is active. The only fallback is the
-//! explicit recovery rescue contract: both `androidboot.mode=recovery` and
-//! `androidboot.esu.recovery_passthrough=true` must occur exactly once in
-//! bootconfig, in which case esu tears down its minimal mounts and hands off
-//! before touching the ESP, vendor modules, projection, or platform payload.
-//!
-//! The lab-only `androidboot.esu.probe=<stage>` opt-in marks one boundary of
-//! this order. Because bootconfig is only reachable through procfs, the minimal
-//! setup mounts `/proc` first, then reads and parses the probe once, then mounts
-//! `/sys` and `/dev` and creates the device nodes. A boot that reaches the named
-//! checkpoint sets a 30-second panic delay and requests the same sysrq crash
-//! instead of continuing, so the reset timing names the stage. Normal boots never
-//! carry the key and are unchanged.
+//! Minimal mounts and logging precede vendor modules, ESP discovery, strict
+//! manifest/ROM and identity validation, payload loading, the GPT projection
+//! boundary, and real-init handoff. ESP module work is optional unless the
+//! module carries the `critical` marker: an optional module's failure is logged
+//! and skipped while the remaining modules still run, whereas mandatory
+//! manifest kernel modules, identity, and the final required-backend and
+//! projection validation stay strict. Core failures persist a receipt and enter
+//! the generic reboot-and-park stop path. Explicit recovery passthrough requires
+//! both `androidboot.mode=recovery` and
+//! `androidboot.esu.recovery_passthrough=true` exactly once in bootconfig and
+//! hands off before touching managed payload work.
 
 use std::fs;
 use std::io::Write;
@@ -36,9 +25,6 @@ use crate::config::{self, Manifest, RomConfig};
 use crate::esp;
 use crate::gptctl;
 use crate::loader;
-use crate::probe::{
-    KEY as PROBE_KEY, PANIC_DELAY as PROBE_PANIC_DELAY, ProbeStage, arm_delayed_handoff,
-};
 use crate::receipt::{Failure, ReceiptState, Stage};
 use crate::scripts;
 use crate::selfcheck;
@@ -50,34 +36,19 @@ use crate::selfcheck;
 pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     setup_kmsg();
     log::info!("esu early managed boot starting");
-    let (mut mounts, bootconfig, probe) = mount_minimal()?;
-    if probe == Some(ProbeStage::Handoff) {
-        log::warn!("lab handoff probe requested; skipping managed payload work");
-        return prepare_handoff(state, &mounts);
-    }
+    let (mut mounts, bootconfig) = mount_minimal()?;
     if recovery_passthrough_requested(&bootconfig) {
         log::warn!("explicit recovery passthrough requested; skipping all managed payload work");
         return prepare_handoff(state, &mounts);
     }
 
-    // Opt-in Qualcomm APSS minidump transport: load its vendor module closure
-    // before the ESP is mounted, because a boot that dies this early can only
-    // leave evidence through a sink the firmware already owns. Normal boots
-    // skip this entirely.
-    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if apss_minidump_requested(&bootconfig, &cmdline) {
-        loader::preload_apss_minidump()?;
-    }
-    checkpoint(probe, ProbeStage::ApssLoaded);
-
     // UFS and VFAT are built in on the phone, so the payload ESP can already be
     // available before vendor module preload. Retain that mount when possible:
     // a preload failure can then persist its normal bounded failure receipt.
     // Devices that need modular storage keep the original load-then-wait path.
-    state.esp_mount = retain_esp(probe, esp::mount_esp())?;
+    state.esp_mount = retain_esp(esp::mount_esp())?;
 
     loader::load_vendor_modules()?;
-    checkpoint(probe, ProbeStage::VendorLoaded);
 
     // Identity must be available even when an unmanaged boot has no ESP payload.
     let bdsvars = load_identity_modules()?;
@@ -96,7 +67,6 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
             "ESP discovery succeeded without retaining its mount",
         )
     })?;
-    checkpoint(probe, ProbeStage::EspReady);
     let esp_mount = mount.path().to_owned();
     let esp_device = mount.device();
     let payload_root = esp::payload_root(mount.path());
@@ -108,13 +78,16 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         publish_empty_module_rc()?;
         return prepare_handoff(state, &mounts);
     }
-    let manifest = read_manifest(&payload_root)?;
+    let mut manifest = read_manifest(&payload_root)?;
     config::validate_bootstrap(&manifest).map_err(Failure::from)?;
     mount.verify_retained()?;
     esp::stage_executables(&payload_root, esp_device)?;
     mounts.push(esp::EXECUTABLE_ROOT);
-    checkpoint(probe, ProbeStage::ManifestRead);
-    crate::platform::validate_modules(&payload_root, &manifest.modules_order)?;
+    crate::platform::validate_modules(
+        &payload_root,
+        &mut manifest.modules_order,
+        scripts::is_recovery(),
+    )?;
     log_build_ids(&payload_root);
     state.build_id = fs::read_to_string("/esu-build-id")
         .ok()
@@ -174,17 +147,12 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         &esp_mount,
         esp_device,
     )?;
-    checkpoint(probe, ProbeStage::PayloadLoaded);
     crate::platform::publish_module_rc(
         &payload_root,
         &manifest.modules_order,
         esp_device,
         rom.has_writable_esp_file(),
     )?;
-    checkpoint(probe, ProbeStage::ModuleRcPublished);
-    if probe == Some(ProbeStage::HandoffDelayed) {
-        arm_delayed_handoff(&payload_root, &id, rom_number)?;
-    }
 
     log::info!(
         "Early managed boot checks passed; handing off to {}",
@@ -570,14 +538,8 @@ fn apply_projection(
     )
 }
 
-/// Prepare the minimum early mounts, read the probe once, and retain only the
-/// mounts created here.
-///
-/// `/proc` has to be mounted before the boot configuration can be read at all, so
-/// it is ensured first and the probe is parsed from the procfs the same call
-/// mounted. The returned boot configuration is that single read, reused for the
-/// APSS opt-in instead of reading the file twice.
-fn mount_minimal() -> Result<(Vec<&'static str>, String, Option<ProbeStage>), Failure> {
+/// Mount procfs before reading recovery inputs; retain only mounts created here.
+fn mount_minimal() -> Result<(Vec<&'static str>, String), Failure> {
     mount_minimal_with(
         || fs::read_to_string("/proc/bootconfig").unwrap_or_default(),
         ensure_minimal_mount,
@@ -586,36 +548,26 @@ fn mount_minimal() -> Result<(Vec<&'static str>, String, Option<ProbeStage>), Fa
             unlimit_kmsg();
             Ok(())
         },
-        checkpoint,
     )
 }
 
-/// Keep mount/probe ordering shared by production and side-effect-free tests.
 fn mount_minimal_with(
     read_bootconfig: impl FnOnce() -> String,
     mut ensure_mount: impl FnMut(&'static str) -> Result<bool, Failure>,
     finish_minimal: impl FnOnce() -> Result<(), Failure>,
-    mut reached: impl FnMut(Option<ProbeStage>, ProbeStage),
-) -> Result<(Vec<&'static str>, String, Option<ProbeStage>), Failure> {
+) -> Result<(Vec<&'static str>, String), Failure> {
     let mut owned = Vec::with_capacity(3);
     if ensure_mount("/proc")? {
         owned.push("/proc");
     }
     let bootconfig = read_bootconfig();
-    let probe = ProbeStage::parse(&bootconfig)?;
-    reached(probe, ProbeStage::ProcMounted);
-    for (mountpoint, stage) in [
-        ("/sys", ProbeStage::SysMounted),
-        ("/dev", ProbeStage::DevMounted),
-    ] {
+    for mountpoint in ["/sys", "/dev"] {
         if ensure_mount(mountpoint)? {
             owned.push(mountpoint);
         }
-        reached(probe, stage);
     }
     finish_minimal()?;
-    reached(probe, ProbeStage::MinimalMounted);
-    Ok((owned, bootconfig, probe))
+    Ok((owned, bootconfig))
 }
 
 /// Return whether esu created this mount; existing mounts stay unowned.
@@ -722,34 +674,11 @@ const RECOVERY_MODE_VALUE: &str = "recovery";
 const RECOVERY_PASSTHROUGH_KEY: &str = "androidboot.esu.recovery_passthrough";
 const RECOVERY_PASSTHROUGH_VALUE: &str = "true";
 
-/// Exact AOSP opt-in that turns a fatal esu failure into a real kernel
-/// crash instead of the default reboot.
-const FATAL_PANIC_KEY: &str = "androidboot.init_fatal_panic";
-
-/// The only value that enables the opt-in; AOSP compares it literally.
-const FATAL_PANIC_VALUE: &str = "true";
-
-/// AOSP's sysrq crash request. Writing this byte to `/proc/sysrq-trigger`
-/// panics the kernel, so the failure can be captured through pstore/minidump
-/// instead of only rebooting.
-const SYSRQ_TRIGGER: &str = "/proc/sysrq-trigger";
-const SYSRQ_CRASH: &[u8] = b"c";
-const PANIC_TIMEOUT: &str = "/proc/sys/kernel/panic";
-
-/// Retain the ESP that was already available before vendor-module preload.
-///
-/// Only a successful mount is retained, so only that branch reaches the
-/// `esp-retained` checkpoint: an enumeration-pending error keeps the original
-/// "load modules first, then wait" path with no mount to name, and any other
-/// error stays the caller's failure.
-fn retain_esp(
-    probe: Option<ProbeStage>,
-    attempt: Result<esp::Mount, Failure>,
-) -> Result<Option<esp::Mount>, Failure> {
+/// Retain an already available ESP; retry pending enumeration after vendor load.
+fn retain_esp(attempt: Result<esp::Mount, Failure>) -> Result<Option<esp::Mount>, Failure> {
     match attempt {
         Ok(mount) => {
             log::info!("ESP was available before vendor module preload");
-            checkpoint(probe, ProbeStage::EspRetained);
             Ok(Some(mount))
         }
         Err(failure) if esp_enumeration_pending(&failure) => Ok(None),
@@ -757,130 +686,10 @@ fn retain_esp(
     }
 }
 
-/// Stop the boot at `reached` when the probe requested exactly that checkpoint.
-fn checkpoint(requested: Option<ProbeStage>, reached: ProbeStage) {
-    checkpoint_with(
-        requested,
-        reached,
-        || set_panic_timeout_at(Path::new(PANIC_TIMEOUT)),
-        crash_kernel,
-        || stop_boot(),
-    );
-}
-
-/// Write the checkpoint's longer panic delay to the kernel's `panic` sysctl.
-fn set_panic_timeout_at(path: &Path) -> std::io::Result<()> {
-    let mut timeout = fs::File::options().write(true).open(path)?;
-    timeout.write_all(PROBE_PANIC_DELAY)
-}
-
-/// Run one checkpoint with injectable side effects.
-///
-/// Only an exact match acts. A matched checkpoint writes the longer panic delay
-/// before requesting the crash, so the reset timing separates it from a natural
-/// early failure that keeps the profile's own `panic=5`. If either step fails or
-/// returns, the unchanged fatal fallback runs and the boot never continues past
-/// the checkpoint. No failure receipt is recorded: reaching a checkpoint is not a
-/// failure.
-fn checkpoint_with(
-    requested: Option<ProbeStage>,
-    reached: ProbeStage,
-    set_timeout: impl FnOnce() -> std::io::Result<()>,
-    panic: impl FnOnce(),
-    fallback: impl FnOnce(),
-) {
-    if requested != Some(reached) {
-        return;
-    }
-    log::error!("{PROBE_KEY}: {reached:?} checkpoint reached; requesting a crash");
-    let stop = match set_timeout() {
-        Ok(()) => FatalStop::Panic,
-        Err(error) => {
-            log::error!("cannot set {PANIC_TIMEOUT} for checkpoint probe: {error}");
-            FatalStop::Reboot
-        }
-    };
-    stop_with(stop, || {}, panic, fallback);
-    unreachable!("a matched checkpoint's fatal fallback never returns");
-}
-
-/// Which fatal-boot stop applies to the current boot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FatalStop {
-    /// The exact AOSP opt-in is active: request a kernel panic.
-    Panic,
-    /// No opt-in: sync, reboot, and park PID 1, unchanged.
-    Reboot,
-}
-
-/// Enter the fatal-boot stop path for a failure the caller classified.
-///
-/// The `record` closure persists the bounded ESP failure receipt first, so the
-/// evidence survives the crash capture. A kernel panic is requested only for
-/// the exact opt-in and never returns; every other outcome continues into
-/// [`stop_boot`], the unchanged reboot-and-park path, so a failing opt-in can
-/// never strand PID 1.
+/// Persist the classified failure before the generic reboot-and-park stop.
 pub fn fatal_boot(record: impl FnOnce()) -> ! {
-    let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
-    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    let stop = if fatal_panic_requested(&bootconfig, &cmdline) {
-        FatalStop::Panic
-    } else {
-        FatalStop::Reboot
-    };
-
-    stop_with(stop, record, crash_kernel, || stop_boot());
-
-    unreachable!("the fatal-boot stop fallback never returns")
-}
-
-/// Run the fatal-boot stop with injectable side effects.
-///
-/// The receipt is recorded before any panic request, and the fallback is the
-/// only observable outcome of a stop that did not panic the kernel.
-fn stop_with(
-    stop: FatalStop,
-    record: impl FnOnce(),
-    panic: impl FnOnce(),
-    fallback: impl FnOnce(),
-) {
     record();
-
-    if stop == FatalStop::Panic {
-        log::error!("{FATAL_PANIC_KEY}={FATAL_PANIC_VALUE}: requesting a sysrq crash");
-        panic();
-        log::error!("sysrq crash request returned without panicking the kernel");
-    }
-
-    fallback();
-}
-
-/// Request the AOSP sysrq crash. Returns only when the kernel did not panic.
-fn crash_kernel() {
-    match fs::File::options().write(true).open(SYSRQ_TRIGGER) {
-        Ok(mut trigger) => {
-            if let Err(error) = trigger.write_all(SYSRQ_CRASH) {
-                log::error!("cannot write {SYSRQ_TRIGGER}: {error}");
-            }
-        }
-        Err(error) => {
-            log::error!("cannot open {SYSRQ_TRIGGER}: {error}");
-        }
-    }
-}
-
-/// Whether the exact AOSP fatal-panic opt-in is active for this boot.
-///
-/// The key is read from the boot configuration, falling back to the kernel
-/// command line only when the boot configuration is silent for it, matching how
-/// esu resolves its other boot inputs. Only the exact key with the exact
-/// value `true` opts in: case variants, key prefixes, malformed quote pairs and
-/// every other value stay non-opt-in, and there is no OEM- or vendor-specific
-/// spelling.
-fn fatal_panic_requested(bootconfig: &str, cmdline: &str) -> bool {
-    bootconfig_value(bootconfig, FATAL_PANIC_KEY)
-        .or_else(|| cmdline_value(cmdline, FATAL_PANIC_KEY))
-        == Some(FATAL_PANIC_VALUE)
+    stop_boot()
 }
 
 /// Whether the explicit recovery rescue contract is active.
@@ -903,33 +712,6 @@ fn bootconfig_has_exactly(bootconfig: &str, key: &str, expected: &str) -> bool {
         (name.trim() == key).then(|| unquote(value.trim()))
     });
     values.next() == Some(expected) && values.next().is_none()
-}
-
-/// Lab-only Qualcomm transport opt-in.
-///
-/// `androidboot.esu.apss_minidump=true` is read exactly as the fatal-panic
-/// opt-in is: the boot configuration wins, the kernel command line is only a
-/// fallback while the boot configuration is silent for the key, and only the
-/// exact key with the exact lowercase value `true` opts in.
-fn apss_minidump_requested(bootconfig: &str, cmdline: &str) -> bool {
-    const KEY: &str = "androidboot.esu.apss_minidump";
-    bootconfig_value(bootconfig, KEY).or_else(|| cmdline_value(cmdline, KEY)) == Some("true")
-}
-
-/// Value the boot configuration attributes to an exact key, if any.
-fn bootconfig_value<'a>(bootconfig: &'a str, key: &str) -> Option<&'a str> {
-    bootconfig.lines().find_map(|line| {
-        let (name, value) = line.split_once('=').unwrap_or((line, ""));
-        (name.trim() == key).then(|| unquote(value.trim()))
-    })
-}
-
-/// Value the kernel command line attributes to an exact key, if any.
-fn cmdline_value<'a>(cmdline: &'a str, key: &str) -> Option<&'a str> {
-    cmdline.split_whitespace().find_map(|token| {
-        let (name, value) = token.split_once('=')?;
-        (name == key).then(|| unquote(value))
-    })
 }
 
 /// Strip exactly one surrounding pair of quotes. A lone quote is malformed and
@@ -958,6 +740,40 @@ pub fn stop_boot() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_mount_order_preserves_recovery_inputs_and_owned_mounts() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let config = "androidboot.mode=recovery\n";
+        let (owned, bootconfig) = mount_minimal_with(
+            || {
+                events.borrow_mut().push("read");
+                config.to_owned()
+            },
+            |mountpoint| {
+                events.borrow_mut().push(mountpoint);
+                Ok(mountpoint != "/sys")
+            },
+            || {
+                events.borrow_mut().push("nodes");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(owned, ["/proc", "/dev"]);
+        assert_eq!(bootconfig, config);
+        assert_eq!(*events.borrow(), ["/proc", "read", "/sys", "/dev", "nodes"]);
+    }
+
+    #[test]
+    fn failed_proc_mount_stops_before_reading_recovery_inputs() {
+        let result = mount_minimal_with(
+            || panic!("bootconfig read before procfs was mounted"),
+            |_| Err(Failure::new(Stage::Storage, "ProcMountFailed", "no proc")),
+            || panic!("minimal setup continued"),
+        );
+        assert_eq!(result.unwrap_err().error, "ProcMountFailed");
+    }
 
     #[test]
     fn sysfs_bdsvars_discovery_reaches_managed_identity_without_by_name_links() {
@@ -1082,43 +898,6 @@ mod tests {
     }
 
     #[test]
-    fn apss_opt_in_is_exact_and_bootconfig_is_authoritative() {
-        const KEY: &str = "androidboot.esu.apss_minidump";
-        for value in ["true", "\"true\""] {
-            assert!(apss_minidump_requested(&format!("{KEY} = {value}\n"), ""));
-            assert!(apss_minidump_requested("", &format!("{KEY}={value}")));
-        }
-        for value in [
-            "", "false", "TRUE", "True", "1", "\"true", "true\"", "truex",
-        ] {
-            assert!(!apss_minidump_requested(&format!("{KEY} = {value}\n"), ""));
-            assert!(!apss_minidump_requested("", &format!("{KEY}={value}")));
-            assert!(!apss_minidump_requested(
-                &format!("{KEY} = {value}\n"),
-                &format!("{KEY}=true"),
-            ));
-        }
-        for key in [
-            "androidboot.esu.apss_minidump_extra",
-            "vendor.androidboot.esu.apss_minidump",
-            "ANDROIDBOOT.ESU.APSS_MINIDUMP",
-        ] {
-            assert!(!apss_minidump_requested(&format!("{key}=true"), ""));
-            assert!(!apss_minidump_requested("", &format!("{key}=true")));
-        }
-        assert!(!apss_minidump_requested("", ""));
-        assert!(!apss_minidump_requested(KEY, &format!("{KEY}=true")));
-        assert!(apss_minidump_requested(
-            "other = false\n",
-            &format!("{KEY}=true")
-        ));
-        assert!(apss_minidump_requested(
-            &format!("{KEY}=true"),
-            &format!("{KEY}=false")
-        ));
-    }
-
-    #[test]
     fn permanent_failures_stop_without_retrying() {
         let mut attempts = 0;
         let error = retry_enumerated(
@@ -1191,323 +970,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_exact_bootconfig_key_and_value_opt_in() {
-        let cases = [
-            ("androidboot.init_fatal_panic=true\n", true),
-            ("androidboot.init_fatal_panic = true", true),
-            ("androidboot.init_fatal_panic=\"true\"\n", true),
-            (
-                "androidboot.force_normal_boot=0\nandroidboot.init_fatal_panic=true\n",
-                true,
-            ),
-            ("", false),
-            ("androidboot.init_fatal_panic=false\n", false),
-            ("androidboot.init_fatal_panic=TRUE\n", false),
-            ("androidboot.init_fatal_panic=True\n", false),
-            ("androidboot.init_fatal_panic=1\n", false),
-            ("androidboot.init_fatal_panic\n", false),
-            ("androidboot.init_fatal_panic=\n", false),
-            ("androidboot.init_fatal_panic=\"true\n", false),
-            ("androidboot.init_fatal_panic=true\"\n", false),
-            ("ANDROIDBOOT.INIT_FATAL_PANIC=true\n", false),
-            ("androidboot.init_fatal_panicked=true\n", false),
-            ("androidboot.init_fatal_panic_extra=true\n", false),
-            ("vendor.androidboot.init_fatal_panic=true\n", false),
-            ("androidboot.init_fatal_panic=true x\n", false),
-        ];
-
-        for (bootconfig, expected) in cases {
-            assert_eq!(fatal_panic_requested(bootconfig, ""), expected);
-        }
-    }
-
-    #[test]
-    fn the_command_line_only_opts_in_when_the_bootconfig_is_silent() {
-        let cases = [
-            ("", "androidboot.init_fatal_panic=true", true),
-            (
-                "other=1\n",
-                "loglevel=7 androidboot.init_fatal_panic=true",
-                true,
-            ),
-            ("other=1\n", "androidboot.init_fatal_panic=\"true\"", true),
-            ("", "androidboot.init_fatal_panic=false", false),
-            ("", "androidboot.init_fatal_panicked=true", false),
-            ("", "androidboot.init_fatal_panic", false),
-            ("", "androidboot.init_fatal_panic=truex", false),
-            (
-                "androidboot.init_fatal_panic=false\n",
-                "androidboot.init_fatal_panic=true",
-                false,
-            ),
-        ];
-
-        for (bootconfig, cmdline, expected) in cases {
-            assert_eq!(fatal_panic_requested(bootconfig, cmdline), expected);
-        }
-    }
-
-    #[test]
-    fn the_failure_receipt_is_recorded_before_the_panic_request() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stop_with(
-                FatalStop::Panic,
-                || events.borrow_mut().push("receipt"),
-                || {
-                    events.borrow_mut().push("sysrq");
-                    panic!("kernel panicked");
-                },
-                || events.borrow_mut().push("fallback"),
-            );
-        }));
-
-        let payload = outcome.expect_err("a requested kernel panic never returns");
-        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "kernel panicked");
-        assert_eq!(*events.borrow(), ["receipt", "sysrq"]);
-    }
-
-    #[test]
-    fn a_panic_request_that_returns_falls_back_to_the_reboot_stop() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stop_with(
-                FatalStop::Panic,
-                || events.borrow_mut().push("receipt"),
-                || events.borrow_mut().push("sysrq"),
-                || {
-                    events.borrow_mut().push("fallback");
-                    panic!("reboot stop");
-                },
-            );
-        }));
-
-        let payload = outcome.expect_err("the reboot stop parks PID 1");
-        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "reboot stop");
-        assert_eq!(*events.borrow(), ["receipt", "sysrq", "fallback"]);
-    }
-
-    #[test]
-    fn without_the_opt_in_the_stop_never_touches_sysrq() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            stop_with(
-                FatalStop::Reboot,
-                || events.borrow_mut().push("receipt"),
-                || panic!("sysrq must not be requested without the opt-in"),
-                || {
-                    events.borrow_mut().push("fallback");
-                    panic!("reboot stop");
-                },
-            );
-        }));
-
-        let payload = outcome.expect_err("the reboot stop parks PID 1");
-        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "reboot stop");
-        assert_eq!(*events.borrow(), ["receipt", "fallback"]);
-    }
-
-    #[test]
-    fn the_probe_accepts_every_exact_checkpoint() {
-        for (value, expected) in [
-            ("handoff", ProbeStage::Handoff),
-            ("handoff-delayed", ProbeStage::HandoffDelayed),
-            ("proc-mounted", ProbeStage::ProcMounted),
-            ("sys-mounted", ProbeStage::SysMounted),
-            ("dev-mounted", ProbeStage::DevMounted),
-            ("minimal-mounted", ProbeStage::MinimalMounted),
-            ("apss-loaded", ProbeStage::ApssLoaded),
-            ("esp-retained", ProbeStage::EspRetained),
-            ("vendor-loaded", ProbeStage::VendorLoaded),
-            ("esp-ready", ProbeStage::EspReady),
-            ("manifest-read", ProbeStage::ManifestRead),
-            ("payload-loaded", ProbeStage::PayloadLoaded),
-            ("module-rc-published", ProbeStage::ModuleRcPublished),
-        ] {
-            assert!(
-                matches!(
-                    ProbeStage::parse(&format!("{PROBE_KEY} = {value}\n")),
-                    Ok(Some(stage)) if stage == expected
-                ),
-                "{value} is a supported checkpoint"
-            );
-            assert!(
-                matches!(
-                    ProbeStage::parse(&format!("other = 1\n{PROBE_KEY}=\"{value}\"\n")),
-                    Ok(Some(stage)) if stage == expected
-                ),
-                "a quoted {value} still names the checkpoint"
-            );
-        }
-    }
-
-    #[test]
-    fn the_minimal_setup_mounts_proc_before_it_reads_the_probe_and_names_each_stage() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let (owned, bootconfig, probe) = mount_minimal_with(
-            || {
-                events.borrow_mut().push(String::from("read-bootconfig"));
-                format!("{PROBE_KEY}=dev-mounted\n")
-            },
-            |mountpoint| {
-                events.borrow_mut().push(format!("mount {mountpoint}"));
-                Ok(true)
-            },
-            || {
-                events
-                    .borrow_mut()
-                    .push(String::from("create /dev/kmsg and /dev/null"));
-                Ok(())
-            },
-            |_, stage| events.borrow_mut().push(format!("checkpoint {stage:?}")),
-        )
-        .expect("the minimal setup succeeds");
-
-        assert_eq!(owned, ["/proc", "/sys", "/dev"]);
-        assert_eq!(bootconfig, format!("{PROBE_KEY}=dev-mounted\n"));
-        assert_eq!(probe, Some(ProbeStage::DevMounted));
-        assert_eq!(
-            *events.borrow(),
-            [
-                "mount /proc",
-                "read-bootconfig",
-                "checkpoint ProcMounted",
-                "mount /sys",
-                "checkpoint SysMounted",
-                "mount /dev",
-                "checkpoint DevMounted",
-                "create /dev/kmsg and /dev/null",
-                "checkpoint MinimalMounted",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_pre_existing_mount_is_not_owned_and_does_not_skip_the_probe() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let (owned, _, probe) = mount_minimal_with(
-            String::new,
-            |mountpoint| {
-                events.borrow_mut().push(format!("mount {mountpoint}"));
-                Ok(mountpoint == "/dev")
-            },
-            || Ok(()),
-            |_, _| {},
-        )
-        .expect("the minimal setup succeeds");
-
-        assert_eq!(owned, ["/dev"]);
-        assert_eq!(probe, None);
-        assert_eq!(
-            *events.borrow(),
-            ["mount /proc", "mount /sys", "mount /dev"]
-        );
-    }
-
-    #[test]
-    fn a_failed_proc_mount_stops_before_the_probe_is_read() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let failure = mount_minimal_with(
-            || {
-                events.borrow_mut().push(String::from("read-bootconfig"));
-                String::new()
-            },
-            |mountpoint| {
-                events.borrow_mut().push(format!("mount {mountpoint}"));
-                Err(Failure::new(Stage::Storage, "ProcMountFailed", "no proc"))
-            },
-            || Ok(()),
-            |_, _| events.borrow_mut().push(String::from("checkpoint")),
-        )
-        .expect_err("a failed proc mount stops the minimal setup");
-
-        assert_eq!(failure.error, "ProcMountFailed");
-        assert_eq!(*events.borrow(), ["mount /proc"]);
-    }
-
-    #[test]
-    fn an_invalid_probe_fails_after_proc_and_before_sysfs() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let failure = mount_minimal_with(
-            || format!("{PROBE_KEY}=not-a-stage"),
-            |mountpoint| {
-                events.borrow_mut().push(format!("mount {mountpoint}"));
-                Ok(true)
-            },
-            || Ok(()),
-            |_, _| events.borrow_mut().push(String::from("checkpoint")),
-        )
-        .expect_err("an invalid probe value is a bounded failure");
-
-        assert_eq!(failure.stage, Stage::Configuration);
-        assert_eq!(failure.error, "InvalidProbeStage");
-        assert_eq!(*events.borrow(), ["mount /proc"]);
-    }
-
-    #[test]
-    fn the_probe_is_disabled_without_the_exact_key_or_value() {
-        for bootconfig in [
-            String::from(""),
-            String::from("other = 1\n"),
-            format!("{PROBE_KEY}\n"),
-            format!("{PROBE_KEY} =\n"),
-            // A prefixed, extended, vendor or case-varied key is a different key:
-            // it leaves the probe off instead of arming or failing it.
-            format!("{PROBE_KEY}2=minimal-mounted"),
-            format!("vendor.{PROBE_KEY}=minimal-mounted"),
-            String::from("ANDROIDBOOT.ESU.PROBE=minimal-mounted"),
-        ] {
-            assert!(
-                matches!(ProbeStage::parse(&bootconfig), Ok(None)),
-                "{bootconfig:?} leaves the probe off"
-            );
-        }
-    }
-
-    #[test]
-    fn the_probe_refuses_unknown_or_malformed_values() {
-        for bootconfig in [
-            format!("{PROBE_KEY}=minimal_mounted"),
-            format!("{PROBE_KEY}=Minimal-Mounted"),
-            format!("{PROBE_KEY}=minimal-mounted-extra"),
-            format!("{PROBE_KEY}=-minimal-mounted"),
-            format!("{PROBE_KEY}=minimal-mounted extra"),
-            format!("{PROBE_KEY}=\"minimal-mounted"),
-            format!("{PROBE_KEY}=minimal-mounted\""),
-            format!("{PROBE_KEY}=minimal-mounted\n{PROBE_KEY}=minimal-mounted"),
-        ] {
-            let failure = ProbeStage::parse(&bootconfig)
-                .expect_err("a non-exact probe must be a bounded failure");
-            assert_eq!(failure.stage, Stage::Configuration, "{bootconfig}");
-            assert_eq!(failure.error, "InvalidProbeStage", "{bootconfig}");
-        }
-    }
-
-    #[test]
-    fn the_checkpoint_writes_the_longer_panic_delay_in_decimal() {
-        let path =
-            std::env::temp_dir().join(format!("esu-probe-panic-sysctl-{}", std::process::id()));
-        fs::write(&path, "5").expect("the test sysctl file is writable");
-        set_panic_timeout_at(&path).expect("the longer delay can be written");
-        assert_eq!(fs::read(&path).expect("the sysctl file is readable"), b"30");
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn only_a_retained_mount_reaches_the_esp_retained_checkpoint() {
-        let pending = Failure::new(
-            Stage::Storage,
-            "EspNotFound",
-            "the ESP has not been enumerated yet",
-        );
-        assert!(esp_enumeration_pending(&pending));
-        assert!(
-            matches!(
-                retain_esp(Some(ProbeStage::EspRetained), Err(pending)),
-                Ok(None)
-            ),
-            "a pending enumeration retains no mount, so the checkpoint is not reached"
-        );
+    fn pending_esp_enumeration_retains_no_mount() {
+        let pending = Failure::new(Stage::Storage, "EspNotFound", "not enumerated");
+        assert!(matches!(retain_esp(Err(pending)), Ok(None)));
     }
 
     #[test]
@@ -1518,101 +983,6 @@ mod tests {
             "more than one ESP candidate",
         );
         assert!(!esp_enumeration_pending(&fatal));
-        assert!(retain_esp(Some(ProbeStage::EspRetained), Err(fatal)).is_err());
-    }
-
-    #[test]
-    fn a_checkpoint_that_is_not_reached_is_a_no_op() {
-        let touched = std::cell::Cell::new(0);
-        checkpoint_with(
-            None,
-            ProbeStage::MinimalMounted,
-            || {
-                touched.set(touched.get() + 1);
-                Ok(())
-            },
-            || touched.set(touched.get() + 1),
-            || touched.set(touched.get() + 1),
-        );
-        checkpoint_with(
-            Some(ProbeStage::EspReady),
-            ProbeStage::MinimalMounted,
-            || {
-                touched.set(touched.get() + 1);
-                Ok(())
-            },
-            || touched.set(touched.get() + 1),
-            || touched.set(touched.get() + 1),
-        );
-        assert_eq!(touched.get(), 0);
-    }
-
-    #[test]
-    fn the_panic_timeout_is_written_before_the_crash_request() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            checkpoint_with(
-                Some(ProbeStage::MinimalMounted),
-                ProbeStage::MinimalMounted,
-                || {
-                    events.borrow_mut().push("timeout=30");
-                    Ok(())
-                },
-                || {
-                    events.borrow_mut().push("sysrq");
-                    panic!("kernel panicked");
-                },
-                || events.borrow_mut().push("fallback"),
-            );
-        }));
-
-        let payload = outcome.expect_err("a requested kernel panic never returns");
-        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "kernel panicked");
-        assert_eq!(*events.borrow(), ["timeout=30", "sysrq"]);
-    }
-
-    #[test]
-    fn a_timeout_write_that_fails_never_reaches_sysrq() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            checkpoint_with(
-                Some(ProbeStage::MinimalMounted),
-                ProbeStage::MinimalMounted,
-                || Err(std::io::Error::other("read-only panic sysctl")),
-                || panic!("sysrq must not be reached when the timeout write failed"),
-                || {
-                    events.borrow_mut().push("fallback");
-                    panic!("reboot stop");
-                },
-            );
-        }));
-
-        let payload = outcome.expect_err("the checkpoint fallback parks PID 1");
-        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "reboot stop");
-        assert_eq!(*events.borrow(), ["fallback"]);
-    }
-
-    #[test]
-    fn a_matched_checkpoint_never_proceeds_after_sysrq_returns() {
-        let events = std::cell::RefCell::new(Vec::new());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            checkpoint_with(
-                Some(ProbeStage::ModuleRcPublished),
-                ProbeStage::ModuleRcPublished,
-                || {
-                    events.borrow_mut().push("timeout=30");
-                    Ok(())
-                },
-                || events.borrow_mut().push("sysrq"),
-                || {
-                    events.borrow_mut().push("fallback");
-                    panic!("reboot stop");
-                },
-            );
-        }));
-
-        let payload = outcome.expect_err("a matched checkpoint never continues boot");
-        assert_eq!(*payload.downcast_ref::<&str>().unwrap(), "reboot stop");
-        assert_eq!(*events.borrow(), ["timeout=30", "sysrq", "fallback"]);
+        assert!(retain_esp(Err(fatal)).is_err());
     }
 }

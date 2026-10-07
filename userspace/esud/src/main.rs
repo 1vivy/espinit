@@ -14,7 +14,6 @@
 #[cfg(target_os = "linux")]
 #[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 mod boot_patch;
-mod boot_watchdog;
 #[cfg(target_os = "android")]
 mod cli;
 #[cfg(target_os = "android")]
@@ -48,9 +47,6 @@ fn report_fatal(error: &anyhow::Error) {
     if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
         let _ = writeln!(kmsg, "<3>esud fatal: {error:#}");
     }
-    if utils::getprop("ro.boot.init_fatal_panic").is_some_and(|value| value == "true") {
-        let _ = std::fs::write("/proc/sysrq-trigger", b"c");
-    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -58,6 +54,11 @@ fn main() -> anyhow::Result<()> {
     {
         let result = cli::run();
         if let Err(error) = &result {
+            if (module::is_critical_failure(error) || init_event::is_required_boot_failure(error))
+                && ksucalls::get_info().boot_mode == 1
+            {
+                esuinit::init::fatal_boot(|| report_fatal(error));
+            }
             report_fatal(error);
         }
         result
