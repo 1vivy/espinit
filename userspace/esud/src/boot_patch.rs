@@ -440,11 +440,15 @@ fn validate_payload(
         let other = config::parse_selected_rom(&fs::read_to_string(payload.join(path))?, id)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         config::validate_managed(manifest, &other).map_err(|error| anyhow::anyhow!("{error}"))?;
+        let image_prefix = format!("rom/{id}/");
         for partition in &other.partitions {
             if let Some(path) = partition.backend.strip_prefix("esp-file:") {
-                let path = path
-                    .strip_prefix("esu/")
-                    .context("ESP-file backend must be inside supplied esu payload")?;
+                if path.starts_with(&image_prefix) {
+                    continue;
+                }
+                let path = path.strip_prefix("esu/").context(
+                    "ESP-file backend must be in the supplied esu payload or owned ROM tree",
+                )?;
                 ensure!(
                     platform::open_file(&root, path)?.metadata()?.len() > 0,
                     "empty ESP backend"

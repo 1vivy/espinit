@@ -57,6 +57,12 @@ The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `f
 
 A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter use the detached-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
 
+**Host packaging (2026-10-07):** `esud boot-patch` accepts
+`esp-file:rom/<selected-id>/...` references without requiring those image files
+inside the esu payload: `rom-bootgen` installs the ROM-owned images on the ESP.
+Other ROM IDs remain refused. `esp-file:esu/...` backends still require a
+nonempty file in the supplied payload; configuration path validation is unchanged.
+
 **ESP-file lifecycle (2026-10-07): device-proven for managed ROM1 normal boot.**
 The disposable phone proof `20261006T091345Z-phone-pinned-esp-mount` established
 that an ESP-file loop pins the original contextless FAT superblock, so adding

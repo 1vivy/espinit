@@ -832,3 +832,44 @@ fn commandline_preserves_quoted_arguments_and_has_one_explicit_contract() {
     assert!(boot_cmdline(b"label=\"unterminated").is_err());
     assert!(boot_cmdline(&[b'x'; 1536]).is_err());
 }
+
+#[test]
+fn rom_owned_images_need_not_be_in_the_payload_but_payload_images_must_exist() {
+    for (backend, image, accepted) in [
+        ("rom/rom1/boot_a.img", None, true),
+        ("rom/rom2/boot_a.img", None, false),
+        ("rom/rom1/../boot_a.img", None, false),
+        ("esu/images/boot_a.img", None, false),
+        ("esu/images/boot_a.img", Some(&b""[..]), false),
+        ("esu/images/boot_a.img", Some(&b"payload image"[..]), true),
+    ] {
+        let fixture = Fixture::new();
+        fixture.managed();
+        let config = fixture.args.payload.join("roms/rom1.toml");
+        let text = format!(
+            "{}\n[[partitions]]\nname = \"boot_a\"\nbackend = \"esp-file:{backend}\"\nread_only = false\n",
+            fs::read_to_string(&config).unwrap()
+        );
+        fs::write(&config, &text).unwrap();
+        if let Some(bytes) = image {
+            fs::create_dir(fixture.args.payload.join("images")).unwrap();
+            fs::write(fixture.args.payload.join("images/boot_a.img"), bytes).unwrap();
+        }
+        let result = patch(&fixture.args);
+        assert_eq!(result.is_ok(), accepted, "{backend}: {result:?}");
+        if accepted {
+            assert_eq!(
+                fs::read_to_string(fixture.args.out.join("esp/esu/roms/rom1.toml")).unwrap(),
+                text
+            );
+            if let Some(bytes) = image {
+                assert_eq!(
+                    fs::read(fixture.args.out.join("esp/esu/images/boot_a.img")).unwrap(),
+                    bytes
+                );
+            }
+        } else {
+            assert!(!fixture.args.out.exists());
+        }
+    }
+}
