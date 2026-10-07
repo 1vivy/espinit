@@ -13,7 +13,6 @@
 #include "hook/syscall_hook_manager.h"
 #include "hook/lsm_hook.h"
 #include "runtime/esud.h"
-#include "runtime/esud_boot.h"
 #include "selinux/selinux.h"
 #include "hook/syscall_hook.h"
 #include "feature/selinux_hide.h"
@@ -69,8 +68,18 @@ struct cred *ksu_cred;
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
+static int hook_init_error;
+static bool hooks_ready;
+module_param_named(hook_init_error, hook_init_error, int, 0444);
+
+bool esu_hooks_ready(void)
+{
+    return READ_ONCE(hooks_ready);
+}
+
 int __init esu_init(void)
 {
+    int ret;
 #if defined(__x86_64__) && !defined(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER)
     // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set
     if (!boot_cpu_has(X86_FEATURE_INDIRECT_SAFE)) {
@@ -104,7 +113,9 @@ int __init esu_init(void)
     }
 
     ksu_init_symbol_resolver();
-    ksu_syscall_hook_init();
+    /* Supporting state must survive a failed installation if any callback
+     * has been exposed to another owner's saved-original chain.
+     */
 
     ksu_feature_init();
     ksu_lsm_hook_init();
@@ -112,11 +123,18 @@ int __init esu_init(void)
 
     ksu_supercalls_init();
 
-    ksu_syscall_hook_manager_init();
-
-    ksu_esud_init();
+    ret = ksu_syscall_hook_init();
+    if (ret)
+        goto hook_failure;
+    ret = ksu_syscall_hook_manager_init();
+    if (ret)
+        goto hook_failure;
+    ret = ksu_esud_init();
+    if (ret)
+        goto hook_failure;
 
     ksu_file_wrapper_init();
+    WRITE_ONCE(hooks_ready, true);
 
 #ifdef MODULE
 #ifndef CONFIG_KERNELESP_DEBUG
@@ -124,10 +142,34 @@ int __init esu_init(void)
 #endif
 #endif
     return 0;
+
+hook_failure:
+    hook_init_error = ret;
+    ksu_syscall_hook_exit();
+    pr_err("esu: required hooks failed: %d; core NOT ready\n", ret);
+    if (ksu_syscall_hooks_published()) {
+        /* Returning an init error would free code still reachable through
+         * an in-flight callback or a foreign saved-original pointer.
+         * GET_INFO remains available but ESU_STATE_READY stays clear.
+         */
+        pr_err("esu: retaining exposed module and callback state for boot lifetime\n");
+        return 0;
+    }
+    ksu_supercalls_exit();
+    ksu_selinux_hide_exit();
+    ksu_lsm_hook_exit();
+    ksu_feature_exit();
+    put_cred(ksu_cred);
+    return ret;
 }
 
 void __exit esu_exit(void)
 {
+    if (ksu_syscall_hooks_published()) {
+        pr_err("esu: forced unload of published hooks is unsupported\n");
+        return;
+    }
+    WRITE_ONCE(hooks_ready, false);
     // Phase 1: Stop all hooks first to prevent new callbacks
     ksu_syscall_hook_manager_exit();
 

@@ -12,6 +12,7 @@
 #include <linux/gfp.h> // IWYU pragma: keep
 #include <linux/uaccess.h>
 #include <linux/stop_machine.h>
+#include <linux/string.h>
 #include <asm/cacheflush.h>
 #include <asm-generic/fixmap.h>
 
@@ -114,6 +115,7 @@ fail:
 struct patch_text_info {
     void *dst;
     void *src;
+    const void *expected;
     size_t len;
     atomic_t cpu_count;
     int flags;
@@ -168,7 +170,10 @@ static int ksu_patch_text_cb(void *arg)
 
     /* The last CPU becomes master */
     if (atomic_inc_return(&pp->cpu_count) == num_online_cpus()) {
-        ret = ksu_patch_text_nosync(dst, src, len, flags);
+        if (pp->expected && memcmp(dst, pp->expected, len))
+            ret = -EBUSY;
+        else
+            ret = ksu_patch_text_nosync(dst, src, len, flags);
         /* Notify other processors with an additional increment. */
         atomic_inc(&pp->cpu_count);
     } else {
@@ -180,17 +185,23 @@ static int ksu_patch_text_cb(void *arg)
     return ret;
 }
 
-int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+int ksu_patch_text_checked(void *dst, const void *expected, void *src, size_t len, int flags)
 {
     struct patch_text_info info = {
         .dst = dst,
         .src = src,
+        .expected = expected,
         .len = len,
         .cpu_count = ATOMIC_INIT(0),
         .flags = flags,
     };
 
     return stop_machine(ksu_patch_text_cb, &info, cpu_online_mask);
+}
+
+int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+{
+    return ksu_patch_text_checked(dst, NULL, src, len, flags);
 }
 
 // TODO:

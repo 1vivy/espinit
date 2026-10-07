@@ -7,9 +7,9 @@ Source and host checks are not proof of an enforcing device boot. The Cuttlefish
 ## Architecture and identity
 
 - `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the saved `/init.esureal`, preserving any existing init wrapper and its `/init.real`.
-- `kernelesp.ko` provides the core UAPI, strict module relocation loader, KernelSU SELinux rules and boot-mode-gated init RC injection.
+- `kernelesp.ko` provides the core UAPI, strict module relocation loader, KernelSU SELinux rules and boot-mode-gated init RC injection. Ownership-checked direct wrappers for `execve`, `execveat` and `setresuid` call their saved originals; they do not compete with KernelSU's `sys_enter` redirect for one rewritten syscall number.
 - `thin.ko` and `gpt.ko` provide thin storage and an in-memory projected partition view. `efivarfs.ko` exposes bdsvars through the standard efivarfs file API.
-- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.esureal`; second-stage init recreates both, copies the ESP binaries with stock toybox and relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
+- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.esureal`; second-stage init reuses a writable `/debug_ramdisk`, or mounts a parent tmpfs only when the read-only directory is empty, then recreates both child mounts and copies the ESP binaries with stock toybox. A populated read-only parent fails closed instead of hiding content. The core relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
 - Runtime ROM identity is `BootedRom` in bdsvars. `Slot-<id>` supplies the authoritative number, 1 through 5. PID 1 temporarily mounts efivarfs at `/efivars`; the daemon and Boot HAL use `/dev/efivars`. Missing identity (or `direct`) is unmanaged; a managed identity with missing or malformed Slot fails closed. No bootconfig selector or default ROM number substitutes for it.
 - The daemon's only writable persistent state is `/data/adb/esu/log`, created at post-fs-data. Modules, binaries and configuration never come from `/data/adb` or `/metadata/esu`.
 
@@ -57,7 +57,7 @@ The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `f
 
 A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter use the detached-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
 
-**ESP-file lifecycle (2026-10-06): detached handoff implemented; phone proof pending.**
+**ESP-file lifecycle (2026-10-07): post-switch bootstrap repaired; phone proof pending.**
 The disposable phone proof `20261006T091345Z-phone-pinned-esp-mount` established
 that an ESP-file loop pins the original contextless FAT superblock, so adding
 `context=esu_file` on a later mount fails `EINVAL`. Retaining the visible mount
@@ -66,21 +66,35 @@ SwitchRoot after init overmounted `/debug_ramdisk`.
 
 esuinit verifies one owned contextless ESP before projection, stages binaries
 on executable tmpfs for PID-1 scripts, then detaches both mounts before exec.
-Through the existing set-once RC handoff it publishes an `early-init` action
-carrying the selected major/minor and RO/RW mode. After the root switch, stock
-toybox recreates the block node; init mounts the ESP with matching access and
-no security context override, creates a new staging tmpfs, and copies binaries.
-The core's existing `on init` action labels staging `u:object_r:esu_file:s0`
-with toybox before executing `esud early`. Bootstrap and admitted module RC
-share the existing 65536-byte limit.
+Through the existing set-once RC handoff it publishes one fail-fast `early-init`
+shell action carrying the selected major/minor and RO/RW mode. After the root
+switch, the action reuses a writable `/debug_ramdisk`; when the stock root
+provides the observed empty read-only directory, it mounts an owned parent
+tmpfs. Existing content is never covered. Stock toybox then recreates the block
+node, mounts the ESP with matching access and no security context override,
+creates a new executable staging tmpfs, and copies binaries. The core's existing
+`on init` action labels staging `u:object_r:esu_file:s0` with toybox before
+executing `esud early`. Bootstrap and admitted module RC share the existing
+65536-byte limit.
 
 esud checks the staging filesystem and every inode label, selected ESP device
 identity and exact `u:object_r:vfat:s0` root label before creating the
 per-mount-RO `/dev/esp` bind. Optional module failures are reported without
-rebooting Android; see the critical-module policy below. Host disposable FAT/loop runs
-passed detach, init-style overmount, contextless reattachment and continued
-inner-loop reads/writes in separate RO/RW lanes. These do not qualify Android
-policy loading or ROM >= 2 boot; phone proof remains required.
+rebooting Android; see the critical-module policy below. Disposable namespace
+runs passed the post-switch parent cases: empty read-only replacement, populated
+read-only refusal without hiding content, and existing writable-mount reuse.
+The real generation-6 arm64 GKI also loaded this kernelesp beside the stock
+KernelSU module and exercised both modules' overlapping exec/setresuid paths.
+These runs do not qualify Android policy loading or ROM >= 2 boot; phone proof
+remains required.
+
+Direct syscall publication pins `kernelesp.ko` for the boot lifetime. A later
+hook can retain a raw saved-original pointer, and the init-RC file-operation
+proxies have no release handshake, so table ownership plus an RCU grace period
+cannot prove unload safety. Installation failures keep `ESU_STATE_READY` clear;
+PID 1 rejects the retained but unready core. The former destructive `esud
+unload` command was removed rather than stopping Android services before a
+predictable `EBUSY`.
 
 `gpt.ko` never writes disk GPT metadata or changes partition boundaries. It is a naming/projection facility, not a hostile-root isolation boundary: raw whole-LU access is not filtered. Shadowed physical backends retain native access modes so DM/LVM projections can use them.
 

@@ -23,7 +23,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         params: Vec<String>,
     },
-    Unload,
     Core {
         #[command(subcommand)]
         command: Core,
@@ -79,7 +78,6 @@ pub fn run() -> Result<()> {
         Commands::BootCompleted => init_event::on_stage(init_event::Stage::BootCompleted),
         Commands::Recovery => init_event::on_stage(init_event::Stage::Recovery),
         Commands::Insmod { module, params } => crate::debug::insmod(&module, &params),
-        Commands::Unload => crate::unload::unload(),
         Commands::Core {
             command: Core::SetBootMode { mode },
         } => esuinit::set_core_boot_mode(mode),

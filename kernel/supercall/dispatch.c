@@ -16,32 +16,20 @@
 #include "feature/kernel_umount.h"
 #include "selinux/selinux.h"
 #include "infra/file_wrapper.h"
-#include "hook/tp_marker.h"
+#include "hook/syscall_hook.h"
 #include "supercall/supercall.h"
 #include "runtime/platform_boot.h"
 #include "runtime/esud.h"
 
-/*
- * Core readiness.
- *
- * The kernel marks a module MODULE_STATE_LIVE only after its init function
- * returned successfully, and moves it out of that state before its exit
- * function runs, so module liveness is exactly the "normal initialization
- * completed" boundary. Readiness is reported from that state directly, so
- * there is no separate bookkeeping in core/init.c that could drift.
+/* Module liveness alone is not readiness: a failed install can remain resident
+ * because another owner or an in-flight syscall still references our code.
  */
 static bool ksu_core_ready(void)
 {
 #ifdef MODULE
-    return THIS_MODULE->state == MODULE_STATE_LIVE;
+    return THIS_MODULE->state == MODULE_STATE_LIVE && esu_hooks_ready();
 #else
-    /*
-     * Built-in esu runs its initcall before any userspace process exists,
-     * and the only way to obtain the esu fd is the reboot hook registered
-     * by that same initcall, so a reachable ioctl implies that normal
-     * initialization completed.
-     */
-    return true;
+    return esu_hooks_ready();
 #endif
 }
 
@@ -247,69 +235,6 @@ static int do_get_wrapper_fd(void __user *arg)
     }
 
     return ksu_install_file_wrapper(cmd.fd);
-}
-
-static int do_manage_mark(void __user *arg)
-{
-    struct ksu_manage_mark_cmd cmd;
-    int ret = 0;
-
-    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
-        pr_err("manage_mark: copy_from_user failed\n");
-        return -EFAULT;
-    }
-
-    switch (cmd.operation) {
-    case KSU_MARK_GET: {
-        // Get task mark status
-        ret = ksu_get_task_mark(cmd.pid);
-        if (ret < 0) {
-            pr_err("manage_mark: get failed for pid %d: %d\n", cmd.pid, ret);
-            return ret;
-        }
-        cmd.result = (u32)ret;
-        break;
-    }
-    case KSU_MARK_MARK: {
-        if (cmd.pid == 0) {
-            ksu_mark_all_process();
-        } else {
-            ret = ksu_set_task_mark(cmd.pid, true);
-            if (ret < 0) {
-                pr_err("manage_mark: set_mark failed for pid %d: %d\n", cmd.pid, ret);
-                return ret;
-            }
-        }
-        break;
-    }
-    case KSU_MARK_UNMARK: {
-        if (cmd.pid == 0) {
-            ksu_unmark_all_process();
-        } else {
-            ret = ksu_set_task_mark(cmd.pid, false);
-            if (ret < 0) {
-                pr_err("manage_mark: set_unmark failed for pid %d: %d\n", cmd.pid, ret);
-                return ret;
-            }
-        }
-        break;
-    }
-    case KSU_MARK_REFRESH: {
-        ksu_mark_running_process();
-        pr_info("manage_mark: refreshed running processes\n");
-        break;
-    }
-    default: {
-        pr_err("manage_mark: invalid operation %u\n", cmd.operation);
-        return -EINVAL;
-    }
-    }
-    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
-        pr_err("manage_mark: copy_to_user failed\n");
-        return -EFAULT;
-    }
-
-    return 0;
 }
 
 static int do_nuke_ext4_sysfs(void __user *arg)
@@ -541,12 +466,6 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .cmd = KSU_IOCTL_GET_WRAPPER_FD,
         .name = "GET_WRAPPER_FD",
         .handler = do_get_wrapper_fd,
-        .perm_check = only_root
-    },
-    {
-        .cmd = KSU_IOCTL_MANAGE_MARK,
-        .name = "MANAGE_MARK",
-        .handler = do_manage_mark,
         .perm_check = only_root
     },
     {

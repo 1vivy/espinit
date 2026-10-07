@@ -9,13 +9,12 @@
 
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
-#include "hook/tp_marker.h"
 #include "hook/setuid_hook.h"
 #include "runtime/esud.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 
-static int ksu_handle_init_mark_tracker(const char __user **filename_user)
+static int ksu_handle_init_esud(const char __user **filename_user)
 {
     char path[64];
     unsigned long addr;
@@ -35,10 +34,6 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
     if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
         pr_info("hook_manager: escape to root for init executing esud: %d\n", current->pid);
         escape_to_root_for_init();
-    } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
-                      strstr(path, "/stub_zygote") == NULL)) {
-        pr_info("hook_manager: unmark %d exec %s\n", current->pid, path);
-        ksu_clear_task_tracepoint_flag_if_needed(current);
     }
 
     return 0;
@@ -51,7 +46,7 @@ void ksu_stop_esud_execve_hook()
     static_branch_disable(&esud_execve_key);
 }
 
-static long __nocfi ksu_hook_execve_common(int orig_nr, const struct pt_regs *regs, bool execveat)
+static long __nocfi ksu_hook_execve_common(syscall_fn_t original, const struct pt_regs *regs, bool execveat)
 {
     const char __user **filename_user =
         execveat ? (const char __user **)&PT_REGS_PARM2(regs) : (const char __user **)&PT_REGS_SYSCALL_PARM1(regs);
@@ -66,25 +61,25 @@ static long __nocfi ksu_hook_execve_common(int orig_nr, const struct pt_regs *re
     }
 
     if (current->pid != 1 && current_is_init)
-        ksu_handle_init_mark_tracker(filename_user);
+        ksu_handle_init_esud(filename_user);
 
-    return ksu_syscall_table[orig_nr](regs);
+    return original(regs);
 }
 
-long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
+long __nocfi ksu_hook_execve(syscall_fn_t original, const struct pt_regs *regs)
 {
-    return ksu_hook_execve_common(orig_nr, regs, false);
+    return ksu_hook_execve_common(original, regs, false);
 }
 
-long __nocfi ksu_hook_execveat(int orig_nr, const struct pt_regs *regs)
+long __nocfi ksu_hook_execveat(syscall_fn_t original, const struct pt_regs *regs)
 {
-    return ksu_hook_execve_common(orig_nr, regs, true);
+    return ksu_hook_execve_common(original, regs, true);
 }
 
-long __nocfi ksu_hook_setresuid(int orig_nr, const struct pt_regs *regs)
+long __nocfi ksu_hook_setresuid(syscall_fn_t original, const struct pt_regs *regs)
 {
     uid_t old_uid = current_uid().val;
-    long ret = ksu_syscall_table[orig_nr](regs);
+    long ret = original(regs);
 
     if (ret < 0)
         return ret;

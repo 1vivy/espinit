@@ -7,7 +7,7 @@
 
 #define KSUD_PATH "/debug_ramdisk/esu/bin/esud"
 
-void ksu_esud_init();
+int ksu_esud_init(void);
 void ksu_esud_exit();
 int esu_set_module_rc(const void __user *ptr, u32 len);
 

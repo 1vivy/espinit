@@ -123,7 +123,7 @@ void __init ksu_supercalls_init(void)
     }
 }
 
-void __exit ksu_supercalls_exit(void)
+void ksu_supercalls_exit(void)
 {
     unregister_kprobe(&reboot_kp);
     ksu_supercall_cleanup_state();

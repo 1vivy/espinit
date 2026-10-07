@@ -488,7 +488,7 @@ void __init ksu_selinux_hide_init()
     hook_selinux_status_open();
 }
 
-void __exit ksu_selinux_hide_exit()
+void ksu_selinux_hide_exit()
 {
     mutex_lock(&selinux_hide_mutex);
     if (ksu_selinux_hide_running) {

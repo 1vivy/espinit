@@ -11,6 +11,8 @@ config KERNELESP
 	  To compile as a module, choose M here: the
 	  module will be called esu.
 	  A loadable module must be loaded by PID 1 during early boot.
+	  Direct syscall hooks keep a loadable module resident once published:
+	  another hook may retain its callback in a saved-original chain.
 
 config KERNELESP_DEBUG
 	bool "esu debug mode"

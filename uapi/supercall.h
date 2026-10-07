@@ -87,17 +87,6 @@ struct ksu_get_wrapper_fd_cmd {
     __u32 flags; /* Input: flags of userspace fd */
 };
 
-struct ksu_manage_mark_cmd {
-    __u32 operation; /* Input: KSU_MARK_* */
-    __s32 pid; /* Input: target pid (0 for all processes) */
-    __u32 result; /* Output: for get operation - mark status or reg_count */
-};
-
-static const __u32 KSU_MARK_GET = 1;
-static const __u32 KSU_MARK_MARK = 2;
-static const __u32 KSU_MARK_UNMARK = 3;
-static const __u32 KSU_MARK_REFRESH = 4;
-
 struct ksu_nuke_ext4_sysfs_cmd {
     __aligned_u64 arg; /* Input: mnt pointer */
 };
@@ -125,7 +114,6 @@ static const __u32 KSU_IOCTL_CHECK_SAFEMODE = _IOC(_IOC_READ, 'E', 5, 0);
 static const __u32 KSU_IOCTL_GET_FEATURE = _IOC(_IOC_READ | _IOC_WRITE, 'E', 13, 0);
 static const __u32 KSU_IOCTL_SET_FEATURE = _IOC(_IOC_WRITE, 'E', 14, 0);
 static const __u32 KSU_IOCTL_GET_WRAPPER_FD = _IOC(_IOC_WRITE, 'E', 15, 0);
-static const __u32 KSU_IOCTL_MANAGE_MARK = _IOC(_IOC_READ | _IOC_WRITE, 'E', 16, 0);
 static const __u32 KSU_IOCTL_NUKE_EXT4_SYSFS = _IOC(_IOC_WRITE, 'E', 17, 0);
 static const __u32 KSU_IOCTL_ADD_TRY_UMOUNT = _IOC(_IOC_WRITE, 'E', 18, 0);
 static const __u32 KSU_IOCTL_SET_INIT_PGRP = _IO('E', 19);

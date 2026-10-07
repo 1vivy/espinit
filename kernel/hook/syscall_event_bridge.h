@@ -2,10 +2,11 @@
 #define __KSU_H_SYSCALL_EVENT_BRIDGE
 
 #include <asm/ptrace.h>
+#include "hook/syscall_hook.h"
 
-long ksu_hook_execve(int orig_nr, const struct pt_regs *regs);
-long ksu_hook_execveat(int orig_nr, const struct pt_regs *regs);
-long ksu_hook_setresuid(int orig_nr, const struct pt_regs *regs);
+long ksu_hook_execve(syscall_fn_t original, const struct pt_regs *regs);
+long ksu_hook_execveat(syscall_fn_t original, const struct pt_regs *regs);
+long ksu_hook_setresuid(syscall_fn_t original, const struct pt_regs *regs);
 
 void ksu_stop_esud_execve_hook(void);
 

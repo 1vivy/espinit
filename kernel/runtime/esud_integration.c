@@ -60,7 +60,9 @@ int esu_get_platform_boot_mode(void)
 static void stop_init_rc_hook();
 static void stop_execve_hook();
 
-static struct work_struct stop_input_hook_work;
+static void do_stop_input_hook(struct work_struct *work);
+static DECLARE_WORK(stop_input_hook_work, do_stop_input_hook);
+static bool input_hook_registered;
 
 #define MAX_ARG_STRINGS 0x7FFFFFFF
 struct user_arg_ptr {
@@ -600,14 +602,19 @@ static struct kprobe input_event_kp = {
 
 static void do_stop_input_hook(struct work_struct *work)
 {
-    unregister_kprobe(&input_event_kp);
+    if (input_hook_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_hook_registered = false;
+    }
 }
 
 static void stop_init_rc_hook()
 {
-    ksu_syscall_table_unhook(__NR_read);
-    ksu_syscall_table_unhook(__NR_fstat);
-    pr_info("unregister init_rc syscall hook\n");
+    int read_ret = ksu_syscall_table_unhook(__NR_read);
+    int stat_ret = ksu_syscall_table_unhook(__NR_fstat);
+
+    if (!read_ret && !stat_ret)
+        pr_info("unregister init_rc syscall hook\n");
 }
 
 void ksu_stop_input_hook_runtime(void)
@@ -622,25 +629,40 @@ void ksu_stop_input_hook_runtime(void)
 }
 
 // esud: module support
-void __init ksu_esud_init()
+int __init ksu_esud_init(void)
 {
     int ret;
 
-    ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
-    ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
+    ret = ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
+    if (ret)
+        goto fail;
+    ret = ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
+    if (ret)
+        goto fail;
 
     ret = register_kprobe(&input_event_kp);
     pr_info("esud: input_event_kp: %d\n", ret);
 
-    INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
+    input_hook_registered = !ret;
+    return 0;
+fail:
+    pr_err("esud: required init_rc hook installation failed: %d\n", ret);
+    ksu_syscall_hook_exit();
+    return ret;
 }
 
 void __exit ksu_esud_exit()
 {
-    // TODO:
-    // this should be done before unregister vfs_read_kp
-    // stop_init_rc_hook();
-    unregister_kprobe(&input_event_kp);
+    /* Forced unload of a published module is unsupported. Do not free data
+     * while saved-original chains or file_operations can still reach us.
+     */
+    if (ksu_syscall_hooks_published())
+        return;
+    cancel_work_sync(&stop_input_hook_work);
+    if (input_hook_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_hook_registered = false;
+    }
 
     if (module_rc_buf) {
         free_module_rc();

@@ -7,7 +7,7 @@ kernelesp-objs += hook/lsm_hook.o
 kernelesp-objs += hook/setuid_hook.o
 kernelesp-objs += hook/syscall_event_bridge.o
 kernelesp-objs += hook/syscall_hook_manager.o
-kernelesp-objs += hook/tp_marker.o
+kernelesp-objs += hook/syscall_hook.o
 ifeq ($(CONFIG_ARM64),y)
 kernelesp-objs += hook/arm64/patch_memory.o
 kernelesp-objs += hook/arm64/syscall_hook.o

@@ -33,8 +33,6 @@ mod resetprop;
 mod rom_isolation;
 mod sepolicy;
 #[cfg(target_os = "android")]
-mod unload;
-#[cfg(target_os = "android")]
 mod utils;
 
 #[allow(nonstandard_style, unused, unsafe_op_in_unsafe_fn)]

@@ -281,19 +281,45 @@ fn too_large() -> Failure {
 /// Match the loop-pinned superblock's access mode; never add SELinux mount
 /// options. This action precedes module early-init actions and the core's
 /// on-init relabel/esu-early service.
+///
+/// Stock init can leave `/debug_ramdisk` as a plain directory on the read-only
+/// system image, where the child mount points cannot be created. The whole
+/// sequence therefore runs as one shell script under `set -e`: stock init has
+/// no conditional command, so a separate preparation step could not stop the
+/// staging commands from running after it failed. The script reuses a parent it
+/// can create in, mounts its own tmpfs when the parent is read-only and empty,
+/// and fails closed when that read-only parent already carries content the
+/// mount would hide.
+///
+/// The script is one init action argument, so the stock parser constrains its
+/// bytes: init expands properties in every argument and rejects the unbraced
+/// `$name` form, and its tokenizer has no escape for `"` inside a quoted
+/// token. The script uses no `$`, `"`, `\` or `#` at all. Only stock `sh`,
+/// `ls`, and the toybox applets the staging already needs are available here:
+/// the ESP payload, including esud, is not staged yet. `toybox mount` splits
+/// `-o` into mount flags and filesystem data exactly like init's own `mount`,
+/// so the device, access mode, nosuid/nodev/noexec flags and `mode=0755` data
+/// of both staging mounts are unchanged.
 fn bootstrap_rc(device: (u32, u32), writable: bool) -> String {
     let (major, minor) = device;
     let access = if writable { "rw" } else { "ro" };
     format!(
-        "\non early-init\n\
-         \x20   exec u:r:esu:s0 root -- /system/bin/toybox mknod /dev/esu-esp b {major} {minor}\n\
-         \x20   mkdir /debug_ramdisk/esp 0700 root root\n\
-         \x20   mount vfat /dev/esu-esp /debug_ramdisk/esp {access} nosuid nodev noexec\n\
-         \x20   mkdir /debug_ramdisk/esu 0755 root root\n\
-         \x20   mount tmpfs esu /debug_ramdisk/esu nosuid nodev mode=0755\n\
-         \x20   exec u:r:esu:s0 root -- /system/bin/toybox cp -R /debug_ramdisk/esp/esu/bin /debug_ramdisk/esu/bin\n\
-         \x20   exec u:r:esu:s0 root -- /system/bin/toybox chmod -R 0755 /debug_ramdisk/esu/bin\n\
-         \x20   write /debug_ramdisk/esu/esp-device {major}:{minor}\n\n"
+        "\non early-init\n    exec u:r:esu:s0 root -- /system/bin/sh -c \"set -eu; \
+         test -d /debug_ramdisk; test ! -L /debug_ramdisk; \
+         if /system/bin/toybox mkdir /debug_ramdisk/.esu-probe; then \
+         /system/bin/toybox rmdir /debug_ramdisk/.esu-probe; \
+         elif /system/bin/toybox ls -A /debug_ramdisk | read entry; then exit 1; \
+         else /system/bin/toybox mount -t tmpfs -o nosuid,nodev,mode=0755 esu-parent /debug_ramdisk; fi; \
+         /system/bin/toybox mknod /dev/esu-esp b {major} {minor}; \
+         /system/bin/toybox mkdir -p /debug_ramdisk/esp; \
+         /system/bin/toybox chmod 0700 /debug_ramdisk/esp; \
+         /system/bin/toybox mount -t vfat -o {access},nosuid,nodev,noexec /dev/esu-esp /debug_ramdisk/esp; \
+         /system/bin/toybox mkdir -p /debug_ramdisk/esu; \
+         /system/bin/toybox chmod 0755 /debug_ramdisk/esu; \
+         /system/bin/toybox mount -t tmpfs -o nosuid,nodev,mode=0755 esu /debug_ramdisk/esu; \
+         /system/bin/toybox cp -R /debug_ramdisk/esp/esu/bin /debug_ramdisk/esu/bin; \
+         /system/bin/toybox chmod -R 0755 /debug_ramdisk/esu/bin; \
+         echo {major}:{minor} > /debug_ramdisk/esu/esp-device\"\n\n"
     )
 }
 

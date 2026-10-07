@@ -7,6 +7,7 @@
 #include <linux/pgtable.h>
 #include <linux/stop_machine.h>
 #include <linux/uaccess.h>
+#include <linux/string.h>
 #include <asm/cacheflush.h>
 #include <asm/fixmap.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -81,6 +82,7 @@ missing:
 struct patch_info {
     void *dst;
     const void *src;
+    const void *expected;
     size_t len;
     int flags;
     int result;
@@ -118,7 +120,10 @@ static int patch_cpu(void *data)
     struct patch_info *info = data;
 
     if (atomic_inc_return(&info->arrived) == num_online_cpus()) {
-        info->result = write_patch(info);
+        if (info->expected && memcmp(info->dst, info->expected, info->len))
+            info->result = -EBUSY;
+        else
+            info->result = write_patch(info);
         atomic_inc_return_release(&info->arrived);
     } else {
         while (atomic_read_acquire(&info->arrived) <= num_online_cpus())
@@ -132,7 +137,7 @@ static int patch_cpu(void *data)
     return 0;
 }
 
-int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+int ksu_patch_text_checked(void *dst, const void *expected, void *src, size_t len, int flags)
 {
     struct mutex *text_lock = (struct mutex *)find_kernel_symbol_exact("text_mutex");
     unsigned long end;
@@ -140,6 +145,7 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
     struct patch_info info = {
         .dst = dst,
         .src = src,
+        .expected = expected,
         .len = len,
         .flags = flags,
         .arrived = ATOMIC_INIT(0),
@@ -157,6 +163,11 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
     mutex_unlock(text_lock);
     cpus_read_unlock();
     return ret ? ret : info.result;
+}
+
+int ksu_patch_text(void *dst, void *src, size_t len, int flags)
+{
+    return ksu_patch_text_checked(dst, NULL, src, len, flags);
 }
 
 void *scan_call_to(void *start, size_t size, void *target)
