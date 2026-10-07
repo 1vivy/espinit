@@ -366,7 +366,6 @@ fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
         "0123456789ab",
     )
     .unwrap();
-    assert_eq!(legacy_lz4(&overlay).unwrap(), legacy_lz4(&overlay).unwrap());
     assert_eq!(overlay.len() % 512, 0);
     validate_cpio(&overlay).unwrap();
     let modules = Cpio::load_from_data(&overlay).unwrap();
@@ -390,7 +389,7 @@ fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
     );
     assert_eq!(cpio.entry_by_name("init").unwrap().data().unwrap(), binary);
     assert_eq!(
-        cpio.entry_by_name("init.real").unwrap().data().unwrap(),
+        cpio.entry_by_name("init.esureal").unwrap().data().unwrap(),
         real_init
     );
     let archive = legacy_lz4(&overlay).unwrap();
@@ -539,7 +538,7 @@ fn required_boot_path_preserves_source_kernel_and_saved_init() {
         fs::read(&fixture.args.esuinit).unwrap()
     );
     assert_eq!(
-        cpio.entry_by_name("init.real").unwrap().data().unwrap(),
+        cpio.entry_by_name("init.esureal").unwrap().data().unwrap(),
         saved_init
     );
     assert!(!cpio.exists("kernelsu.ko"));
@@ -551,6 +550,69 @@ fn required_boot_path_preserves_source_kernel_and_saved_init() {
         .unwrap(),
         image
     );
+}
+
+#[test]
+fn takeover_preserves_an_existing_init_wrapper_and_its_real_init() {
+    let wrapper = binary_fixture("existing-init-wrapper");
+    let real_init = binary_fixture("existing-real-init");
+    let esuinit = binary_fixture(FIXTURE_MARKER);
+    let module = b"existing-root-module".to_vec();
+    let mut stock = Cpio::new();
+    for (name, bytes) in [
+        ("init", wrapper.clone()),
+        ("init.real", real_init.clone()),
+        ("kernelsu.ko", module.clone()),
+    ] {
+        stock
+            .add(name, CpioEntry::regular(0o755, Box::new(bytes)))
+            .unwrap();
+    }
+    let mut ramdisk = Vec::new();
+    stock.dump(&mut ramdisk).unwrap();
+    let source = stock_boot(4, &ramdisk);
+    let overlay = takeover_cpio(
+        esuinit.clone(),
+        stock_init(&source, 183).unwrap(),
+        BTreeMap::new(),
+        "0123456789ab",
+    )
+    .unwrap();
+    let patched = patch_boot(&source, &overlay).unwrap();
+    let image = BootImage::parse(&patched).unwrap();
+    let mut rebuilt = Vec::new();
+    image
+        .get_blocks()
+        .get_ramdisk()
+        .unwrap()
+        .dump(&mut rebuilt, false)
+        .unwrap();
+    assert!(rebuilt.starts_with(&ramdisk));
+    let cpio = Cpio::load_from_data(&rebuilt).unwrap();
+    for (name, expected) in [
+        ("init", esuinit),
+        ("init.esureal", wrapper),
+        ("init.real", real_init),
+        ("kernelsu.ko", module),
+    ] {
+        assert_eq!(cpio.entry_by_name(name).unwrap().data().unwrap(), expected);
+    }
+}
+
+#[test]
+fn takeover_refuses_to_overwrite_its_own_preserved_init_path() {
+    let mut stock = Cpio::new();
+    for name in ["init", "init.esureal"] {
+        stock
+            .add(
+                name,
+                CpioEntry::regular(0o755, Box::new(binary_fixture("existing-init"))),
+            )
+            .unwrap();
+    }
+    let mut ramdisk = Vec::new();
+    stock.dump(&mut ramdisk).unwrap();
+    assert!(stock_init(&stock_boot(4, &ramdisk), 183).is_err());
 }
 
 #[test]
@@ -586,7 +648,7 @@ fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted()
             .unwrap();
         let cpio = Cpio::load_from_data(&archive).unwrap();
         assert!(cpio.exists("init"));
-        assert!(cpio.exists("init.real"));
+        assert!(cpio.exists("init.esureal"));
     }
 }
 

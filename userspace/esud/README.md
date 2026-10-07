@@ -81,7 +81,7 @@ new-output/
       receipts/
 ```
 
-The stream contains one normalized newc overlay: `init` (esuinit), `init.real` (effective stock init), both 0755; `lib/` and the four modules (0644); and `esu-build-id` (0644). The stock boot/init_boot must be v3/v4 with a valid static effective init. Existing `init.real` collisions fail. The patched image preserves stock ramdisks and removes old rdinit/ROM-selector cmdline tokens; runtime selection uses bdsvars. It omits stale GKI/AVB signatures and is not a signed deployment artifact.
+The stream contains one normalized newc overlay: `init` (esuinit), `init.esureal` (effective prior init or wrapper), both 0755; `lib/` and the four modules (0644); and `esu-build-id` (0644). The source boot/init_boot must be v3/v4 with a valid executable effective init. Existing `init.esureal` collisions fail; an existing `init.real` and other wrapper files remain untouched. Use the ROM's actual init_boot, including its root wrapper, rather than a cleaned image that bypasses it. The patched image preserves original ramdisks and removes old rdinit/ROM-selector cmdline tokens; runtime selection uses bdsvars. It omits stale GKI/AVB signatures and is not a signed deployment artifact.
 
 ## Receipt and build ID
 

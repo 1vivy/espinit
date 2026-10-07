@@ -3,7 +3,7 @@
 //! The target is a collision-checked fixed path: ESP configuration can never
 //! choose an executable, and there is no fallback.  The KernelSU-style overlay
 //! installs esu as `/init` and preserves the effective prior `/init` at
-//! `/init.real`.
+//! `/init.esureal`, leaving a previous wrapper's `/init.real` untouched.
 
 use rustix::cstr;
 use rustix::runtime::execve;
@@ -11,7 +11,7 @@ use rustix::runtime::execve;
 use crate::receipt::{Failure, Stage};
 
 /// Fixed path holding the init that the takeover archive replaced.
-pub const REAL_INIT: &str = "/init.real";
+pub const REAL_INIT: &str = "/init.esureal";
 
 /// Replace this process with the real init, preserving the original `argv`,
 /// `envp`, and PID. This returns only on failure, which is a fatal handoff
@@ -24,7 +24,7 @@ pub unsafe fn exec_real_init(
     argv: *const *const u8,
     envp: *const *const u8,
 ) -> Result<(), Failure> {
-    let error = unsafe { execve(cstr!("/init.real"), argv, envp) };
+    let error = unsafe { execve(cstr!("/init.esureal"), argv, envp) };
 
     Err(Failure::new(
         Stage::Handoff,

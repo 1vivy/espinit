@@ -13,7 +13,7 @@ use esuinit::{handoff, init, receipt};
 /// PID 1, any failure stops the handoff, persists a bounded receipt, and enters
 /// the fatal-boot stop path; the real init is never executed after an init
 /// error. Both fatal paths record the receipt and then reboot and park PID 1.
-/// On success `/init.real` is executed with the original `argv`/`envp`,
+/// On success `/init.esureal` is executed with the original `argv`/`envp`,
 /// preserving PID 1 and `/init` argv[0].
 ///
 /// # Safety

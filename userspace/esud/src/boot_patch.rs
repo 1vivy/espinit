@@ -536,7 +536,10 @@ fn takeover_cpio(
 ) -> Result<Vec<u8>> {
     let mut cpio = Cpio::new();
     cpio.add("init", CpioEntry::regular(0o755, Box::new(binary)))?;
-    cpio.add("init.real", CpioEntry::regular(0o755, Box::new(real_init)))?;
+    cpio.add(
+        "init.esureal",
+        CpioEntry::regular(0o755, Box::new(real_init)),
+    )?;
     cpio.add(
         "esu-build-id",
         CpioEntry::regular(0o644, Box::new(format!("{build_id}\n").into_bytes())),
@@ -578,8 +581,8 @@ fn stock_init(source: &[u8], machine: u16) -> Result<Vec<u8>> {
     validate_cpio(&ramdisk)?;
     let cpio = Cpio::load_from_data(&ramdisk)?;
     ensure!(
-        !cpio.exists("init.real"),
-        "stock ramdisk already contains reserved init.real"
+        !cpio.exists("init.esureal"),
+        "stock ramdisk already contains reserved init.esureal"
     );
     let init = cpio
         .entry_by_name("init")

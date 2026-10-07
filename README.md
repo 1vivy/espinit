@@ -6,10 +6,10 @@ Source and host checks are not proof of an enforcing device boot. The Cuttlefish
 
 ## Architecture and identity
 
-- `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the saved `/init.real`.
+- `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the saved `/init.esureal`, preserving any existing init wrapper and its `/init.real`.
 - `kernelesp.ko` provides the core UAPI, strict module relocation loader, KernelSU SELinux rules and boot-mode-gated init RC injection.
 - `thin.ko` and `gpt.ko` provide thin storage and an in-memory projected partition view. `efivarfs.ko` exposes bdsvars through the standard efivarfs file API.
-- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.real`; second-stage init recreates both, copies the ESP binaries with stock toybox and relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
+- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.esureal`; second-stage init recreates both, copies the ESP binaries with stock toybox and relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
 - Runtime ROM identity is `BootedRom` in bdsvars. `Slot-<id>` supplies the authoritative number, 1 through 5. PID 1 temporarily mounts efivarfs at `/efivars`; the daemon and Boot HAL use `/dev/efivars`. Missing identity (or `direct`) is unmanaged; a managed identity with missing or malformed Slot fails closed. No bootconfig selector or default ROM number substitutes for it.
 - The daemon's only writable persistent state is `/data/adb/esu/log`, created at post-fs-data. Modules, binaries and configuration never come from `/data/adb` or `/metadata/esu`.
 
@@ -38,7 +38,7 @@ ESP /
 
 per-ROM newc takeover archive (legacy-LZ4):
   init                         static esuinit, 0755
-  init.real                    preserved stock init, 0755
+  init.esureal                 preserved prior init or wrapper, 0755
   esu-build-id                  12 lowercase hex + LF
   lib/{kernelesp,thin,gpt,efivarfs}.ko
 ```
