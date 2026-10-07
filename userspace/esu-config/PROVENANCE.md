@@ -25,8 +25,8 @@ only the manifest is adapted to espinit's workspace.
 From the gobbl worktree, check canonical source identity with:
 
 ```sh
-diff -r crates/esu-config/src /home/vivy/Projects/efisp-projects/espinit/userspace/esu-config/src
-diff -r crates/esu-config/tests /home/vivy/Projects/efisp-projects/espinit/userspace/esu-config/tests
+diff -r crates/esu-config/src /home/vivy/Projects/efisp-projects/kernelesp/userspace/esu-config/src
+diff -r crates/esu-config/tests /home/vivy/Projects/efisp-projects/kernelesp/userspace/esu-config/tests
 sha256sum crates/esu-config/src/schema.rs crates/esu-config/tests/schema.rs
 ```
 

@@ -42,7 +42,7 @@ top-level license does not relicense that separate module. This is a planned
 component boundary, not a claim that `thin.ko` is implemented.
 
 Report esu security issues privately through this fork's GitHub Security
-Advisory [Report a Vulnerability](https://github.com/1vivy/espinit/security/advisories/new)
+Advisory [Report a Vulnerability](https://github.com/1vivy/kernelesp/security/advisories/new)
 form. This is the reporting route for esu-specific defects, including
 identity collisions with a real KernelSU installation, the esu contract,
 and esu state paths. Do not post security reports or working exploits in

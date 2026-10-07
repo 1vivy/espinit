@@ -35,8 +35,8 @@ From the gobbl worktree, check public esu provenance with:
 
 ```sh
 sha256sum crates/avb-graft/src/lib.rs crates/avb-graft/tests/layout.rs
-cmp crates/avb-graft/src/lib.rs /home/vivy/Projects/efisp-projects/espinit/userspace/avb-graft/src/lib.rs
-cmp crates/avb-graft/tests/layout.rs /home/vivy/Projects/efisp-projects/espinit/userspace/avb-graft/tests/layout.rs
+cmp crates/avb-graft/src/lib.rs /home/vivy/Projects/efisp-projects/kernelesp/userspace/avb-graft/src/lib.rs
+cmp crates/avb-graft/tests/layout.rs /home/vivy/Projects/efisp-projects/kernelesp/userspace/avb-graft/tests/layout.rs
 cmp crates/avb-graft/src/lib.rs /home/vivy/Projects/efisp-projects/gobbl-aosp/bootable/libbootloader/gbl/avb-graft/src/lib.rs
 ```
 

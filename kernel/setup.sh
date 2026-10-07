@@ -39,7 +39,7 @@ perform_cleanup() {
 # Sets up or updates the esu environment
 setup_esu() {
     echo "[+] Setting up esu..."
-    test -d "$GKI_ROOT/esu" || git clone https://github.com/1vivy/espinit "$GKI_ROOT/esu" && echo "[+] Repository cloned."
+    test -d "$GKI_ROOT/esu" || git clone https://github.com/1vivy/kernelesp "$GKI_ROOT/esu" && echo "[+] Repository cloned."
     cd "$GKI_ROOT/esu"
     git stash && echo "[-] Stashed current changes."
     if [ "$(git status | grep -Po 'v\d+(\.\d+)*' | head -n1)" ]; then
