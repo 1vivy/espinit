@@ -9,8 +9,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO = Path(os.environ.get('BDSVARS_REPO', '/home/vivy/Projects/efisp-projects/gbl-bds-rs'))
-FIXTURE = Path(os.environ.get('BDSVARS_FIXTURE', '/home/vivy/Projects/efisp-projects/gbl-bds-lab/records/20261006T040000Z-phone-recovery-reads/evidence/bdsvars-1MiB.bin'))
+REPO = Path(os.environ.get('BDSVARS_REPO', '/home/vivy/Projects/efisp-projects/gobbl'))
+FIXTURE = Path(os.environ.get('BDSVARS_FIXTURE', '/home/vivy/Projects/efisp-projects/gobbl-lab/records/20261006T040000Z-phone-recovery-reads/evidence/bdsvars-1MiB.bin'))
 GUID = '7a5e4b1c-0d3f-4e62-9b8a-1c2d3e4f5a6b'
 
 class BackendContract(unittest.TestCase):

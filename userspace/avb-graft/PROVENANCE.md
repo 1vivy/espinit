@@ -1,6 +1,6 @@
 # AVB graft canonical-source provenance
 
-`crates/avb-graft/src/lib.rs` in gbl-bds-rs is the canonical allocation-free
+`crates/avb-graft/src/lib.rs` in gobbl is the canonical allocation-free
 layout implementation. Public esu vendors this exact file as
 `userspace/avb-graft/src/lib.rs`; GBL embeds the same source through the
 libbootloader patch series. Adapters own I/O and cryptographic admission.
@@ -31,13 +31,13 @@ Contract tests SHA-256:
 `f23d12b57d901535da305f4b510773cded33d25729f49eb8cf1b2ed2df42ec3d`.
 These content hashes, rather than a pre-cutover commit hash, identify the source.
 
-From the gbl-bds-rs worktree, check public esu provenance with:
+From the gobbl worktree, check public esu provenance with:
 
 ```sh
 sha256sum crates/avb-graft/src/lib.rs crates/avb-graft/tests/layout.rs
 cmp crates/avb-graft/src/lib.rs /home/vivy/Projects/efisp-projects/espinit/userspace/avb-graft/src/lib.rs
 cmp crates/avb-graft/tests/layout.rs /home/vivy/Projects/efisp-projects/espinit/userspace/avb-graft/tests/layout.rs
-cmp crates/avb-graft/src/lib.rs /home/vivy/Projects/efisp-projects/gbl-bds-rs-aosp/bootable/libbootloader/gbl/avb-graft/src/lib.rs
+cmp crates/avb-graft/src/lib.rs /home/vivy/Projects/efisp-projects/gobbl-aosp/bootable/libbootloader/gbl/avb-graft/src/lib.rs
 ```
 
 After applying the GBL patch series, compare its embedded module directly with

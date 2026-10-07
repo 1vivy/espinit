@@ -1,5 +1,5 @@
 //! Frozen AIDL V1 dispatch using the NDK C ABI (no vendor QTI libraries).
-use gblbds_boot_hal::{
+use gobbl_boot_hal::{
     COMMAND_FAILED,
     service::{Hal, Reply},
 };

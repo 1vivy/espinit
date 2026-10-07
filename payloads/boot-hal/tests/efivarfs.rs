@@ -1,5 +1,5 @@
 use esu_platform::efivars::{self, PROJECT_GUID};
-use gblbds_boot_hal::{
+use gobbl_boot_hal::{
     COMMAND_FAILED, Merge, State,
     service::{Hal, Reply},
     storage::Storage,
