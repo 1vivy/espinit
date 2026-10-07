@@ -57,7 +57,7 @@ The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `f
 
 A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter use the detached-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
 
-**ESP-file lifecycle (2026-10-07): post-switch bootstrap repaired; phone proof pending.**
+**ESP-file lifecycle (2026-10-07): device-proven for managed ROM1 normal boot.**
 The disposable phone proof `20261006T091345Z-phone-pinned-esp-mount` established
 that an ESP-file loop pins the original contextless FAT superblock, so adding
 `context=esu_file` on a later mount fails `EINVAL`. Retaining the visible mount
@@ -85,8 +85,11 @@ runs passed the post-switch parent cases: empty read-only replacement, populated
 read-only refusal without hiding content, and existing writable-mount reuse.
 The real generation-6 arm64 GKI also loaded this kernelesp beside the stock
 KernelSU module and exercised both modules' overlapping exec/setresuid paths.
-These runs do not qualify Android policy loading or ROM >= 2 boot; phone proof
-remains required.
+Phone record `20261007T081340Z-phone-esu-repair` then proved the full path:
+Android booted Enforcing; active policy retained both `esu`/`esu_file` and
+`ksu`/`ksu_file`; second stage cached the esu SIDs; the expected parent, ESP and
+staging mounts were present; and every esud callback through boot-completed ran
+as UID/GID 0 in `u:r:esu:s0` and exited 0. ROM >= 2 remains unproven.
 
 Direct syscall publication pins `kernelesp.ko` for the boot lifetime. A later
 hook can retain a raw saved-original pointer, and the init-RC file-operation
