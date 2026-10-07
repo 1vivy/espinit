@@ -1,6 +1,6 @@
 //! Emit tools/provision's --seed JSON; never opens a device or input image.
 use esu_platform::efivars::PROJECT_GUID;
-use gblbds_boot_hal::{Merge, State};
+use gobbl_boot_hal::{Merge, State};
 use std::fmt::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

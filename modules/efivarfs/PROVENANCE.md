@@ -34,7 +34,7 @@ block file, then unregisters the filesystem. The filesystem owner prevents
 normal module unload while mounted.
 
 The plan's prose phase order contradicts its named source of authority,
-`gbl-bds-rs/crates/varstore/src/persist.rs::apply`. The implementation follows
+`gobbl/crates/varstore/src/persist.rs::apply`. The implementation follows
 the actual Rust algorithm (approved by the integration owner):
 
 1. Predecessor(s): state AND `0xfe` (IN_DELETED_TRANSITION), then flush.
@@ -81,7 +81,7 @@ writes, fill the store without reclaim, verify malformed geometry/required dev,
 and inject a readback mismatch with same-process recovery of the old value.
 The Rust CLI is built with `cargo build --locked -p bdsvars` in the read-only
 main checkout using this module directory's ignored `target-bdsvars` directory.
-`BDSVARS_REPO` defaults to `/home/vivy/Projects/efisp-projects/gbl-bds-rs`;
+`BDSVARS_REPO` defaults to `/home/vivy/Projects/efisp-projects/gobbl`;
 `BDSVARS_FIXTURE` and `CC` may also override host locations. Tests skip cleanly
 if the CLI source checkout or the recovery fixture is absent.
 

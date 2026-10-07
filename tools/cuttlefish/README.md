@@ -36,7 +36,7 @@ tools/cuttlefish/assemble.py \
   --rom-id rom1 --output-dir /build/cf-payload
 ```
 
-`--boot-hal /build/gblbds-boot-hal` is the one optional input: supply the built
+`--boot-hal /build/gobbl-boot-hal` is the one optional input: supply the built
 replacement binary to package the Boot HAL module exactly as before, or omit it
 to assemble a payload without a Boot HAL directory, module-order entry, binary
 or required-file check. Every other input is required, and an explicitly

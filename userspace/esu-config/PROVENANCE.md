@@ -22,7 +22,7 @@ only the manifest is adapted to espinit's workspace.
 | tests/schema.rs | c9fb833e71948de03a216dd8cd35db211384749e9ffdd1489c0cb361237aa028 |
 | tests/fixtures/mod.rs | 16a9282a22f644dfaa6f5bc5710025baaae77cfc6c8989e3847659e66fe9edad |
 
-From the gbl-bds-rs worktree, check canonical source identity with:
+From the gobbl worktree, check canonical source identity with:
 
 ```sh
 diff -r crates/esu-config/src /home/vivy/Projects/efisp-projects/espinit/userspace/esu-config/src
@@ -40,7 +40,7 @@ and metadata validation by the shared `avb-graft` crate.
 
 ## Deviations from the source manifest
 
-`Cargo.toml` differs from gbl-bds-rs only in workspace adaptation:
+`Cargo.toml` differs from gobbl only in workspace adaptation:
 `edition.workspace = true` (espinit's edition) and `license = "Apache-2.0"`
 instead of the inherited workspace fields, and no `[lints]` section because
 espinit's workspace declares none. The serde and toml requirements are already

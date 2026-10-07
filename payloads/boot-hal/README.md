@@ -15,7 +15,7 @@ ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh
 
 The build uses the explicitly supplied NDK, API 35 and the installed
 `aarch64-linux-android` Rust target. Output:
-`payloads/boot-hal/target/aarch64-linux-android/release/gblbds-boot-hal`.
+`payloads/boot-hal/target/aarch64-linux-android/release/gobbl-boot-hal`.
 When supplied, the packager installs it as an optional read-only ESP module at
 `/esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`.
 There is no ELF generation note; `esu/build-id` and cpio `/esu-build-id`
