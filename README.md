@@ -9,7 +9,7 @@ Source and host checks are not proof of an enforcing device boot. The Cuttlefish
 - `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the saved `/init.real`.
 - `kernelesp.ko` provides the core UAPI, strict module relocation loader, KernelSU SELinux rules and boot-mode-gated init RC injection.
 - `thin.ko` and `gpt.ko` provide thin storage and an in-memory projected partition view. `efivarfs.ko` exposes bdsvars through the standard efivarfs file API.
-- `esud` runs from `/debug_ramdisk/esu/bin/esud`, staged onto executable tmpfs by PID 1. Android init relabels that tmpfs with stock `/system/bin/toybox chcon` running in the `esu` domain. PID 1 retains its contextless ESP mount at `/debug_ramdisk/esp`; esud verifies its stock `vfat` label and binds it read-only at `/dev/esp`. Init mounts only efivarfs at `/dev/efivars` with `context=u:object_r:esu_file:s0`.
+- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.real`; second-stage init recreates both, copies the ESP binaries with stock toybox and relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
 - Runtime ROM identity is `BootedRom` in bdsvars. `Slot-<id>` supplies the authoritative number, 1 through 5. PID 1 temporarily mounts efivarfs at `/efivars`; the daemon and Boot HAL use `/dev/efivars`. Missing identity (or `direct`) is unmanaged; a managed identity with missing or malformed Slot fails closed. No bootconfig selector or default ROM number substitutes for it.
 - The daemon's only writable persistent state is `/data/adb/esu/log`, created at post-fs-data. Modules, binaries and configuration never come from `/data/adb` or `/metadata/esu`.
 
@@ -43,7 +43,7 @@ per-ROM newc takeover archive (legacy-LZ4):
   lib/{kernelesp,thin,gpt,efivarfs}.ko
 ```
 
-Kernel modules are ramdisk-only. Any `.ko` inside an ESP source payload is rejected by the host packager. PID 1 creates `/debug_ramdisk/esp` without SELinux context options and never detaches that selected mount. Android's `/dev/esp` is a read-only, nosuid/nodev/noexec bind view of the same filesystem; its per-mount RO flag does not make writable loop backing read-only.
+Kernel modules are ramdisk-only. Any `.ko` inside an ESP source payload is rejected by the host packager. esuinit mounts `/debug_ramdisk/esp` without SELinux context options and detaches it before stock init can cover that path. Open loop backing files retain their references. Second-stage init mounts the same device with the same RO/RW mode; `/dev/esp` is a read-only, nosuid/nodev/noexec bind view whose per-mount RO flag does not freeze writable loop backing.
 
 ## Manifest and ROM configuration
 
@@ -55,28 +55,32 @@ See [`esu/manifest.example.toml`](esu/manifest.example.toml) and [`esu/rom.examp
 
 The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `firmware_views` are optional as permitted by managed-mode validation. `generation`, `rom_number`, `[platform]` and `recovery_packages` are not compatibility aliases and are rejected. ROM files are selected by bdsvars identity, not a filename inferred from a number. Number-dependent firmware validation runs against the Slot record, not host packaging guesses.
 
-A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter require the retained-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
+A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter use the detached-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
 
-**ESP-file lifecycle (2026-10-06): source implemented, device proof pending.**
-The old detach plus `context=esu_file` remount failed with `EINVAL` in
-`gbl-bds-lab/records/20261006T091345Z-phone-pinned-esp-mount`: an ESP-file
-loop pins the original contextless FAT superblock, whose label cannot change.
-PID 1 now verifies exactly one owned contextless vfat ESP mount before loop
-attachment/projection, and keeps it visible for the entire boot. It copies
-the complete `esu/bin` tree (including busybox, esud, thin-activate and other
-script helpers) to `/debug_ramdisk/esu/bin` on nosuid/nodev executable tmpfs
-before any payload script runs. The ESP itself is noexec.
+**ESP-file lifecycle (2026-10-06): detached handoff implemented; phone proof pending.**
+The disposable phone proof `20261006T091345Z-phone-pinned-esp-mount` established
+that an ESP-file loop pins the original contextless FAT superblock, so adding
+`context=esu_file` on a later mount fails `EINVAL`. Retaining the visible mount
+was not a solution: `20261007T014108Z-phone-loop` panicked in stock init's
+SwitchRoot after init overmounted `/debug_ramdisk`.
 
-After policy load, init runs stock toybox `chcon -R` in the esu domain to
-label the staged tree `u:object_r:esu_file:s0`; it never tries to relabel
-the ESP. Before running scripts or applying overlays, esud verifies the
-staging filesystem and every inode label, the retained ESP device identity,
-and exactly `u:object_r:vfat:s0` on the retained root. It then creates only
-a per-mount-RO bind view at `/dev/esp`. Any early gate failure reaches the
-`reboot_on_failure` service in Android; recovery's core RC drops that property
-and init logs the failed service instead. The blanket ESP-file refusal is removed only
-with these lifecycle gates. ROM >= 2 boot still needs disposable FAT/policy
-load and actual boot proof; host checks do not qualify device behavior.
+esuinit verifies one owned contextless ESP before projection, stages binaries
+on executable tmpfs for PID-1 scripts, then detaches both mounts before exec.
+Through the existing set-once RC handoff it publishes an `early-init` action
+carrying the selected major/minor and RO/RW mode. After the root switch, stock
+toybox recreates the block node; init mounts the ESP with matching access and
+no security context override, creates a new staging tmpfs, and copies binaries.
+The core's existing `on init` action labels staging `u:object_r:esu_file:s0`
+with toybox before starting `esu-early`. Module ordering and stage flags do not
+change; the bootstrap and module RC share the existing 65536-byte limit.
+
+esud checks the staging filesystem and every inode label, selected ESP device
+identity and exact `u:object_r:vfat:s0` root label before creating the
+per-mount-RO `/dev/esp` bind. Android's early-service failure remains fatal;
+recovery logs it without `reboot_on_failure`. Host disposable FAT/loop runs
+passed detach, init-style overmount, contextless reattachment and continued
+inner-loop reads/writes in separate RO/RW lanes. These do not qualify Android
+policy loading or ROM >= 2 boot; phone proof remains required.
 
 `gpt.ko` never writes disk GPT metadata or changes partition boundaries. It is a naming/projection facility, not a hostile-root isolation boundary: raw whole-LU access is not filtered. Shadowed physical backends retain native access modes so DM/LVM projections can use them.
 

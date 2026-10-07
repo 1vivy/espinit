@@ -50,7 +50,7 @@ use crate::selfcheck;
 pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     setup_kmsg();
     log::info!("esu early managed boot starting");
-    let (mounts, bootconfig, probe) = mount_minimal()?;
+    let (mut mounts, bootconfig, probe) = mount_minimal()?;
     if probe == Some(ProbeStage::Handoff) {
         log::warn!("lab handoff probe requested; skipping managed payload work");
         return prepare_handoff(state, &mounts);
@@ -89,7 +89,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         publish_empty_module_rc()?;
         return prepare_handoff(state, &mounts);
     }
-    let mount = state.esp_mount.as_ref().ok_or_else(|| {
+    let mount = state.esp_mount.as_mut().ok_or_else(|| {
         Failure::new(
             Stage::Storage,
             "EspMountUnavailable",
@@ -112,6 +112,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     config::validate_bootstrap(&manifest).map_err(Failure::from)?;
     mount.verify_retained()?;
     esp::stage_executables(&payload_root, esp_device)?;
+    mounts.push(esp::EXECUTABLE_ROOT);
     checkpoint(probe, ProbeStage::ManifestRead);
     crate::platform::validate_modules(&payload_root, &manifest.modules_order)?;
     log_build_ids(&payload_root);
@@ -120,7 +121,12 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         .map(|id| id.trim_end().to_owned());
     let Some((id, rom_number)) = identity else {
         log::info!("No managed efivarfs identity; handing off without projection");
-        crate::platform::publish_module_rc(&payload_root, &manifest.modules_order)?;
+        crate::platform::publish_module_rc(
+            &payload_root,
+            &manifest.modules_order,
+            esp_device,
+            false,
+        )?;
         return prepare_handoff(state, &mounts);
     };
     let rom = read_rom(&payload_root, &manifest, &id, rom_number)?;
@@ -129,8 +135,8 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     if rom.has_writable_esp_file() {
         // A writable `esp-file:` projection (only a managed ROM >= 2 may have
         // one) needs its preallocated image reachable for writing, so the ESP
-        // is remounted read-write for this boot before any module runs, and
-        // retained across handoff; module data gets a per-mount read-only view.
+        // is remounted read-write before any module runs. Open loop files keep
+        // that access across detach; module data gets a read-only bind view.
         esp::make_payload_writable(mount)?;
     }
 
@@ -169,7 +175,12 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         esp_device,
     )?;
     checkpoint(probe, ProbeStage::PayloadLoaded);
-    crate::platform::publish_module_rc(&payload_root, &manifest.modules_order)?;
+    crate::platform::publish_module_rc(
+        &payload_root,
+        &manifest.modules_order,
+        esp_device,
+        rom.has_writable_esp_file(),
+    )?;
     checkpoint(probe, ProbeStage::ModuleRcPublished);
     if probe == Some(ProbeStage::HandoffDelayed) {
         arm_delayed_handoff(&payload_root, &id, rom_number)?;
@@ -660,10 +671,13 @@ fn create_minimal_nodes() -> Result<(), Failure> {
     Ok(())
 }
 
-/// Remove only the minimal mounts. The contextless ESP and executable tmpfs
-/// remain attached across real init; loop backing references never lose their
-/// visible mount. A failed handoff writes its receipt through that same mount.
-fn prepare_handoff(_state: &mut ReceiptState, mounts: &[&str]) -> Result<(), Failure> {
+/// Detach every esuinit-owned mount before Android can overmount its paths.
+/// Loop backing files keep the detached ESP alive; a failed exec reattaches it
+/// only to persist the failure receipt.
+fn prepare_handoff(state: &mut ReceiptState, mounts: &[&str]) -> Result<(), Failure> {
+    if let Some(mount) = state.esp_mount.as_mut() {
+        mount.detach()?;
+    }
     for mountpoint in mounts.iter().rev() {
         esp::detach_owned(mountpoint)?;
     }

@@ -1,4 +1,4 @@
-//! Validate PID 1's retained ESP and executable staging before module execution.
+//! Validate second-stage init's ESP and executable staging before module execution.
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 use anyhow::{Context, Result, ensure};
 use esuinit::esp::{ESP_MOUNT_POINT, EXECUTABLE_BIN, EXECUTABLE_ROOT, verify_single_esp};
@@ -35,7 +35,7 @@ fn check_staging(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Admit only the original mount and, optionally, its data-only RO bind view.
+/// Admit only the recreated mount and, optionally, its data-only RO bind view.
 fn check_mounts(text: &str, device: (u32, u32)) -> Result<bool> {
     let mut retained = String::new();
     let mut view = false;
@@ -52,7 +52,7 @@ fn check_mounts(text: &str, device: (u32, u32)) -> Result<bool> {
             ensure!(!view, "duplicate ESP module view");
             ensure!(
                 left[2] == device_text && left[3] == "/" && right[0] == "vfat",
-                "ESP view is not the retained filesystem"
+                "ESP view is not the selected filesystem"
             );
             for flag in ["ro", "nosuid", "nodev", "noexec"] {
                 ensure!(
@@ -108,7 +108,7 @@ fn check_staging_mount(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fail before scripts, helpers or overlays when policy or retained mounts differ.
+/// Fail before scripts, helpers or overlays when policy or recreated mounts differ.
 /// The Android early service's reboot_on_failure makes a failed gate fatal to
 /// boot; recovery's RC omits it and init logs the failure.
 pub fn prepare() -> Result<()> {
@@ -131,7 +131,7 @@ pub fn prepare() -> Result<()> {
     ensure!(
         i64::from(libc::major(actual)) == i64::from(device.0)
             && i64::from(libc::minor(actual)) == i64::from(device.1),
-        "retained ESP device changed"
+        "recreated ESP device differs from esuinit selection"
     );
     check_label(Path::new(ESP_MOUNT_POINT), VFAT_LABEL)?;
     if !check_mounts(&text, device)? {

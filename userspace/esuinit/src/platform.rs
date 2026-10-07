@@ -140,8 +140,38 @@ fn too_large() -> Failure {
     )
 }
 
-pub fn publish_module_rc(payload: &Path, order: &[String]) -> Result<(), Failure> {
-    let rc = module_rc(payload, order, crate::scripts::is_recovery())?;
+/// Recreate the ESP and executable tmpfs after stock init's root switch.
+/// Match the loop-pinned superblock's access mode; never add SELinux mount
+/// options. This action precedes module early-init actions and the core's
+/// on-init relabel/esu-early service.
+fn bootstrap_rc(device: (u32, u32), writable: bool) -> String {
+    let (major, minor) = device;
+    let access = if writable { "rw" } else { "ro" };
+    format!(
+        "\non early-init\n\
+         \x20   exec u:r:esu:s0 root -- /system/bin/toybox mknod /dev/esu-esp b {major} {minor}\n\
+         \x20   mkdir /debug_ramdisk/esp 0700 root root\n\
+         \x20   mount vfat /dev/esu-esp /debug_ramdisk/esp {access} nosuid nodev noexec\n\
+         \x20   mkdir /debug_ramdisk/esu 0755 root root\n\
+         \x20   mount tmpfs esu /debug_ramdisk/esu nosuid nodev mode=0755\n\
+         \x20   exec u:r:esu:s0 root -- /system/bin/toybox cp -R /debug_ramdisk/esp/esu/bin /debug_ramdisk/esu/bin\n\
+         \x20   exec u:r:esu:s0 root -- /system/bin/toybox chmod -R 0755 /debug_ramdisk/esu/bin\n\
+         \x20   write /debug_ramdisk/esu/esp-device {major}:{minor}\n\n"
+    )
+}
+
+pub fn publish_module_rc(
+    payload: &Path,
+    order: &[String],
+    device: (u32, u32),
+    writable: bool,
+) -> Result<(), Failure> {
+    let modules = module_rc(payload, order, crate::scripts::is_recovery())?;
+    let mut rc = bootstrap_rc(device, writable).into_bytes();
+    if rc.len() + modules.len() > MAX_MODULE_RC {
+        return Err(too_large());
+    }
+    rc.extend_from_slice(&modules);
     crate::set_module_rc(&rc).map_err(|error| {
         Failure::new(
             Stage::ModuleCheck,

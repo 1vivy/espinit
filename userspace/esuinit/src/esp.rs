@@ -6,10 +6,10 @@
 //! ESPs (for example, the firmware's own loader partition), so candidates are
 //! mounted read-only and exactly one must contain a regular
 //! `/esu/manifest.toml`. The selected block node is created from the
-//! major/minor pair discovered through sysfs. PID 1 retains its one contextless
-//! mount through Android handoff. Executables are copied to a separate tmpfs
-//! before any payload script runs; the ESP is data-only. Only a ROM projecting
-//! writable `esp-file:` backends remounts it read-write for loop backing writes.
+//! major/minor pair discovered through sysfs. PID 1 detaches its contextless
+//! mount before Android handoff; loop backing files keep their own references.
+//! Executables run from a separate tmpfs, also detached at handoff. Only a ROM
+//! projecting writable `esp-file:` backends remounts the ESP read-write.
 
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
@@ -47,12 +47,14 @@ struct EspDevice {
     disk: String,
 }
 
-/// The ESP mount created and retained by PID 1 for the entire boot.
+/// The ESP mount owned by PID 1 until real-init handoff.
 pub struct Mount {
     // The node may disappear when Android replaces /dev; dev_t remains stable.
     major: u32,
     minor: u32,
     path: String,
+    detached: bool,
+    writable: bool,
 }
 
 impl Mount {
@@ -65,6 +67,29 @@ impl Mount {
     /// ESP so a post-APPLY failure can still remount it for its receipt.
     pub fn device(&self) -> (u32, u32) {
         (self.major, self.minor)
+    }
+
+    pub fn detach(&mut self) -> Result<(), Failure> {
+        detach_owned(&self.path)?;
+        self.detached = true;
+        Ok(())
+    }
+
+    /// Recreate access only on failed exec, after the early /dev may be gone.
+    pub fn reattach_for_receipt(&mut self) -> Result<(), Failure> {
+        if self.detached {
+            let node = create_block_node("esp", self.major, self.minor)
+                .map_err(|detail| Failure::new(Stage::Storage, "EspDeviceNodeCreate", detail))?;
+            let flags = if self.writable {
+                ESP_MOUNT_FLAGS_RW
+            } else {
+                ESP_MOUNT_FLAGS_RO
+            };
+            mount(&node, &self.path, "vfat", flags, "")
+                .map_err(|error| Failure::new(Stage::Storage, "EspMount", error.to_string()))?;
+            self.detached = false;
+        }
+        Ok(())
     }
 }
 
@@ -147,15 +172,17 @@ pub fn mount_esp() -> Result<Mount, Failure> {
         major: device.major,
         minor: device.minor,
         path: ESP_MOUNT_POINT.to_owned(),
+        detached: false,
+        writable: false,
     })
 }
 
 /// Remount the selected payload ESP read-write for a ROM that projects writable
 /// `esp-file:` backends.
 ///
-/// Loop devices write through this retained mount; Android modules use a separate
+/// Loop files retain this mount even after detach; Android modules get a new
 /// read-only bind view. The remount only toggles `RDONLY`.
-pub fn make_payload_writable(mount: &Mount) -> Result<(), Failure> {
+pub fn make_payload_writable(mount: &mut Mount) -> Result<(), Failure> {
     mount_remount(&mount.path, ESP_MOUNT_FLAGS_RW, "").map_err(|error| {
         Failure::new(
             Stage::Storage,
@@ -165,7 +192,9 @@ pub fn make_payload_writable(mount: &Mount) -> Result<(), Failure> {
                 mount.path
             ),
         )
-    })
+    })?;
+    mount.writable = true;
+    Ok(())
 }
 
 /// Detach an early mount that esu created itself, in preparation for the
@@ -499,7 +528,7 @@ pub fn payload_root(mount: &str) -> PathBuf {
     Path::new(mount).join("esu")
 }
 
-/// Executable tmpfs retained across first-stage init's root switch.
+/// Executable tmpfs recreated by second-stage init after PID 1 detaches it.
 pub const EXECUTABLE_ROOT: &str = "/debug_ramdisk/esu";
 pub const EXECUTABLE_BIN: &str = "/debug_ramdisk/esu/bin";
 
@@ -520,9 +549,7 @@ pub fn verify_single_esp(text: &str, device: (u32, u32)) -> Result<(), String> {
         }
         count += 1;
         if left[3] != "/" || left[4] != ESP_MOUNT_POINT || right[0] != "vfat" {
-            return Err(
-                "ESP must have one whole-filesystem vfat mount at its retained path".into(),
-            );
+            return Err("ESP must have one whole-filesystem vfat mount at its staging path".into());
         }
         for options in [left[5], right[2]] {
             if options.split(',').any(|option| {
@@ -535,7 +562,7 @@ pub fn verify_single_esp(text: &str, device: (u32, u32)) -> Result<(), String> {
         }
     }
     if count != 1 {
-        return Err(format!("expected one retained ESP mount, found {count}"));
+        return Err(format!("expected one visible ESP mount, found {count}"));
     }
     Ok(())
 }

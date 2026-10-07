@@ -27,7 +27,7 @@ pub const MAX_COMPONENT_BYTES: usize = 64;
 /// Mount flags used while the ESP is read-only. The same base flag set is used
 /// for the bounded read-write receipt window so the remount only toggles
 /// `RDONLY` and cannot silently widen the block device's exposure. The ESP is
-/// always data-only; payload executables run from the retained staging tmpfs.
+/// always data-only; payload executables run from a separate staging tmpfs.
 pub const ESP_MOUNT_FLAGS_RW: MountFlags = MountFlags::NOSUID
     .union(MountFlags::NODEV)
     .union(MountFlags::NOEXEC)
@@ -136,6 +136,11 @@ pub fn record(state: &mut ReceiptState, failure: &Failure) {
         );
         return;
     };
+
+    if let Err(error) = mount.reattach_for_receipt() {
+        log::error!("esu receipt storage failure: {}", error.detail);
+        return;
+    }
 
     if let Err(error) = write_receipt(mount.path(), state.build_id.as_deref(), failure) {
         log::error!("esu receipt storage failure: {error:#}");
