@@ -215,23 +215,15 @@ transaction. Setters persist that ROM's variable before flushing/readback of
 the physical mirror. Mirror failure leaves authority committed for reconciliation.
 No other ROM's variable is inferred from or overwritten by misc.
 
-### Provisioning seed
+### Initial state
 
-Generate the generic JSON consumed by `provision bdsvars --seed <file>`:
-
-```sh
-cargo +nightly-2026-08-08 run --manifest-path payloads/boot-hal/Cargo.toml \
-  --locked --offline --jobs 3 --example seed -- rom1 1 _b > boot-hal-seed.json
-```
-
-`_b` is only an example (the cited capture booted `_b`); supply the current slot
-from the installation receipt. The generator reads no device. It emits both
-variables, using `Gbs1::initial` and `Gbm1::encode`, with the current slot
-priority 15/tries 7/successful, the other slot unbootable, no pending switch and
-merge NONE. An inactive slot is not presumed usable merely because it exists.
-For ROM ≥2 supply its own number, catalogue id and selected seeded image slot.
-Never seed merge NONE over an existing OTA transaction; this is fresh-install
-state, not a repair or runtime migration command.
+Host tools no longer write `bdsvars`. Surfacer creates `Slot-<id>` and
+`MergeStatus-<id>` through SetVariable the first time its catalogue sees a ROM
+without a record (gobbl `docs/boot/boot-control.md`). ROM 1 starts with the
+current physical slot at priority 15, tries 7, successful, and the other slot
+unbootable. ROM ≥2 starts with slot A selected, A at 15/7/successful and B at
+14/7/successful. Both start with merge NONE. The HAL only consumes these records
+and never initializes them.
 
 ## Method semantics
 
