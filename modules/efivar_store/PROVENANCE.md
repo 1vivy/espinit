@@ -1,7 +1,7 @@
 # Rust EFVS backend provenance and build
 
 Source: https://github.com/1vivy/efivar-store; exact commit is recorded in
-`SOURCE_REVISION` (linux/efvs-backend, `c759db1aefefbbcfc4d7232147be4b702736a80a`).
+`SOURCE_REVISION` (published `main`, `3a42f653cfc5ae9b13e8247fadd31f6b650f3e30`).
 No source is copied into kernelesp. `scripts/kmi_modules.py build` checks out
 that revision in ignored `.source`, refuses tracked working-tree changes,
 builds its `linux/efivar_store.rs`, admits the final artifact and writes the
