@@ -8,8 +8,10 @@
 //! generation is exactly the failure the generation counter exists to prevent,
 //! so a missing set is a denial, never a fallback to the current set.
 //!
-//! The host writes these sets (`scripts/kmi_modules.py` emits the same manifest),
-//! so the layout is a cross-repository contract.
+//! The host writes these sets: `esud boot-patch` places each verified set and
+//! writes its `set.json` after `scripts/kmi_modules.py` has checked the modules
+//! and emitted their `.ko.compat.json` receipts, so the layout is a
+//! cross-repository contract.
 
 use crate::kmi::{self, Kmi};
 use anyhow::{Context, Result, bail, ensure};

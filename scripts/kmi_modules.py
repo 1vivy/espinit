@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and admit arm64 ACK KMI modules, with schema-2 input receipts."""
+"""Build and admit ACK KMI modules (arm64 phones, x86_64 Cuttlefish), with schema-2 input receipts."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -49,7 +49,11 @@ class ModuleReport(TypedDict):
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {"kernelesp": ROOT / "kernel", **{name: ROOT / "modules" / name for name in ("thin", "gpt", "efivarfs", "efivar_store")}}
-FLAGS = "SMP preempt mod_unload modversions aarch64"
+#: ELF machine -> (kbuild ARCH, vermagic flags after the release). x86_64 defines
+#: no MODULE_ARCH_VERMAGIC, so its vermagic ends at `modversions`.
+ARCHES = {183: ("arm64", "SMP preempt mod_unload modversions aarch64"),
+          62: ("x86_64", "SMP preempt mod_unload modversions")}
+CONFIG_ARCHES = {"CONFIG_ARM64=y": "arm64", "CONFIG_X86_64=y": "x86_64"}
 INPUTS = ("Module.symvers", "System.map", "include/generated/utsrelease.h")
 BRANCH = "android16-6.12"
 class CompatibilityError(ValueError):
@@ -163,6 +167,16 @@ def import_versions(elf: Elf) -> SymbolCrcs:
     return versions
 
 
+def kernel_arch(output: Path) -> str | None:
+    """The kbuild ARCH of a KMI output tree from its `.config`, or None without one."""
+    config = output / ".config"
+    if not config.is_file():
+        return None
+    found = {CONFIG_ARCHES[line] for line in config.read_text().splitlines() if line in CONFIG_ARCHES}
+    require(len(found) == 1, "kmi-out: .config names neither or both of CONFIG_ARM64 and CONFIG_X86_64")
+    return found.pop()
+
+
 def kmi_identity(source: Path) -> Kmi:
     constants = (source / "build.config.constants").read_text()
     match = re.search(r"^KMI_GENERATION=(\d+)\s*$", constants, re.MULTILINE)
@@ -174,7 +188,10 @@ def kmi_identity(source: Path) -> Kmi:
 
 def verify_module(path: PathInput, name: str, output: Path) -> Imports:
     elf = Elf(path)
-    require(elf.kind == 1 and elf.machine == 183, "elf: expected ET_REL aarch64")
+    require(elf.kind == 1 and elf.machine in ARCHES, "elf: expected ET_REL aarch64 or x86_64")
+    arch, flags = ARCHES[elf.machine]
+    tree = kernel_arch(output)
+    require(tree is None or tree == arch, f"elf: {arch} module for a {tree} KMI tree")
     imports = {s.name for s in elf.symbols() if s.name and s.shndx == 0 and s.info >> 4 in (1, 2)}
     versions = import_versions(elf)
     exported = symvers(output / "Module.symvers")
@@ -187,7 +204,8 @@ def verify_module(path: PathInput, name: str, output: Path) -> Imports:
     require(not missing, "imports: absent from System.map: " + ", ".join(sorted(missing)))
     modinfo = elf.section(".modinfo").split(b"\0")
     vermagic = [entry[9:].decode("ascii") for entry in modinfo if entry.startswith(b"vermagic=")]
-    require(len(vermagic) == 1 and len(vermagic[0].split()) == 6 and " ".join(vermagic[0].split()[1:]) == FLAGS, "vermagic: expected release followed by " + FLAGS)
+    tokens = vermagic[0].split() if len(vermagic) == 1 else []
+    require(len(tokens) == 1 + len(flags.split()) and tokens[1:] == flags.split(), "vermagic: expected release followed by " + flags)
     require([entry[5:].decode("ascii") for entry in modinfo if entry.startswith(b"name=")] == [name], "modinfo: module name mismatch")
     return {"versioned": len(versions), "kallsyms": sorted(kallsyms)}
 
@@ -249,7 +267,9 @@ def build(args: argparse.Namespace) -> ModuleReport:
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CONFIG_", "KBUILD_")) and key not in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "KCFLAGS", "KCPPFLAGS", "CFLAGS_MODULE", "LDFLAGS_MODULE")}
     build_directory = efvs_source(directory) if name == "efivar_store" else directory
     llvm = os.environ.get("EFVS_LLVM", "/usr/bin/") if name == "efivar_store" else "1"
-    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(build_directory), "ARCH=arm64", "LLVM=" + llvm, "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1", "CONFIG_KERNELESP=m"]
+    arch = kernel_arch(output)
+    require(arch is not None, "build: the KMI output tree has no .config naming its architecture")
+    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(build_directory), "ARCH=" + str(arch), "LLVM=" + llvm, "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1", "CONFIG_KERNELESP=m"]
     subprocess.run(command + ["clean"], env=env, check=True)
     subprocess.run(command + ["modules", f"-j{args.jobs}"], env=env, check=True)
     if name == "efivar_store":

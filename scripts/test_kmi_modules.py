@@ -7,7 +7,9 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from . import kmi_modules as compat
 VERMAGIC = "6.12-phone SMP preempt mod_unload modversions aarch64"
-def elf_file(sections: Mapping[str, bytes], symbols: Iterable[tuple[str, int]], kind: int = 1) -> bytes:
+ARM64_FLAGS = compat.ARCHES[183][1]
+X86_64_FLAGS = compat.ARCHES[62][1]
+def elf_file(sections: Mapping[str, bytes], symbols: Iterable[tuple[str, int]], kind: int = 1, machine: int = 183) -> bytes:
     """Encode real ELF section/symbol tables instead of mocking parser outputs."""
     contents = dict(sections)
     strings = bytearray(b"\0")
@@ -25,7 +27,7 @@ def elf_file(sections: Mapping[str, bytes], symbols: Iterable[tuple[str, int]], 
         names.extend(name.encode() + b"\0")
     body = bytearray(64)
     body[:7] = b"\x7fELF\x02\x01\x01"
-    struct.pack_into("<HHI", body, 16, kind, 183, 1)
+    struct.pack_into("<HHI", body, 16, kind, machine, 1)
     headers = [bytes(64)]
     headers.append(struct.pack("<IIQQQQIIQQ", 1, 3, 0, 0, len(body), len(names), 0, 0, 1, 0))
     body.extend(names)
@@ -44,14 +46,14 @@ def version_data(records: Iterable[tuple[str, int]]) -> bytes:
     return b"".join(struct.pack("<Q56s", crc, name.encode()) for name, crc in records)
 
 
-def module_file(name: str = "gpt", versions: bytes | None = None, extra: Mapping[str, bytes] | None = None, imports: Iterable[str] = ("known", "private")) -> bytes:
+def module_file(name: str = "gpt", versions: bytes | None = None, extra: Mapping[str, bytes] | None = None, imports: Iterable[str] = ("known", "private"), machine: int = 183) -> bytes:
     sections = {".text": b"\0" * 4, ".modinfo": f"name={name}\0vermagic={VERMAGIC}\0".encode()}
     symbols = [(symbol, 0) for symbol in imports]
     if versions is None:
         versions = version_data((("module_layout", 0x12345678), ("known", 0x11223344)))
     sections["__versions"] = versions
     sections.update(extra or {})
-    return elf_file(sections, symbols)
+    return elf_file(sections, symbols, machine=machine)
 
 
 class KmiModuleCompatibility(unittest.TestCase):
@@ -79,10 +81,28 @@ class KmiModuleCompatibility(unittest.TestCase):
 
     def test_release_ignored_flags_enforced(self):
         for release in ("6.12-phone", "6.12.58-android16-6-other"):
-            self.verify(module_file(extra={".modinfo": f"name=gpt\0vermagic={release} {compat.FLAGS}\0".encode()}))
-        for flags in ("SMP mod_unload modversions aarch64", "SMP preempt modversions aarch64", "SMP preempt mod_unload modversions x86_64", compat.FLAGS + " extra"):
+            self.verify(module_file(extra={".modinfo": f"name=gpt\0vermagic={release} {ARM64_FLAGS}\0".encode()}))
+        for flags in ("SMP mod_unload modversions aarch64", "SMP preempt modversions aarch64", "SMP preempt mod_unload modversions x86_64", X86_64_FLAGS, ARM64_FLAGS + " extra"):
             with self.subTest(flags=flags), self.assertRaisesRegex(compat.CompatibilityError, "vermagic"):
                 self.verify(module_file(extra={".modinfo": f"name=gpt\0vermagic=release {flags}\0".encode()}))
+
+    def test_x86_64_modules_carry_their_own_vermagic_and_tree(self):
+        """Cuttlefish x86_64 modules: EM_X86_64 with the arch-less vermagic, and no arm64 tree."""
+        x86 = {".modinfo": f"name=gpt\0vermagic=6.12.74-android16-6 {X86_64_FLAGS}\0".encode()}
+        self.verify(module_file(extra=x86, machine=62))
+        with self.assertRaisesRegex(compat.CompatibilityError, "vermagic"):
+            self.verify(module_file(machine=62))
+        with self.assertRaisesRegex(compat.CompatibilityError, "ET_REL aarch64 or x86_64"):
+            self.verify(module_file(machine=40))
+        (self.output / ".config").write_text("CONFIG_64BIT=y\nCONFIG_ARM64=y\n")
+        with self.assertRaisesRegex(compat.CompatibilityError, "x86_64 module for a arm64 KMI tree"):
+            self.verify(module_file(extra=x86, machine=62))
+        self.verify(module_file())
+        (self.output / ".config").write_text("CONFIG_X86_64=y\n")
+        self.verify(module_file(extra=x86, machine=62))
+        (self.output / ".config").write_text("CONFIG_X86_64=y\nCONFIG_ARM64=y\n")
+        with self.assertRaisesRegex(compat.CompatibilityError, "neither or both"):
+            self.verify(module_file())
 
     def test_extended_versions_and_coexisting_tables(self):
         for end in (b"\0", b"\0\0"):
