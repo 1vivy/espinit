@@ -50,6 +50,7 @@ dependencies = [
  "bootctl-unified",
  "esu-platform",
  "generic-bootctl-core",
+ "libc",
 ]
 
 [[package]]

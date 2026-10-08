@@ -1,3 +1,13 @@
-allow hal_bootctl_default esu_file dir { search read open getattr write add_name remove_name }
-allow hal_bootctl_default esu_file file { create read write open getattr setattr unlink lock ioctl }
-allow hal_bootctl_default esu_file filesystem getattr
+type esu_bootctl domain
+typeattribute esu_bootctl hal_bootctl_server
+permissive esu_bootctl
+allow init esu_bootctl process transition
+allow init esu_bootctl process2 nosuid_transition
+allow esu_bootctl hal_bootctl_service service_manager { add find }
+allow esu_bootctl hal_bootctl_hwservice hwservice_manager { add find }
+deny hal_bootctl_server hal_bootctl_service service_manager add
+deny hal_bootctl_server hal_bootctl_hwservice hwservice_manager add
+deny hal_bootctl_default hal_bootctl_service service_manager add
+deny hal_bootctl_default hal_bootctl_hwservice hwservice_manager add
+dontaudit hal_bootctl_default hal_bootctl_service service_manager add
+dontaudit hal_bootctl_default hal_bootctl_hwservice hwservice_manager add

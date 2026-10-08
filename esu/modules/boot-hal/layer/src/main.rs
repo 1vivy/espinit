@@ -1,5 +1,5 @@
-//! Android entry: the shared generic-bootctl process (manifest discovery, every declared
-//! transport, `--install-plan`) served over the esu `Service`: efivarfs-backed GBS1/GBM1
+//! Android entry: generic-bootctl's `serve` (AIDL first, HIDL only if refused; the service
+//! managers arbitrate what may register) over the esu `Service`: efivarfs-backed GBS1/GBM1
 //! records, an always-writable gate and the preserve-nonzero success policy.
 #[cfg(target_os = "android")]
 mod entry {
@@ -60,7 +60,9 @@ mod entry {
 
 fn main() {
     #[cfg(target_os = "android")]
-    if let Err(error) = bootctl_unified::run(entry::service) {
+    gobbl_boot_hal::stock::stop_stock();
+    #[cfg(target_os = "android")]
+    if let Err(error) = entry::service().map_err(Into::into).and_then(bootctl_unified::serve) {
         eprintln!("boot-hal: {error}");
         std::process::exit(1);
     }

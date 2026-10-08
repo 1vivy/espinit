@@ -24,13 +24,12 @@ ESP /
     build-id
     manifest.toml
     roms/<id>.toml
-    bin/{esuinit,esud,busybox,thin-activate,fw-views,avb-graft}
+    bin/{esuinit,esud,busybox,thin-activate,fw-views,avb-graft,esu-bootctl}
     modules/
       boot-hal/
         module.prop
-        attrs
         sepolicy.rule
-        vendor/bin/hw/android.hardware.boot-service.qti
+        initrc/boot-hal.rc
       thin/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok,critical}
       fw-views/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok,critical}
       avb-graft/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
@@ -131,11 +130,9 @@ ROM isolation preserves the shared `/metadata/shared/password_slots` bind, manag
 
 ## Boot HAL module
 
-When a Boot HAL executable is supplied, the payload assembler places it at `modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`; it can also assemble without this module. The checked-in attrs use `hal_bootctl_default_exec`, preserving the stock `vendor.boot-qti` service and domain transition. The module grants exactly the three efivarfs rules in [`sepolicy.rule`](esu/modules/boot-hal/sepolicy.rule); it introduces no new SELinux type or block-node access.
+When a Boot HAL executable is supplied, the payload carries it as `esu/bin/esu-bootctl` and the `boot-hal` module defines its own init service, `esu.bootctl` (`class early_hal`, `critical`, domain `esu_bootctl`), in [`initrc/boot-hal.rc`](esu/modules/boot-hal/initrc/boot-hal.rc); it can also assemble without this module. Nothing is overlaid onto `/vendor`. At start the HAL stops every init service whose command carries the stock `hal_bootctl_default_exec` label (`ctl.stop`, selected by label, no stored names or paths) before it registers, and [`sepolicy.rule`](esu/modules/boot-hal/sepolicy.rule) removes `service_manager`/`hwservice_manager` `add` from the stock `hal_bootctl_server` attribute so a later restart of the stock HAL cannot take the name. kernelesp's `deny` only clears the exact avtab key, so the rule names the attribute AOSP grants through as well as the concrete stock domain.
 
-This fixed QTI target is device-specific. Merely assembling it does not establish another device's service compatibility. If device evidence later proves a tmpfs association denial, evaluate that specific rule then; no speculative fallback is shipped.
-
-The Boot HAL is one module, `esu/modules/boot-hal/`: the [generic-bootctl](https://github.com/1vivy/generic-bootctl) repository is slotted in whole as the `generic-bootctl` submodule (pinned by its gitlink; it owns manifest discovery, the AIDL V1 and HIDL 1.0-1.2 transports, `--install-plan`, slot health policy and the frozen AIDL V1 dispatch), and the `layer/` crate beside it supplies only the esu `Service`: `EsuBackend`, the GBS1/GBM1 wire records, the misc VAB mirror, an always-writable gate and the preserve-nonzero success policy, through `bootctl_unified::run(factory)`. The upstream crates are path dependencies, so the NDK build stays `--locked --offline`, the layer links `bootctl-unified` without its native backends, and the produced ELF keeps exactly `libbinder_ndk.so`, `libc.so` and `libdl.so`; see [`layer/README.md`](esu/modules/boot-hal/layer/README.md).
+The Boot HAL is one module, `esu/modules/boot-hal/`: the [generic-bootctl](https://github.com/1vivy/generic-bootctl) repository is its `generic-bootctl` submodule (pinned by gitlink), used only as a serving library (`bootctl_unified::serve`: AIDL V1 first, HIDL 1.0-1.2 only if refused; slot health policy and the frozen AIDL V1 dispatch). How the stock HAL is replaced is each consumer's payload method: generic-bootctl's own standalone module overlays the stock path, esu stops the stock service and runs its own. The `layer/` crate supplies the esu `Service` (`EsuBackend`, the GBS1/GBM1 wire records, the misc VAB mirror, an always-writable gate and the preserve-nonzero success policy) and the label-based stock stop. It links `bootctl-unified` with `default-features = false`, so the NDK build stays `--locked --offline` and the produced ELF keeps exactly `libbinder_ndk.so`, `libc.so` and `libdl.so`; see [`layer/README.md`](esu/modules/boot-hal/layer/README.md).
 
 ## Kernel compatibility and builds
 

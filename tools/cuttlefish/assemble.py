@@ -70,9 +70,7 @@ ESP_DIRECTORIES = (
 )
 BOOT_HAL_DIRECTORIES = (
     "esu/modules/boot-hal",
-    "esu/modules/boot-hal/vendor",
-    "esu/modules/boot-hal/vendor/bin",
-    "esu/modules/boot-hal/vendor/bin/hw",
+    "esu/modules/boot-hal/initrc",
 )
 EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
 FW_EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec fw-views\n"
@@ -333,13 +331,19 @@ def module_metadata(module: str) -> list[Path]:
 
 
 def platform_files(sources: dict[str, Path], tree: Path) -> list[tuple[Path, str, int]]:
-    """Package thin/fw-views and, when supplied, the ordinary Boot HAL module."""
+    """Package thin/fw-views and, when supplied, the Boot HAL service module.
+
+    The HAL binary is `esu/bin/esu-bootctl`; the module ships its metadata, policy and the
+    `initrc/` that defines its own init service. Nothing is overlaid onto `/vendor`.
+    """
     files: list[tuple[Path, str, int]] = []
     modules = ["thin", "fw-views"]
     if "boot_hal" in sources:
-        (tree / "modules/boot-hal/vendor/bin/hw").mkdir(parents=True)
+        (tree / "modules/boot-hal/initrc").mkdir(parents=True)
         modules.insert(0, "boot-hal")
-        files.append((sources["boot_hal"], "esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti", 0o755))
+        files.append((sources["boot_hal"], "esu/bin/esu-bootctl", 0o755))
+        for path in sorted((REPOSITORY / "esu/modules/boot-hal/initrc").glob("*.rc")):
+            files.append((path, f"esu/modules/boot-hal/initrc/{path.name}", 0o644))
     for module in modules:
         for path in module_metadata(module):
             files.append((path, f"esu/modules/{module}/{path.name}", 0o644))

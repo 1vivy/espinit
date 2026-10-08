@@ -6,4 +6,5 @@
 //! transport are provided by `generic-bootctl-core` and the shared `bootctl-unified` process
 //! (`../generic-bootctl`, a pinned submodule).
 pub mod backend;
+pub mod stock;
 pub mod wire;

@@ -37,7 +37,7 @@ tools/cuttlefish/assemble.py \
 ```
 
 `--boot-hal /build/gobbl-boot-hal` is the one optional input: supply the built
-replacement binary to package the Boot HAL module exactly as before, or omit it
+replacement binary to package the Boot HAL module, or omit it
 to assemble a payload without a Boot HAL directory, module-order entry, binary
 or required-file check. Every other input is required, and an explicitly
 supplied HAL must be a nonempty regular file like the rest. Build it with
@@ -67,10 +67,10 @@ generates itself. Flag files therefore travel by presence: `thin` and `fw-views`
 ship `critical`, which makes them critical, and `boot-hal` ships none, so it
 stays optional; `disable`, `remove` and `skip_mount` would be carried the same
 way.
-With `--boot-hal`, the ordinary Boot HAL module has `module.prop`, `attrs`,
-`sepolicy.rule`, and `vendor/bin/hw/android.hardware.boot-service.qti` copied
-from the built HAL; without it none of those paths exist in the ESP.
-Its fixed stock QTI target is not automatically compatible with a CF image.
+With `--boot-hal`, the payload carries the built HAL as `esu/bin/esu-bootctl` and the
+Boot HAL module ships `module.prop`, `sepolicy.rule` and `initrc/boot-hal.rc` (its own
+`esu.bootctl` init service); nothing is overlaid onto `/vendor`. Without it none of
+those paths exist in the ESP.
 Kernel modules never enter the ESP filesystem.
 
 The managed ROM placeholder intentionally has an impossible backend; the lab

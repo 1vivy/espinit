@@ -1,29 +1,29 @@
 # Managed boot-control HAL
 
 **Status (2026-10-08)** - One module, `esu/modules/boot-hal/`: the generic-bootctl
-submodule (`../generic-bootctl`) is slotted in whole, and this directory is the esu
-layer beside it. generic-bootctl owns manifest discovery, every declared transport
-(AIDL V1, HIDL 1.0-1.2), `--install-plan`, slot health policy and the frozen AIDL V1
-dispatch; `EsuBackend` adapts the project efivarfs records and the misc VAB mirror to
-its `Backend` trait. Registration is never gated on efivarfs, BootedRom, managed Slot
-state or misc. Verified on a phone only for AIDL V1 (normal enforcing ROM1 boot); HIDL,
-recovery and OTA are not claimed.
+submodule (`../generic-bootctl`) is linked only as a serving library, and this
+directory is the esu layer beside it. generic-bootctl serves the service (AIDL V1 first,
+HIDL 1.0-1.2 only if servicemanager refuses AIDL), owns slot health policy and the frozen
+AIDL V1 dispatch; `EsuBackend` adapts the project efivarfs records and the misc VAB mirror
+to its `Backend` trait. Replacing the stock HAL is this module's payload method: its own
+init service stops the stock service by exec label, then serves. Registration is never
+gated on efivarfs, BootedRom, managed Slot state or misc. Verified on a phone for AIDL V1
+(normal ROM1 boot); HIDL, recovery and OTA are not claimed.
 
 ```
 esu/modules/boot-hal/
-  module.prop attrs sepolicy.rule   the ESP module files the packager ships
+  module.prop sepolicy.rule initrc/ the ESP module files the packager ships
   generic-bootctl/                  submodule: pinned upstream, never edited here
-  layer/                            this crate: backend, wire records, entry point
+  layer/                            this crate: backend, wire records, stock stop, entry point
 ```
 
 ## Architecture
 
 ```
-bootctl-unified (lib)  argument handling, VINTF discovery, transports, install plan;
-        |              run(factory) is the only consumer hook
+bootctl-unified (lib)  serve(service): AIDL first, HIDL 1.2/1.1/1.0 if refused
 generic-bootctl-core   Service: slot health policy, -1/-2 mapping, write gate
         |              Backend trait: slot_count / prepare / read_state / commit / read_merge / write_merge
-gobbl-boot-hal         EsuBackend + GBS1/GBM1 wire records + misc mirror + the esu Service
+gobbl-boot-hal         EsuBackend + GBS1/GBM1 wire records + misc mirror + stock stop + the esu Service
 ```
 
 `src/backend.rs` implements `generic_bootctl_core::Backend`:
@@ -65,14 +65,25 @@ gobbl-boot-hal         EsuBackend + GBS1/GBM1 wire records + misc mirror + the e
 
 **Write gate.** The esu HAL is always writable: the service is constructed with a
 gate that returns `true`. Writes are gated outside this process by the install
-decision, the read-only `/vendor` overlay and ROM isolation, and the esu AIDL
-contract has no read-only rollout phase. `persist.generic_bootctl.rw` belongs to
-the generic same-path substitution, which this payload does not use.
+decision and ROM isolation, and the esu AIDL contract has no read-only rollout phase.
+`persist.generic_bootctl.rw` belongs to the generic standalone module, which this
+payload does not use.
+
+**Replacing the stock HAL.** `initrc/boot-hal.rc` starts `esu.bootctl` (`class
+early_hal`, `critical`, `seclabel u:r:esu_bootctl:s0`) with the stock HAL in the same
+`class_start`. Before registering, `src/stock.rs` stops every init service whose command
+carries `hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is disabled, a
+running one is killed, so a stock registration made in that window dies with it). The
+module's `sepolicy.rule` creates `esu_bootctl` (permissive, in `hal_bootctl_server`, with
+its own `add`/`find`), allows init's nosuid transition from the tmpfs binary, and clears
+`add` on the `hal_bootctl_server` attribute key and the concrete stock domain, because
+kernelesp's `deny` only edits the exact avtab key and AOSP grants `add` through the
+attribute.
 
 The core additions this consumer needed - `Backend::slot_count`, the default
 `Backend::prepare` hook, `HealthOnSuccess::{ResetToOne, PreserveNonZero}`, slot-index
-validation before any storage access and the `bootctl_unified::run(factory)` entry - live
-upstream, so no slot or transport logic is forked here.
+validation before any storage access and the serving-only `bootctl_unified::serve`
+entry - live upstream, so no slot or transport logic is forked here.
 
 ## Build and Binder choice
 
@@ -87,10 +98,9 @@ ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.s
 The build uses the explicitly supplied NDK, API 35 and the installed
 `aarch64-linux-android` Rust target. Output:
 `esu/modules/boot-hal/layer/target/aarch64-linux-android/release/gobbl-boot-hal`.
-When supplied, the packager installs it as an optional read-only ESP module at:
-`/esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`.
-There is no ELF generation note; `esu/build-id` and cpio `/esu-build-id`
-identify the complete payload, and a mismatch is logged rather than pinned.
+When supplied, the packager installs it as `/esu/bin/esu-bootctl`, run by the module's
+`esu.bootctl` init service. There is no ELF generation note; `esu/build-id` and cpio
+`/esu-build-id` identify the complete payload, and a mismatch is logged rather than pinned.
 
 The upstream crates are path dependencies into the submodule, so nothing is fetched and
 the build stays `--offline`. The layer links `bootctl-unified` with
@@ -125,25 +135,19 @@ queries, invalid-slot precedence and the GBS1 success/unbootable health policy.
 
 ## Installation and identity
 
-The ESP `boot-hal/module.prop` declares this ordinary KernelSU module.
-It has no `critical` marker. Its policy or overlay failure is reported without
-making the generic module loader reboot Android; omitting or disabling it
-leaves the stock target executable in place.
-`esu/modules/boot-hal/attrs` supplies mode 0755, root:shell ownership and
-the stock target's `hal_bootctl_default_exec` label. During `esud early`,
-the file is copied to `/dev/esu/boot-hal/vendor/bin/hw/` on tmpfs and a
-read-only overlay is mounted over `/vendor` (module lowerdir first, stock
-`/vendor` last). Stock `vendor.boot-qti` init rc and VINTF manifest remain
-unchanged, so the stock entrypoint and `hal_bootctl_default` domain transition
-apply; there is no override rc, bind-mounted metadata executable or
-`tiny-espsu`. The module's `sepolicy.rule` grants that existing domain
-read/write access to `esu_file` efivarfs variables, not the raw bdsvars
-block device.
+The ESP `boot-hal/module.prop` declares this ordinary module. The module itself has no
+`critical` marker (its policy failure is reported without the module loader rebooting
+Android), but its init service is `critical`: if `esu.bootctl` exits more than four times
+before `boot_completed`, init's fatal path runs (a panic under
+`androidboot.init_fatal_panic=true`, otherwise a reboot to the bootloader), instead of
+leaving vold waiting on `IBootControl` forever. Omitting or disabling the module leaves the
+stock HAL untouched.
 
-- Init service: stock **`vendor.boot-qti`**, `class early_hal`, root/root.
+- Init service: **`esu.bootctl`**, `class early_hal`, root/root, `seclabel
+  u:r:esu_bootctl:s0`, binary `/debug_ramdisk/esu/bin/esu-bootctl`.
 - Binder identity: **`android.hardware.boot.IBootControl/default`**.
 - Version: **1**; hash: **`2400346954240a5de495a1debc81429dd012d7b7`**.
-- Keep the existing VINTF manifest unchanged; no second service is registered.
+- The device VINTF manifest is unchanged; the stock service is stopped, never redefined.
 - The HAL opens only project efivarfs variables and `/dev/block/by-name/misc`;
   never a whole LU, GPT, UFS sysfs node, boot partition or firmware partition.
 
@@ -162,23 +166,18 @@ Storage/identity/misc failure never prevents registration: initial mirror repair
 is best effort and deferred to the next state-dependent transaction on failure.
 Current-slot, slot-count, suffix and frozen version/hash replies remain available.
 
-Recovery retains its projection and `pid1-recovery.sh` scripts for modules
-marked `recovery-ok`. The core `on init` path now runs there too, so the Boot
-HAL overlay is applied in recovery whenever its `vendor` target is already a
-mount point; a target recovery mounts later is left untouched.
-No native writer is invoked as a fallback. The source capture also contained
-HIDL 1.0-1.2 implementations: recovery AIDL/HIDL parity and device-specific
-suppression of stock activation routes remain unproved integration prerequisites.
-This port does not intercept OTA payload writes; esu's partition projection
-is mandatory before any managed OTA.
+Recovery retains its projection and `pid1-recovery.sh` scripts for modules marked
+`recovery-ok`; this module is not `recovery-ok`, so recovery keeps its stock HAL.
+No native writer is invoked as a fallback. Recovery AIDL/HIDL parity is an unproved
+integration prerequisite. This port does not intercept OTA payload writes; esu's
+partition projection is mandatory before any managed OTA.
 
 Integration must permit project efivarfs reads/writes and existing misc access.
-The HAL uses only an in-process Mutex, not block-device `flock`. Its executable
-on the tmpfs lowerdir must retain the stock `hal_bootctl_default_exec` label;
-overlay and domain are proved on a device only for an enforcing normal ROM1 boot: the
-vendor path hashed to this binary, servicemanager saw it as `hal_bootctl_default` and
-`update_verifier` and a binder `markBootSuccessful` reached it with no denial
-(`20261008T071322Z-phone-efvs-hal-mark`). Recovery and HIDL remain open.
+The HAL uses only an in-process Mutex, not block-device `flock`. On a device the
+service form is proved for a permissive normal ROM1 boot: `esu.bootctl` ran as
+`u:r:esu_bootctl:s0`, registered at 4.01 s, and vold, update_verifier and update_engine
+used it with no client denial (2026-10-08, global permissive boot of payload `076e7e8ee316`). Enforcing, recovery and
+HIDL remain open.
 
 ## Variable namespace and wire layout
 

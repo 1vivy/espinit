@@ -1,0 +1,6 @@
+service esu.bootctl /debug_ramdisk/esu/bin/esu-bootctl
+    class early_hal
+    user root
+    group root
+    seclabel u:r:esu_bootctl:s0
+    critical

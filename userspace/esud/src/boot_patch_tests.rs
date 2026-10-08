@@ -308,7 +308,7 @@ impl Fixture {
         .unwrap();
         fs::write(payload.join("roms/rom1.toml"), "schema_version = 1\nid = \"rom1\"\nmanaged = true\n[[partitions]]\nname = \"metadata\"\nbackend = \"/dev/mapper/metadata\"\nread_only = false\n").unwrap();
         let directory = payload.join("modules/boot-hal");
-        fs::create_dir_all(directory.join("vendor/bin/hw")).unwrap();
+        fs::create_dir_all(directory.join("initrc")).unwrap();
         fs::write(
             directory.join("module.prop"),
             include_str!("../../../esu/modules/boot-hal/module.prop"),
@@ -320,15 +320,11 @@ impl Fixture {
         )
         .unwrap();
         fs::write(
-            directory.join("attrs"),
-            include_str!("../../../esu/modules/boot-hal/attrs"),
+            directory.join("initrc/boot-hal.rc"),
+            include_str!("../../../esu/modules/boot-hal/initrc/boot-hal.rc"),
         )
         .unwrap();
-        fs::write(
-            directory.join("vendor/bin/hw/android.hardware.boot-service.qti"),
-            binary_fixture("hal"),
-        )
-        .unwrap();
+        fs::write(payload.join("bin/esu-bootctl"), binary_fixture("hal")).unwrap();
     }
 
     fn reject(&self, expected: &str) {
