@@ -10,11 +10,9 @@ name = "esud"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-android-bootimg = { git = "https://github.com/5ec1cff/android_bootimg", rev = "150425b027c76ea104c82e408571651f2181b2c2" }
 esuinit = { path = "../esuinit" }
 goblin = "0.10"
 libc.workspace = true
-lz4 = "1.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -23,6 +21,7 @@ tempfile = "3"
 [dependencies]
 esu-platform = { path = "../esu-platform" }
 esu-config = { path = "../esu-config" }
+ota-core = { path = "../ota-core" }
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 const_format = "0.2"
@@ -42,6 +41,9 @@ prop-rs-android = { git = "https://github.com/KernelSU2/ksu_props", rev = "ddb6e
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lz4 = "1.28"
 
 [build-dependencies]
 bindgen = "0.72"

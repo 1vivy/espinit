@@ -1,30 +1,29 @@
 //! Explicit-input, host-only packaging. No device discovery or Android runtime calls.
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use android_bootimg::cpio::{Cpio, CpioEntry};
-use android_bootimg::parser::BootImage;
-use android_bootimg::patcher::BootImagePatchOption;
 use anyhow::{Context, Result, ensure};
 use esu_config as config;
 use esu_platform as platform;
 use goblin::elf::{Elf, header, program_header};
+use ota_core::Kmi;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const VERIFIER: &[u8] = include_bytes!("../../../scripts/kmi_modules.py");
 const MAX_BINARY: u64 = 64 * 1024 * 1024;
-const MAX_BOOT: u64 = 512 * 1024 * 1024;
 
-const LZ4_LEGACY_MAGIC: [u8; 4] = 0x184C_2102u32.to_le_bytes();
-const LZ4_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+/// The configuration every `lvm` invocation passes with `--config`, shipped as
+/// `esu/bin/lvm.conf`. Embedded so the payload copy is compared against the
+/// tools' own file instead of a second hand-written string: the two cannot
+/// drift, because a change to `tools/lvm2/lvm.conf` changes this constant.
+const LVM_CONF: &[u8] = include_bytes!("../../../tools/lvm2/lvm.conf");
 
 #[derive(clap::Args, Debug)]
 pub struct BootPatchArgs {
@@ -46,9 +45,6 @@ pub struct BootPatchArgs {
     /// New output directory; must not exist, and its parent must already exist
     #[arg(long)]
     pub out: PathBuf,
-    /// Stock boot/init_boot v3/v4 image whose effective /init is preserved
-    #[arg(long)]
-    pub boot: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -68,12 +64,26 @@ struct Receipt {
     build_id: String,
     build_id_inputs: BTreeMap<String, String>,
     archive_path: String,
-    boot_contract: String,
-    boot_image: &'static str,
+    kmi: ReceiptKmi,
     sources: BTreeMap<String, Artifact>,
     artifacts: BTreeMap<String, Artifact>,
     directories: Vec<String>,
     module_verification: serde_json::Value,
+}
+
+/// The KMI the emitted module set and overlay were built for.
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+struct ReceiptKmi {
+    branch: String,
+    generation: u32,
+}
+
+/// One `set.json`, the manifest `select_module_set` verifies on the device.
+#[derive(Serialize)]
+struct ModuleSetManifest {
+    schema_version: u32,
+    kmi: ReceiptKmi,
+    modules: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -367,6 +377,8 @@ fn validate_payload(
         ("bin/esud", Linkage::DynamicAllowed),
         ("bin/busybox", Linkage::StaticRequired),
         ("bin/thin-activate", Linkage::StaticRequired),
+        ("bin/lvm", Linkage::StaticRequired),
+        ("bin/ota-stage", Linkage::StaticRequired),
     ] {
         check_binary(&payload.join(path), machine, linkage)?;
         ensure!(
@@ -374,6 +386,19 @@ fn validate_payload(
             "payload binary is not executable: {path}"
         );
     }
+    // Every lvm invocation passes this text with --config, so the payload copy
+    // is what runs; it must be the tools' file byte for byte, not a paraphrase.
+    let conf = read_bounded(platform::open_file(&root, "bin/lvm.conf")?, MAX_BINARY)?;
+    ensure!(
+        conf == LVM_CONF,
+        "payload bin/lvm.conf differs from tools/lvm2/lvm.conf"
+    );
+    ensure!(
+        files
+            .get("bin/lvm.conf")
+            .is_some_and(|file| file.mode == 0o644),
+        "payload bin/lvm.conf is not a regular 0644 file"
+    );
     for path in files.keys().filter(|path| path.starts_with("bin/")) {
         let bytes = read_bounded(platform::open_file(&root, path)?, MAX_BINARY)?;
         if bytes.starts_with(b"\x7fELF") {
@@ -533,229 +558,6 @@ fn verify_modules(
     Ok(report)
 }
 
-fn takeover_cpio(
-    binary: Vec<u8>,
-    real_init: Vec<u8>,
-    modules: BTreeMap<String, Vec<u8>>,
-    build_id: &str,
-) -> Result<Vec<u8>> {
-    let mut cpio = Cpio::new();
-    cpio.add("init", CpioEntry::regular(0o755, Box::new(binary)))?;
-    cpio.add(
-        "init.esureal",
-        CpioEntry::regular(0o755, Box::new(real_init)),
-    )?;
-    cpio.add(
-        "esu-build-id",
-        CpioEntry::regular(0o644, Box::new(format!("{build_id}\n").into_bytes())),
-    )?;
-    if !modules.is_empty() {
-        cpio.add("lib", CpioEntry::dir(0o755))?;
-    }
-    for (path, bytes) in modules {
-        cpio.add(&path, CpioEntry::regular(0o644, Box::new(bytes)))?;
-    }
-    let mut bytes = Vec::new();
-    cpio.dump(&mut bytes)?;
-    bytes.resize(bytes.len().next_multiple_of(512), 0);
-    Ok(bytes)
-}
-
-fn legacy_lz4(data: &[u8]) -> Result<Vec<u8>> {
-    let mut encoded = Vec::with_capacity(data.len());
-    encoded.extend_from_slice(&LZ4_LEGACY_MAGIC);
-    for chunk in data.chunks(LZ4_BLOCK_SIZE) {
-        let block = lz4::block::compress(
-            chunk,
-            Some(lz4::block::CompressionMode::HIGHCOMPRESSION(12)),
-            false,
-        )?;
-        encoded.extend_from_slice(&u32::try_from(block.len())?.to_le_bytes());
-        encoded.extend_from_slice(&block);
-    }
-    Ok(encoded)
-}
-
-fn stock_init(source: &[u8], machine: u16) -> Result<Vec<u8>> {
-    let boot = BootImage::parse(source).context("parse stock boot image")?;
-    let mut ramdisk = Vec::new();
-    boot.get_blocks()
-        .get_ramdisk()
-        .context("stock boot image has no ramdisk")?
-        .dump(&mut ramdisk, false)?;
-    validate_cpio(&ramdisk)?;
-    let cpio = Cpio::load_from_data(&ramdisk)?;
-    ensure!(
-        !cpio.exists("init.esureal"),
-        "stock ramdisk already contains reserved init.esureal"
-    );
-    let init = cpio
-        .entry_by_name("init")
-        .and_then(CpioEntry::data)
-        .context("stock ramdisk /init is absent or empty")?
-        .to_vec();
-    let _ =
-        executable(&init, Some(machine), Linkage::DynamicAllowed).context("stock ramdisk /init")?;
-    Ok(init)
-}
-
-/// Validate framing before preserving stock archives verbatim. Re-serializing
-/// with Cpio would discard hardlink identity and other original newc metadata.
-fn validate_cpio(data: &[u8]) -> Result<()> {
-    let mut offset = 0usize;
-    while offset < data.len() {
-        while data.get(offset) == Some(&0) {
-            offset += 1;
-        }
-        if offset == data.len() {
-            break;
-        }
-        loop {
-            let raw = data
-                .get(offset..offset.checked_add(110).context("cpio offset overflow")?)
-                .context("truncated cpio header")?;
-            ensure!(
-                &raw[..6] == b"070701" || &raw[..6] == b"070702",
-                "unsupported cpio framing"
-            );
-            let mut fields = [0u32; 13];
-            for (index, field) in fields.iter_mut().enumerate() {
-                *field = u32::from_str_radix(
-                    std::str::from_utf8(&raw[6 + index * 8..14 + index * 8])?,
-                    16,
-                )?;
-            }
-            let name_start = offset + 110;
-            let name_end = name_start
-                .checked_add(fields[11] as usize)
-                .context("cpio name overflow")?;
-            let name = data
-                .get(name_start..name_end)
-                .context("truncated cpio name")?;
-            ensure!(
-                name.last() == Some(&0) && !name[..name.len() - 1].contains(&0),
-                "invalid cpio name"
-            );
-            let name = std::str::from_utf8(&name[..name.len() - 1])?;
-            ensure!(
-                !name.is_empty()
-                    && !name.starts_with('/')
-                    && !name.split('/').any(|part| part == ".."),
-                "cpio path traversal"
-            );
-            let start = name_end.checked_add(3).context("cpio alignment overflow")? & !3;
-            let end = start
-                .checked_add(fields[6] as usize)
-                .context("cpio data overflow")?;
-            let content = data.get(start..end).context("truncated cpio data")?;
-            offset = end.checked_add(3).context("cpio alignment overflow")? & !3;
-            ensure!(offset <= data.len(), "truncated cpio padding");
-            if &raw[..6] == b"070702" {
-                ensure!(
-                    content
-                        .iter()
-                        .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(*byte)))
-                        == fields[12],
-                    "cpio checksum mismatch"
-                );
-            }
-            if name == "TRAILER!!!" {
-                ensure!(fields[6] == 0, "nonempty cpio trailer");
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn boot_cmdline(original: &[u8]) -> Result<String> {
-    let end = original
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(original.len());
-    let original = std::str::from_utf8(&original[..end])?;
-    let mut result = String::with_capacity(original.len());
-    let mut quoted = false;
-    let mut start = None;
-    for (offset, ch) in original
-        .char_indices()
-        .chain(std::iter::once((original.len(), ' ')))
-    {
-        if ch == '"' {
-            quoted = !quoted;
-        }
-        if ch.is_ascii_whitespace() && !quoted {
-            if let Some(start) = start.take() {
-                let token = &original[start..offset];
-                let key = token.strip_prefix('"').unwrap_or(token);
-                if !key.starts_with("rdinit=") && !key.starts_with("androidboot.esu.rom=") {
-                    if !result.is_empty() {
-                        result.push(' ');
-                    }
-                    result.push_str(token);
-                }
-            }
-        } else if start.is_none() {
-            start = Some(offset);
-        }
-    }
-    ensure!(!quoted, "unterminated quote in boot command line");
-    ensure!(
-        result.len() < 1536,
-        "boot command line exceeds v3/v4 capacity"
-    );
-    Ok(result)
-}
-
-fn patch_boot(source: &[u8], overlay: &[u8]) -> Result<Vec<u8>> {
-    // Guard the upstream parser's fixed header slicing and avoid carrying invalid
-    // signatures into a test image. Only Android boot/init_boot v3/v4 is supported.
-    ensure!(
-        source.len() >= 4096 && source.starts_with(b"ANDROID!"),
-        "expected boot/init_boot image"
-    );
-    let version = u32::from_le_bytes(source[40..44].try_into()?);
-    ensure!(
-        matches!(version, 3 | 4),
-        "only Android boot/init_boot v3/v4 is supported"
-    );
-    let header_size = u32::from_le_bytes(source[20..24].try_into()?);
-    ensure!(
-        header_size == if version == 3 { 1580 } else { 1584 },
-        "invalid boot header size"
-    );
-    let kernel_size = u32::from_le_bytes(source[8..12].try_into()?) as usize;
-    let ramdisk_size = u32::from_le_bytes(source[12..16].try_into()?) as usize;
-    let unsigned_size = 4096usize
-        .checked_add(kernel_size.next_multiple_of(4096))
-        .and_then(|size| size.checked_add(ramdisk_size.next_multiple_of(4096)))
-        .context("boot image size overflow")?;
-    ensure!(unsigned_size <= source.len(), "truncated boot image");
-    // Deliberately omit GKI signature/AVB data rather than claiming it still signs
-    // changed bytes. Firmware-specific signing is not part of this host builder.
-    let mut unsigned = Cow::Borrowed(&source[..unsigned_size]);
-    if version == 4 && source[1580..1584] != [0; 4] {
-        unsigned.to_mut()[1580..1584].fill(0);
-    }
-    let boot = BootImage::parse(&unsigned)?;
-    let cmdline = boot_cmdline(boot.get_header().get_cmdline())?;
-    let mut ramdisk = Vec::new();
-    if let Some(original) = boot.get_blocks().get_ramdisk() {
-        original.dump(&mut ramdisk, false)?;
-    }
-    validate_cpio(&ramdisk)?;
-    ramdisk.resize(ramdisk.len().next_multiple_of(4), 0);
-    ramdisk.extend_from_slice(overlay);
-    let mut patcher = BootImagePatchOption::new(&boot);
-    patcher.override_cmdline(cmdline.as_bytes());
-    // Preserve the original compression using the historical patcher, including
-    // its default legacy-LZ4 encoding when adding a previously absent ramdisk.
-    patcher.replace_ramdisk(Box::new(Cursor::new(ramdisk)), false);
-    let mut output = Cursor::new(Vec::new());
-    patcher.patch(&mut output)?;
-    Ok(output.into_inner())
-}
-
 fn sync_tree(path: &Path, relative: &str, directories: &mut Vec<String>) -> Result<()> {
     let mut entries = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -801,6 +603,83 @@ fn publish(stage: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The KMI the embedded verifier accepted, as the module-set directory names
+/// it. The verifier's report is the only place the accepted identity is stated,
+/// and `ota_core::kmi::from_parts` refuses an identity that could not name a
+/// directory.
+fn verified_kmi(report: &serde_json::Value) -> Result<Kmi> {
+    let branch = report["kmi"]["branch"]
+        .as_str()
+        .context("KMI verifier reported no branch")?;
+    let generation = report["kmi"]["generation"]
+        .as_u64()
+        .and_then(|generation| u32::try_from(generation).ok())
+        .context("KMI verifier reported no generation")?;
+    ota_core::kmi::from_parts(branch, generation)
+}
+
+/// Place the verified module set under `esu/kmi/<branch>-<generation>/` and
+/// return every file it wrote, keyed by its path below `esp/`.
+///
+/// The set is generated, never taken from the payload: an operator-supplied set
+/// would be a second, unverified statement of the same modules, and the device
+/// selects from this tree alone.
+fn place_module_set(
+    payload_root: &Path,
+    kmi: &Kmi,
+    manifest: &config::Manifest,
+    captured: &Path,
+) -> Result<BTreeMap<String, Artifact>> {
+    let directory = ota_core::set_dir(payload_root, kmi);
+    let relative = directory
+        .strip_prefix(payload_root)
+        .context("module set is outside the payload tree")?;
+    ensure!(
+        !directory.exists(),
+        "the payload must not carry a module set; it is generated from --modules-dir"
+    );
+    make_dir(&directory)?;
+    make_dir(&directory.join(ota_core::modules::LIB_DIR))?;
+    let mut written = BTreeMap::new();
+    let mut modules = BTreeMap::new();
+    for entry in &manifest.modules {
+        let name = format!("{}.ko", entry.name);
+        let bytes = read_bounded(input_file(&captured.join(&name))?, MAX_BINARY)?;
+        modules.insert(name.clone(), digest(&bytes));
+        let path = format!("{}/{}", ota_core::modules::LIB_DIR, name);
+        let artifact = write_file(&directory.join(&path), &bytes, 0o644)?;
+        written.insert(format!("esp/{}/{}", relative.display(), path), artifact);
+        // The schema-2 receipt travels with the module it verified, so the set
+        // is self-describing wherever it is later read from.
+        let receipt = read_bounded(
+            input_file(&captured.join(format!("{name}.compat.json")))?,
+            MAX_BINARY,
+        )?;
+        let path = format!("{name}.compat.json");
+        let artifact = write_file(&directory.join(&path), &receipt, 0o644)?;
+        written.insert(format!("esp/{}/{}", relative.display(), path), artifact);
+    }
+    let mut set_json = serde_json::to_vec(&ModuleSetManifest {
+        schema_version: ota_core::modules::SCHEMA_VERSION,
+        kmi: ReceiptKmi {
+            branch: kmi.branch.clone(),
+            generation: kmi.generation,
+        },
+        modules,
+    })?;
+    set_json.push(b'\n');
+    let artifact = write_file(
+        &directory.join(ota_core::modules::SET_FILE),
+        &set_json,
+        0o644,
+    )?;
+    written.insert(
+        format!("esp/{}/{}", relative.display(), ota_core::modules::SET_FILE),
+        artifact,
+    );
+    Ok(written)
+}
+
 pub fn patch(args: &BootPatchArgs) -> Result<()> {
     let payload_source = absolute(&args.payload)?;
     let source_root = platform::open_root(&payload_source)?;
@@ -821,8 +700,9 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         .tempdir_in(parent)?;
     let staged = stage.path().join("result");
     make_dir(&staged)?;
-    make_dir(&staged.join("esp"))?;
-    let payload = staged.join("esp/esu");
+    let payload_root = staged.join("esp");
+    make_dir(&payload_root)?;
+    let payload = payload_root.join("esu");
     make_dir(&payload)?;
     let mut source_files = BTreeMap::new();
     snapshot(
@@ -834,6 +714,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
     )?;
     reserve_name(&payload, "bin")?;
     reserve_name(&payload, "receipts")?;
+    reserve_name(&payload, "kmi")?;
     let (manifest, _, _) = configs(&payload, &args.rom)?;
     let binary = read_bounded(input_file(&args.esuinit)?, MAX_BINARY)?;
     let machine = executable(&binary, None, Linkage::StaticRequired)?;
@@ -869,20 +750,7 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         &manifest,
         machine,
     )?;
-    let mut modules = BTreeMap::new();
-    for entry in manifest
-        .modules
-        .iter()
-        .filter(|entry| entry.path.ends_with(".ko"))
-    {
-        modules.insert(
-            entry.path.clone(),
-            read_bounded(
-                input_file(&captured_modules.join(format!("{}.ko", entry.name)))?,
-                MAX_BINARY,
-            )?,
-        );
-    }
+    let kmi = verified_kmi(&module_verification)?;
     make_dir(&payload.join("receipts"))?;
     let mut sources: BTreeMap<_, _> = source_files
         .iter()
@@ -897,16 +765,6 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         .map(|(path, item)| (format!("esp/esu/{path}"), item))
         .collect();
     artifacts.insert("esp/esu/bin/esuinit".to_owned(), binary_artifact);
-    let source = read_bounded(input_file(&args.boot)?, MAX_BOOT)?;
-    sources.insert(
-        "boot".to_owned(),
-        Artifact {
-            sha256: digest(&source),
-            size: source.len() as u64,
-            mode: 0o644,
-        },
-    );
-    let real_init = stock_init(&source, machine)?;
     let build_id_inputs: BTreeMap<String, String> = sources
         .iter()
         .map(|(path, artifact)| (path.clone(), artifact.sha256.clone()))
@@ -920,8 +778,17 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
             0o644,
         )?,
     );
-    let overlay = takeover_cpio(binary, real_init, modules, &build_id)?;
-    let archive = legacy_lz4(&overlay)?;
+    // The verified set is placed first and the archive is built through the same
+    // selector the device uses, so the modules the device loads are the modules
+    // this receipt hashed.
+    artifacts.extend(place_module_set(
+        &payload_root,
+        &kmi,
+        &manifest,
+        &captured_modules,
+    )?);
+    let members = ota_core::select_module_set(&payload_root, &kmi)?.payload_members()?;
+    let archive = ota_core::build_overlay(&binary, &members, &build_id)?;
     artifacts.insert(
         "esu.cpio".to_owned(),
         write_file(&staged.join("esu.cpio"), &archive, 0o644)?,
@@ -939,11 +806,6 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         format!("esp/{archive_path}"),
         write_file(&staged.join("esp").join(&archive_path), &archive, 0o644)?,
     );
-    let patched = patch_boot(&source, &overlay)?;
-    artifacts.insert(
-        "patched.img".to_owned(),
-        write_file(&staged.join("patched.img"), &patched, 0o644)?,
-    );
     let mut directories = Vec::new();
     sync_tree(&staged, "", &mut directories)?;
     let receipt = Receipt {
@@ -955,8 +817,10 @@ pub fn patch(args: &BootPatchArgs) -> Result<()> {
         build_id,
         build_id_inputs,
         archive_path,
-        boot_contract: "bdsvars BootedRom via efivarfs".to_owned(),
-        boot_image: "unsigned-conventional-test-only",
+        kmi: ReceiptKmi {
+            branch: kmi.branch,
+            generation: kmi.generation,
+        },
         sources,
         artifacts,
         directories,

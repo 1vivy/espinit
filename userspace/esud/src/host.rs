@@ -18,7 +18,7 @@ pub fn run() -> anyhow::Result<()> {
 
     #[derive(clap::Subcommand)]
     enum Command {
-        /// Build canonical CPIO and a complete ESP tree, optionally patch a test boot image
+        /// Build the takeover CPIO, its module set and a complete ESP tree
         BootPatch(boot_patch::BootPatchArgs),
     }
 

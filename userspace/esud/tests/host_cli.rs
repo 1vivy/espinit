@@ -33,11 +33,11 @@ fn host_help_exposes_only_artifact_builder() {
         "--kmi-out",
         "--rom",
         "--out",
-        "--boot",
     ] {
         assert!(help.contains(required));
     }
     for removed in [
+        "--boot",
         "--flash",
         "--ota",
         "--backup",

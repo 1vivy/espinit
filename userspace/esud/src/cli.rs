@@ -31,6 +31,11 @@ enum Commands {
         #[command(subcommand)]
         command: Platform,
     },
+    /// Publish the /dev/block/esd device-name tree from sysfs.
+    Esd {
+        #[command(subcommand)]
+        command: Esd,
+    },
     Sepolicy {
         #[command(subcommand)]
         command: Sepolicy,
@@ -55,6 +60,10 @@ enum Core {
 #[derive(clap::Subcommand, Debug)]
 enum Platform {
     Reload,
+}
+#[derive(clap::Subcommand, Debug)]
+enum Esd {
+    Refresh,
 }
 #[derive(clap::Subcommand, Debug)]
 enum Sepolicy {
@@ -88,6 +97,9 @@ pub fn run() -> Result<()> {
         Commands::Platform {
             command: Platform::Reload,
         } => init_event::reload(),
+        Commands::Esd {
+            command: Esd::Refresh,
+        } => crate::esd::refresh(),
         Commands::Sepolicy { command } => match command {
             Sepolicy::Patch { sepolicy } => crate::sepolicy::apply_strict(&sepolicy),
             Sepolicy::Apply { file } => {

@@ -5,6 +5,10 @@ use std::os::unix::fs::symlink;
 
 const FIXTURE_MARKER: &str = "host-test-1";
 const DYNAMIC_LINKER: &[u8] = b"/system/bin/linker64\0";
+/// The KMI the fixture kernel output and its receipts declare.
+const KMI_DIR: &str = "android16-6.12-6";
+/// The five modules every payload must declare, in manifest order.
+const CORE_MODULES: [&str; 5] = ["kernelesp", "thin", "gpt", "efivarfs", "efivar_store"];
 type ElfSection<'a> = (&'a str, Vec<u8>, u32, u64, u32, u64);
 
 fn put16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -137,17 +141,26 @@ fn named_module_fixture(name: &str) -> Vec<u8> {
     )
 }
 
+/// One decoded newc member of the produced overlay.
+struct Member {
+    name: String,
+    mode: u32,
+    data: Vec<u8>,
+}
+
+/// Decode a legacy-LZ4 stream: magic, then a `u32` block size and block, until
+/// the input ends. There is no end marker, exactly as the kernel reads it.
 fn decode_legacy_lz4(encoded: &[u8]) -> Vec<u8> {
-    assert!(encoded.starts_with(&LZ4_LEGACY_MAGIC));
+    assert!(encoded.starts_with(&ota_core::LZ4_LEGACY_MAGIC));
     let mut decoded = Vec::new();
-    let mut offset = LZ4_LEGACY_MAGIC.len();
+    let mut offset = ota_core::LZ4_LEGACY_MAGIC.len();
     while offset < encoded.len() {
         let size = u32::from_le_bytes(encoded[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
-        let mut block = vec![0u8; LZ4_BLOCK_SIZE];
+        let mut block = vec![0u8; ota_core::LZ4_BLOCK_SIZE];
         let written = lz4::block::decompress_to_buffer(
             &encoded[offset..offset + size],
-            Some(LZ4_BLOCK_SIZE as i32),
+            Some(ota_core::LZ4_BLOCK_SIZE as i32),
             &mut block,
         )
         .unwrap();
@@ -155,6 +168,39 @@ fn decode_legacy_lz4(encoded: &[u8]) -> Vec<u8> {
         offset += size;
     }
     decoded
+}
+
+/// Parse a newc archive by hand: 110-byte headers, 4-byte aligned names and
+/// data, up to the `TRAILER!!!` member.
+fn parse_newc(archive: &[u8]) -> Vec<Member> {
+    let hex = |field: &[u8]| u32::from_str_radix(std::str::from_utf8(field).unwrap(), 16).unwrap();
+    let mut members = Vec::new();
+    let mut offset = 0;
+    loop {
+        assert_eq!(&archive[offset..offset + 6], b"070701", "newc magic");
+        let header = &archive[offset..offset + 110];
+        let mode = hex(&header[14..22]);
+        let size = hex(&header[54..62]) as usize;
+        let name_length = hex(&header[94..102]) as usize;
+        let name_start = offset + 110;
+        let name = std::str::from_utf8(&archive[name_start..name_start + name_length - 1])
+            .unwrap()
+            .to_owned();
+        assert_eq!(archive[name_start + name_length - 1], 0, "NUL terminated");
+        let data_start = (name_start + name_length).next_multiple_of(4);
+        let data = archive[data_start..data_start + size].to_vec();
+        offset = (data_start + size).next_multiple_of(4);
+        if name == "TRAILER!!!" {
+            return members;
+        }
+        members.push(Member { name, mode, data });
+    }
+}
+
+/// The members of the overlay a run produced, decoded the way the kernel reads
+/// the archive.
+fn overlay_members(path: &Path) -> Vec<Member> {
+    parse_newc(&decode_legacy_lz4(&fs::read(path).unwrap()))
 }
 
 struct Fixture {
@@ -172,13 +218,22 @@ impl Fixture {
         let binary = binary_fixture(FIXTURE_MARKER);
         let pid1 = root.path().join("esu");
         fs::write(&pid1, &binary).unwrap();
-        for path in ["bin/esud", "bin/busybox", "bin/thin-activate"] {
+        for path in [
+            "bin/esud",
+            "bin/busybox",
+            "bin/thin-activate",
+            "bin/lvm",
+            "bin/ota-stage",
+        ] {
             let path = payload.join(path);
             fs::write(&path, &binary).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let conf = payload.join("bin/lvm.conf");
+        fs::write(&conf, LVM_CONF).unwrap();
+        fs::set_permissions(conf, fs::Permissions::from_mode(0o644)).unwrap();
         let mut manifest = "schema_version = 1\nrom = \"roms\"\nmodules_order = []\n".to_owned();
-        for name in ["kernelesp", "thin", "gpt", "efivarfs", "efivar_store"] {
+        for name in CORE_MODULES {
             let params = if name == "efivar_store" {
                 "dev=by-name:bdsvars"
             } else {
@@ -262,7 +317,7 @@ impl Fixture {
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
-        for name in ["thin", "gpt", "efivarfs", "efivar_store"] {
+        for name in CORE_MODULES.iter().filter(|name| **name != "kernelesp") {
             let bytes = named_module_fixture(name);
             fs::write(modules.join(format!("{name}.ko")), &bytes).unwrap();
             let mut receipt = receipt.clone();
@@ -273,17 +328,6 @@ impl Fixture {
             )
             .unwrap();
         }
-        let mut stock = Cpio::new();
-        stock
-            .add(
-                "init",
-                CpioEntry::regular(0o755, Box::new(binary_fixture("stock-init"))),
-            )
-            .unwrap();
-        let mut ramdisk = Vec::new();
-        stock.dump(&mut ramdisk).unwrap();
-        let boot = root.path().join("init_boot.img");
-        fs::write(&boot, stock_boot(4, &ramdisk)).unwrap();
         let args = BootPatchArgs {
             esuinit: pid1,
             payload,
@@ -291,7 +335,6 @@ impl Fixture {
             kmi_out: output,
             rom: "rom1".to_owned(),
             out: root.path().join("result"),
-            boot,
         };
         Self { root, args }
     }
@@ -341,102 +384,110 @@ impl Fixture {
     }
 }
 
-fn stock_boot(version: u32, ramdisk: &[u8]) -> Vec<u8> {
-    let kernel = b"preserved-kernel";
-    let mut image = vec![0u8; 8192 + ramdisk.len().next_multiple_of(4096)];
-    image[..8].copy_from_slice(b"ANDROID!");
-    put32(&mut image, 8, kernel.len() as u32);
-    put32(&mut image, 12, ramdisk.len() as u32);
-    put32(&mut image, 20, if version == 3 { 1580 } else { 1584 });
-    put32(&mut image, 40, version);
-    let command = b"console=ttyS0 rdinit=/old androidboot.esu.rom=old quiet";
-    image[44..44 + command.len()].copy_from_slice(command);
-    image[4096..4096 + kernel.len()].copy_from_slice(kernel);
-    image[8192..8192 + ramdisk.len()].copy_from_slice(ramdisk);
-    image
-}
-
 #[test]
-fn canonical_archive_is_a_deterministic_kernel_su_style_lz4_overlay() {
-    let binary = binary_fixture(FIXTURE_MARKER);
-    let real_init = binary_fixture("stock-init");
-    let overlay = takeover_cpio(
-        binary.clone(),
-        real_init.clone(),
-        BTreeMap::from([("lib/kernelesp.ko".to_owned(), vec![7, 8, 9])]),
-        "0123456789ab",
-    )
-    .unwrap();
-    assert_eq!(overlay.len() % 512, 0);
-    validate_cpio(&overlay).unwrap();
-    let modules = Cpio::load_from_data(&overlay).unwrap();
-    let module = modules.entry_by_name("lib/kernelesp.ko").unwrap();
-    assert_eq!(module.data().unwrap(), [7, 8, 9]);
-    let name_offset = overlay
-        .windows(b"lib/kernelesp.ko\0".len())
-        .position(|bytes| bytes == b"lib/kernelesp.ko\0")
-        .unwrap();
-    let mode = u32::from_str_radix(
-        std::str::from_utf8(&overlay[name_offset - 96..name_offset - 88]).unwrap(),
-        16,
-    )
-    .unwrap();
-    assert_eq!(mode & 0o777, 0o644);
-    let cpio = Cpio::load_from_data(&overlay).unwrap();
-    assert_eq!(cpio.entries().len(), 5);
+fn the_overlay_carries_the_entrypoint_build_id_and_module_set_and_no_init() {
+    let fixture = Fixture::new();
+    patch(&fixture.args).unwrap();
+    let members = overlay_members(&fixture.args.out.join("esu.cpio"));
+
+    let names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
     assert_eq!(
-        cpio.entry_by_name("esu-build-id").unwrap().data().unwrap(),
-        b"0123456789ab\n"
+        names,
+        [
+            "esu-build-id",
+            "esuinit",
+            "lib",
+            "lib/efivar_store.ko",
+            "lib/efivarfs.ko",
+            "lib/gpt.ko",
+            "lib/kernelesp.ko",
+            "lib/thin.ko",
+        ]
     );
-    assert_eq!(cpio.entry_by_name("init").unwrap().data().unwrap(), binary);
-    assert_eq!(
-        cpio.entry_by_name("init.esureal").unwrap().data().unwrap(),
-        real_init
-    );
-    let archive = legacy_lz4(&overlay).unwrap();
-    assert!(archive.starts_with(&LZ4_LEGACY_MAGIC));
-    assert_eq!(decode_legacy_lz4(&archive), overlay);
-    let header = overlay
-        .windows(5)
-        .position(|bytes| bytes == b"init\0")
-        .unwrap()
-        - 110;
-    let field = |index: usize| {
-        u32::from_str_radix(
-            std::str::from_utf8(&overlay[header + 6 + index * 8..header + 14 + index * 8]).unwrap(),
-            16,
-        )
-        .unwrap()
-    };
-    assert_eq!(field(1), 0o100755);
-    for index in [2, 3, 5, 7, 8, 9, 10, 12] {
-        assert_eq!(field(index), 0);
+    for member in &members {
+        assert_ne!(
+            member.name, "init",
+            "the stock entry point is never taken over"
+        );
+        assert_ne!(member.name, "init.esureal");
+        match member.name.as_str() {
+            "esuinit" => {
+                assert_eq!(member.mode & 0o7777, 0o755);
+                assert_eq!(member.data, fs::read(&fixture.args.esuinit).unwrap());
+            }
+            "lib" => assert_eq!(member.mode & 0o7777, 0o755),
+            "esu-build-id" => assert_eq!(member.mode & 0o7777, 0o644),
+            name => {
+                assert_eq!(member.mode & 0o7777, 0o644);
+                let module = name
+                    .strip_prefix("lib/")
+                    .unwrap()
+                    .strip_suffix(".ko")
+                    .unwrap();
+                assert_eq!(
+                    member.data,
+                    fs::read(fixture.args.modules_dir.join(format!("{module}.ko"))).unwrap()
+                );
+            }
+        }
     }
 }
 
 #[test]
-fn cpio_traversal_truncation_and_bad_crc_fail() {
-    for name in ["../escape", "dir/../../escape"] {
-        let mut cpio = Cpio::new();
-        cpio.add(name, CpioEntry::regular(0o644, Box::new(vec![1])))
-            .unwrap();
-        let mut bytes = Vec::new();
-        cpio.dump(&mut bytes).unwrap();
-        assert!(validate_cpio(&bytes).is_err());
+fn the_verified_set_is_placed_for_the_device_selector() {
+    let fixture = Fixture::new();
+    patch(&fixture.args).unwrap();
+    let set = fixture.args.out.join("esp/esu/kmi").join(KMI_DIR);
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(set.join("set.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["kmi"]["branch"], "android16-6.12");
+    assert_eq!(manifest["kmi"]["generation"], 6);
+    assert_eq!(
+        manifest["modules"].as_object().unwrap().len(),
+        CORE_MODULES.len()
+    );
+    for name in CORE_MODULES {
+        let module = fixture.args.modules_dir.join(format!("{name}.ko"));
+        assert_eq!(
+            fs::read(set.join("lib").join(format!("{name}.ko"))).unwrap(),
+            fs::read(&module).unwrap()
+        );
+        assert_eq!(
+            manifest["modules"][format!("{name}.ko")],
+            serde_json::Value::String(digest(&fs::read(&module).unwrap()))
+        );
+        assert_eq!(
+            fs::read(set.join(format!("{name}.ko.compat.json"))).unwrap(),
+            fs::read(
+                fixture
+                    .args
+                    .modules_dir
+                    .join(format!("{name}.ko.compat.json"))
+            )
+            .unwrap()
+        );
     }
-    let archive = takeover_cpio(
-        vec![1, 2, 3],
-        vec![4, 5, 6],
-        BTreeMap::new(),
-        "0123456789ab",
+    // The producer and the device share one selector, so what the device will
+    // verify is exactly the set this run wrote.
+    let selected = ota_core::select_module_set(
+        &fixture.args.out.join("esp"),
+        &ota_core::Kmi {
+            branch: "android16-6.12".to_owned(),
+            generation: 6,
+        },
     )
     .unwrap();
-    for size in [1, 100, 110, 115, 119] {
-        assert!(validate_cpio(&archive[..size]).is_err());
-    }
-    let mut bad_crc = archive;
-    bad_crc[5] = b'2';
-    assert!(validate_cpio(&bad_crc).is_err());
+    assert_eq!(selected.modules().len(), CORE_MODULES.len());
+
+    // A payload that already carries this KMI's set is a second, unverified
+    // statement of the same modules and is refused.
+    let fixture = Fixture::new();
+    let carried = fixture.args.payload.join("kmi").join(KMI_DIR);
+    fs::create_dir_all(&carried).unwrap();
+    fs::write(carried.join("set.json"), b"{}\n").unwrap();
+    fixture.reject("must not carry a module set");
 }
 
 #[test]
@@ -447,7 +498,11 @@ fn host_transaction_is_complete_deterministic_and_nonmutating() {
     let first_receipt = fs::read(fixture.args.out.join("receipt.json")).unwrap();
     let receipt: serde_json::Value = serde_json::from_slice(&first_receipt).unwrap();
     assert_eq!(receipt["archive_path"], "rom/rom1/esu.cpio");
-    assert_eq!(receipt["boot_contract"], "bdsvars BootedRom via efivarfs");
+    assert_eq!(receipt["kmi"]["branch"], "android16-6.12");
+    assert_eq!(receipt["kmi"]["generation"], 6);
+    assert!(receipt.get("boot_contract").is_none());
+    assert!(receipt.get("boot_image").is_none());
+    assert!(receipt.get("patched").is_none());
     let build_id = receipt["build_id"].as_str().unwrap();
     assert_eq!(build_id.len(), 12);
     let marker = format!("{build_id}\n");
@@ -455,21 +510,24 @@ fn host_transaction_is_complete_deterministic_and_nonmutating() {
         fs::read(fixture.args.out.join("esp/esu/build-id")).unwrap(),
         marker.as_bytes()
     );
-    let archive = decode_legacy_lz4(&fs::read(fixture.args.out.join("esu.cpio")).unwrap());
-    let cpio = Cpio::load_from_data(&archive).unwrap();
+    let members = overlay_members(&fixture.args.out.join("esu.cpio"));
     assert_eq!(
-        cpio.entry_by_name("esu-build-id").unwrap().data().unwrap(),
+        members
+            .iter()
+            .find(|member| member.name == "esu-build-id")
+            .unwrap()
+            .data,
         marker.as_bytes()
     );
-    assert_eq!(receipt["boot_image"], "unsigned-conventional-test-only");
     assert_eq!(receipt["module_verification"]["status"], "accepted");
     assert_eq!(
         fs::read(fixture.args.out.join("esu.cpio")).unwrap(),
         fs::read(fixture.args.out.join("esp/rom/rom1/esu.cpio")).unwrap()
     );
-    assert!(fixture.args.out.join("patched.img").is_file());
+    assert!(!fixture.args.out.join("patched.img").exists());
     assert!(fixture.args.out.join("esp/esu/receipts").is_dir());
     assert!(fixture.args.out.join("esp/esu/roms/rom1.toml").is_file());
+    assert!(fixture.args.out.join("esp/esu/kmi").join(KMI_DIR).is_dir());
     for (path, info) in receipt["artifacts"].as_object().unwrap() {
         assert_eq!(
             digest(&fs::read(fixture.args.out.join(path)).unwrap()),
@@ -490,167 +548,19 @@ fn host_transaction_is_complete_deterministic_and_nonmutating() {
 }
 
 #[test]
-fn required_boot_path_preserves_source_kernel_and_saved_init() {
-    let mut fixture = Fixture::new();
-    let mut stock = Cpio::new();
-    let saved_init = binary_fixture("saved-stock-init");
-    stock
-        .add(
-            "init",
-            CpioEntry::regular(0o755, Box::new(saved_init.clone())),
-        )
-        .unwrap();
-    stock
-        .add(
-            "original",
-            CpioEntry::regular(0o640, Box::new(b"stock data".to_vec())),
-        )
-        .unwrap();
-    let mut ramdisk = Vec::new();
-    stock.dump(&mut ramdisk).unwrap();
-    let source = stock_boot(4, &ramdisk);
-    let boot_path = fixture.root.path().join("init_boot.img");
-    fs::write(&boot_path, &source).unwrap();
-    fixture.args.boot = boot_path.clone();
-    patch(&fixture.args).unwrap();
-    assert_eq!(fs::read(boot_path).unwrap(), source);
-    let image = fs::read(fixture.args.out.join("patched.img")).unwrap();
-    let parsed = BootImage::parse(&image).unwrap();
-    assert_eq!(
-        parsed.get_blocks().get_kernel().unwrap().get_data(),
-        b"preserved-kernel"
-    );
-    let cmdline = parsed.get_header().get_cmdline();
-    let cmdline =
-        std::str::from_utf8(&cmdline[..cmdline.iter().position(|byte| *byte == 0).unwrap()])
-            .unwrap();
-    assert_eq!(cmdline, "console=ttyS0 quiet");
-    let mut rebuilt = Vec::new();
-    parsed
-        .get_blocks()
-        .get_ramdisk()
-        .unwrap()
-        .dump(&mut rebuilt, false)
-        .unwrap();
-    assert!(rebuilt.starts_with(&ramdisk));
-    let cpio = Cpio::load_from_data(&rebuilt).unwrap();
-    assert_eq!(
-        cpio.entry_by_name("init").unwrap().data().unwrap(),
-        fs::read(&fixture.args.esuinit).unwrap()
-    );
-    assert_eq!(
-        cpio.entry_by_name("init.esureal").unwrap().data().unwrap(),
-        saved_init
-    );
-    assert!(!cpio.exists("kernelsu.ko"));
-    assert_eq!(
-        patch_boot(
-            &source,
-            &decode_legacy_lz4(&fs::read(fixture.args.out.join("esu.cpio")).unwrap()),
-        )
-        .unwrap(),
-        image
-    );
-}
+fn the_payload_lvm_configuration_must_be_the_tools_file() {
+    let fixture = Fixture::new();
+    fs::write(fixture.args.payload.join("bin/lvm.conf"), b"devices { }\n").unwrap();
+    fixture.reject("differs from tools/lvm2/lvm.conf");
 
-#[test]
-fn takeover_preserves_an_existing_init_wrapper_and_its_real_init() {
-    let wrapper = binary_fixture("existing-init-wrapper");
-    let real_init = binary_fixture("existing-real-init");
-    let esuinit = binary_fixture(FIXTURE_MARKER);
-    let module = b"existing-root-module".to_vec();
-    let mut stock = Cpio::new();
-    for (name, bytes) in [
-        ("init", wrapper.clone()),
-        ("init.real", real_init.clone()),
-        ("kernelsu.ko", module.clone()),
-    ] {
-        stock
-            .add(name, CpioEntry::regular(0o755, Box::new(bytes)))
-            .unwrap();
-    }
-    let mut ramdisk = Vec::new();
-    stock.dump(&mut ramdisk).unwrap();
-    let source = stock_boot(4, &ramdisk);
-    let overlay = takeover_cpio(
-        esuinit.clone(),
-        stock_init(&source, 183).unwrap(),
-        BTreeMap::new(),
-        "0123456789ab",
-    )
-    .unwrap();
-    let patched = patch_boot(&source, &overlay).unwrap();
-    let image = BootImage::parse(&patched).unwrap();
-    let mut rebuilt = Vec::new();
-    image
-        .get_blocks()
-        .get_ramdisk()
-        .unwrap()
-        .dump(&mut rebuilt, false)
-        .unwrap();
-    assert!(rebuilt.starts_with(&ramdisk));
-    let cpio = Cpio::load_from_data(&rebuilt).unwrap();
-    for (name, expected) in [
-        ("init", esuinit),
-        ("init.esureal", wrapper),
-        ("init.real", real_init),
-        ("kernelsu.ko", module),
-    ] {
-        assert_eq!(cpio.entry_by_name(name).unwrap().data().unwrap(), expected);
-    }
-}
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.args.payload.join("bin/lvm.conf")).unwrap();
+    fixture.reject("No such file");
 
-#[test]
-fn takeover_refuses_to_overwrite_its_own_preserved_init_path() {
-    let mut stock = Cpio::new();
-    for name in ["init", "init.esureal"] {
-        stock
-            .add(
-                name,
-                CpioEntry::regular(0o755, Box::new(binary_fixture("existing-init"))),
-            )
-            .unwrap();
-    }
-    let mut ramdisk = Vec::new();
-    stock.dump(&mut ramdisk).unwrap();
-    assert!(stock_init(&stock_boot(4, &ramdisk), 183).is_err());
-}
-
-#[test]
-fn init_boot_without_kernel_or_ramdisk_is_supported_and_signatures_are_omitted() {
-    for version in [3, 4] {
-        let mut source = stock_boot(version, &[]);
-        source.truncate(4096);
-        put32(&mut source, 8, 0);
-        if version == 4 {
-            put32(&mut source, 1580, 4096);
-            source.extend(vec![0x55; 4096]);
-        }
-        source.extend(b"untrusted AVB tail");
-        let overlay = takeover_cpio(
-            vec![1, 2, 3],
-            vec![4, 5, 6],
-            BTreeMap::new(),
-            "0123456789ab",
-        )
-        .unwrap();
-        let patched = patch_boot(&source, &overlay).unwrap();
-        let image = BootImage::parse(&patched).unwrap();
-        assert!(image.get_blocks().get_kernel().is_none());
-        if version == 4 {
-            assert_eq!(image.get_header().get_signature_size(), 0);
-        }
-        let mut archive = Vec::new();
-        image
-            .get_blocks()
-            .get_ramdisk()
-            .unwrap()
-            .dump(&mut archive, false)
-            .unwrap();
-        let cpio = Cpio::load_from_data(&archive).unwrap();
-        assert!(cpio.exists("init"));
-        assert!(cpio.exists("init.esureal"));
-    }
+    let fixture = Fixture::new();
+    let conf = fixture.args.payload.join("bin/lvm.conf");
+    fs::set_permissions(&conf, fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.reject("not a regular 0644 file");
 }
 
 #[test]
@@ -760,22 +670,18 @@ fn traversal_symlink_orphan_module_and_existing_output_fail_closed() {
 }
 
 #[test]
-fn malformed_boot_and_dynamic_pid1_are_rejected() {
-    for source in [vec![], vec![0; 4096], b"ANDROID!".to_vec()] {
-        assert!(patch_boot(&source, b"").is_err());
-    }
-    let mut source = stock_boot(3, &[]);
-    put32(&mut source, 40, 2);
-    assert!(patch_boot(&source, b"").is_err());
+fn a_dynamic_pid1_or_early_helper_is_rejected() {
     let fixture = Fixture::new();
     let binary = binary_fixture_kind(FIXTURE_MARKER, true);
     fs::write(&fixture.args.esuinit, binary).unwrap();
     assert!(patch(&fixture.args).is_err());
     assert!(!fixture.args.out.exists());
-    let fixture = Fixture::new();
-    let path = fixture.args.payload.join("bin/thin-activate");
-    fs::write(path, binary_fixture_kind(FIXTURE_MARKER, true)).unwrap();
-    fixture.reject("statically linked");
+    for name in ["thin-activate", "lvm", "ota-stage"] {
+        let fixture = Fixture::new();
+        let path = fixture.args.payload.join("bin").join(name);
+        fs::write(path, binary_fixture_kind(FIXTURE_MARKER, true)).unwrap();
+        fixture.reject("statically linked");
+    }
 }
 
 #[test]
@@ -821,6 +727,9 @@ fn generated_names_cannot_collide_on_fat_and_pid1_cannot_hide_a_stale_copy() {
     fs::create_dir(fixture.args.payload.join("Receipts")).unwrap();
     fixture.reject("case-folding collision");
     let fixture = Fixture::new();
+    fs::create_dir(fixture.args.payload.join("Kmi")).unwrap();
+    fixture.reject("case-folding collision");
+    let fixture = Fixture::new();
     fs::write(
         fixture.args.payload.join("bin/Esuinit"),
         binary_fixture(FIXTURE_MARKER),
@@ -834,18 +743,6 @@ fn generated_names_cannot_collide_on_fat_and_pid1_cannot_hide_a_stale_copy() {
     )
     .unwrap();
     fixture.reject("disagrees");
-}
-
-#[test]
-fn commandline_preserves_quoted_arguments_and_has_one_explicit_contract() {
-    let command =
-        br#"console=ttyS0 label="one  two" "rdinit=/old" androidboot.esu.rom=old rdinit=/another"#;
-    assert_eq!(
-        boot_cmdline(command).unwrap(),
-        "console=ttyS0 label=\"one  two\""
-    );
-    assert!(boot_cmdline(b"label=\"unterminated").is_err());
-    assert!(boot_cmdline(&[b'x'; 1536]).is_err());
 }
 
 #[test]
