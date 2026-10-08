@@ -1,6 +1,6 @@
 //! Emit tools/provision's --seed JSON; never opens a device or input image.
 use esu_platform::efivars::PROJECT_GUID;
-use gobbl_boot_hal::{Merge, State};
+use gobbl_boot_hal::wire::{Gbm1, Gbs1};
 use std::fmt::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,14 +23,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "_b" => 1,
         _ => return Err("expected _a or _b".into()),
     };
-    let state = State::initial(number, current).map_err(|_| "ROM number must be nonzero")?;
-    let merge = Merge {
+    let record = Gbs1::initial(number, current).map_err(|_| "ROM number must be nonzero")?;
+    let merge = Gbm1 {
         status: 0,
         source: current,
     };
     println!("[");
     for (index, (prefix, data)) in [
-        ("Slot", state.encode().as_slice()),
+        ("Slot", record.encode().as_slice()),
         ("MergeStatus", merge.encode().as_slice()),
     ]
     .iter()

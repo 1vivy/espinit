@@ -1,11 +1,7 @@
 //! Frozen AIDL V1 dispatch using the NDK C ABI (no vendor QTI libraries).
-use gobbl_boot_hal::{
-    COMMAND_FAILED,
-    service::{Hal, Reply},
-};
+use generic_bootctl_core::{COMMAND_FAILED, Reply, Service};
 use std::ffi::{CStr, c_char, c_void};
-use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 type Opaque = c_void;
 #[link(name = "binder_ndk")]
@@ -31,12 +27,8 @@ unsafe extern "C" {
     fn dlopen(name: *const c_char, flags: i32) -> *mut Opaque;
     fn dlsym(handle: *mut Opaque, name: *const c_char) -> *mut Opaque;
 }
-unsafe extern "C" {
-    fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
-}
-
 // Only this Mutex serializes read-modify-write HAL transactions.
-static HAL: OnceLock<Mutex<Hal>> = OnceLock::new();
+static HAL: OnceLock<Arc<Mutex<Service>>> = OnceLock::new();
 
 fn execute(code: u32, input: i32) -> Result<Reply, i32> {
     HAL.get()
@@ -97,34 +89,8 @@ unsafe extern "C" fn transact(
     }
 }
 
-fn property(name: &CStr) -> Result<String, String> {
-    let mut value = [0u8; 92]; // PROP_VALUE_MAX from NDK sys/system_properties.h.
-    // SAFETY: name is terminated; bionic writes at most PROP_VALUE_MAX bytes.
-    let length = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
-    if length <= 0 || length as usize >= value.len() {
-        return Err(format!("missing property {name:?}"));
-    }
-    std::str::from_utf8(&value[..length as usize])
-        .map(str::to_owned)
-        .map_err(|e| e.to_string())
-}
-
-pub fn run() -> Result<(), String> {
-    let current = match property(c"ro.boot.slot_suffix")?.as_str() {
-        "_a" => 0,
-        "_b" => 1,
-        _ => return Err("invalid ro.boot.slot_suffix".into()),
-    };
-    let mut hal = Hal::new(
-        Path::new("/dev/efivars"),
-        Path::new("/dev/block/by-name/misc"),
-        current,
-    );
-    if hal.reconcile().is_err() {
-        eprintln!("boot-hal storage unavailable; registering service and retrying on transaction");
-    }
-    HAL.set(Mutex::new(hal))
-        .map_err(|_| "HAL already initialized")?;
+pub fn run(service: Arc<Mutex<Service>>) -> Result<(), String> {
+    HAL.set(service).map_err(|_| "HAL already initialized")?;
 
     // These stable platform C entrypoints are exported on Android, but excluded
     // from public app-NDK stubs. Resolve them from the already loaded platform

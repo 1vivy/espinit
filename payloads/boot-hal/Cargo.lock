@@ -17,10 +17,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "generic-bootctl-aidl"
+version = "0.1.0"
+dependencies = [
+ "generic-bootctl-core",
+]
+
+[[package]]
+name = "generic-bootctl-core"
+version = "0.1.0"
+
+[[package]]
 name = "gobbl-boot-hal"
 version = "0.1.0"
 dependencies = [
  "esu-platform",
+ "generic-bootctl-aidl",
+ "generic-bootctl-core",
 ]
 
 [[package]]

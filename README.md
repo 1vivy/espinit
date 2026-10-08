@@ -135,6 +135,8 @@ When a Boot HAL executable is supplied, the payload assembler places it at `modu
 
 This fixed QTI target is device-specific. Merely assembling it does not establish another device's service compatibility. If device evidence later proves a tmpfs association denial, evaluate that specific rule then; no speculative fallback is shipped.
 
+The executable is a thin consumer of the shared [generic-bootctl](https://github.com/1vivy/generic-bootctl) core: `payloads/boot-hal/vendor/generic-bootctl` vendors `crates/core` (slot health policy, frozen AIDL V1 dispatch) and `crates/aidl` (raw AIBinder NDK transport) at a pinned commit, and esu keeps only its own `EsuBackend`, GBS1/GBM1 wire records and the misc VAB mirror. The vendored sources are path dependencies, so the NDK build stays `--locked --offline` and the produced ELF keeps exactly `libbinder_ndk.so`, `libc.so` and `libdl.so`; see [`PROVENANCE.md`](payloads/boot-hal/PROVENANCE.md) for the pin, hashes and the workspace adaptation.
+
 ## Kernel compatibility and builds
 
 All four phone LKMs use the shared KMI builder with the published **trimmed** ACK `android16-6.12` generation-6 output. This KMI generation is an upstream ABI identifier, not the removed payload generation system.
@@ -153,7 +155,7 @@ python3 scripts/kmi_modules.py verify --kmi-out "$KMI_OUT" \
 
 Admission verifies architecture/type, module name, MODVERSIONS CRCs against `Module.symvers`, and non-versioned imports against `System.map`. Schema-2 compatibility receipts bind the module hash and all KMI reference input hashes. Do not repair CRCs, vermagic or receipts by hand. PID 1 and `esud insmod` share the strict runtime loader; unavailable imports fail before insertion.
 
-Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](payloads/boot-hal/build-android.sh).
+Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](payloads/boot-hal/build-android.sh), which builds the vendored generic-bootctl core from its in-tree pin (`ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh`).
 
 ## Host packaging and build identity
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Builds the aarch64 esu boot-control HAL from the vendored generic-bootctl
+# core (payloads/boot-hal/vendor/generic-bootctl, pinned in PROVENANCE.md).
+# Path dependencies only: --locked --offline needs no network or extra tree.
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 : "${ESU_NDK:?Set ESU_NDK to an Android NDK with API 35}"

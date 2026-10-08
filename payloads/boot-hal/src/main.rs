@@ -1,9 +1,58 @@
+//! Android entry: register the frozen AIDL V1 `/default` service for the esu backend.
 #[cfg(target_os = "android")]
-mod android;
+mod entry {
+    use generic_bootctl_core::Service;
+    use gobbl_boot_hal::backend::EsuBackend;
+    use std::ffi::{CStr, c_char};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    unsafe extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
+    }
+
+    fn property(name: &CStr) -> Result<String, String> {
+        let mut value = [0u8; 92]; // PROP_VALUE_MAX from NDK sys/system_properties.h.
+        // SAFETY: name is terminated; bionic writes at most PROP_VALUE_MAX bytes.
+        let length = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
+        if length <= 0 || length as usize >= value.len() {
+            return Err(format!("missing property {name:?}"));
+        }
+        std::str::from_utf8(&value[..length as usize])
+            .map(str::to_owned)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn run() -> Result<(), String> {
+        let current: u8 = match property(c"ro.boot.slot_suffix")?.as_str() {
+            "_a" => 0,
+            "_b" => 1,
+            _ => return Err("invalid ro.boot.slot_suffix".into()),
+        };
+        let mut backend = EsuBackend::open(
+            Path::new("/dev/efivars"),
+            Path::new("/dev/block/by-name/misc"),
+            current,
+        );
+        // Best effort: storage failures never gate registration, and the first
+        // state-dependent transaction retries the same reconciliation.
+        if let Err(error) = backend.reconcile() {
+            eprintln!(
+                "boot-hal storage unavailable; registering service and retrying on transaction: {error}"
+            );
+        }
+        // The esu HAL is always writable. Its writes are gated by the install
+        // decision, the read-only /vendor overlay and the ROM-isolation layer
+        // outside this process; `persist.generic_bootctl.rw` belongs to the
+        // generic same-path substitution, which the esu payload does not use.
+        let service = Service::new(Box::new(backend), u32::from(current), Box::new(|| true));
+        generic_bootctl_aidl::run(Arc::new(Mutex::new(service)))
+    }
+}
 
 fn main() {
     #[cfg(target_os = "android")]
-    if let Err(error) = android::run() {
+    if let Err(error) = entry::run() {
         eprintln!("boot-hal: {error}");
         std::process::exit(1);
     }

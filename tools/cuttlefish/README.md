@@ -40,7 +40,11 @@ tools/cuttlefish/assemble.py \
 replacement binary to package the Boot HAL module exactly as before, or omit it
 to assemble a payload without a Boot HAL directory, module-order entry, binary
 or required-file check. Every other input is required, and an explicitly
-supplied HAL must be a nonempty regular file like the rest.
+supplied HAL must be a nonempty regular file like the rest. Build it with
+`ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh`; the
+crate builds `--locked --offline` against the vendored generic-bootctl core in
+`payloads/boot-hal/vendor/generic-bootctl` and produces an AArch64 PIE whose only
+shared dependencies stay `libbinder_ndk.so`, `libc.so` and `libdl.so`.
 
 The four modules require schema-2 `.ko.compat.json` receipts beside them.
 The shared KMI verifier runs before image publication. It currently admits

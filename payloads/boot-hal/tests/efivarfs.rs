@@ -1,9 +1,11 @@
+//! Host behaviour tests for the esu records, the misc mirror, and the shared
+//! generic-bootctl service that now drives them.
 use esu_platform::efivars::{self, PROJECT_GUID};
-use gobbl_boot_hal::{
-    COMMAND_FAILED, Merge, State,
-    service::{Hal, Reply},
-    storage::Storage,
+use generic_bootctl_core::{
+    Backend, COMMAND_FAILED, INVALID_SLOT, Merge, MergeStatus, Reply, Service, Slot,
 };
+use gobbl_boot_hal::backend::EsuBackend;
+use gobbl_boot_hal::wire::{Gbm1, Gbs1, NO_PENDING, VAB_OFFSET};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,12 +38,20 @@ impl Fixture {
             &self.root,
             "Slot-stock",
             7,
-            &State::initial(1, 1).unwrap().encode(),
+            &Gbs1::initial(1, 1).unwrap().encode(),
         )
         .unwrap();
     }
-    fn storage(&self) -> Storage {
-        Storage::open(&self.root, &self.misc, "stock").unwrap()
+    fn backend(&self, current: u8) -> EsuBackend {
+        EsuBackend::open(&self.root, &self.misc, current)
+    }
+    /// Production constructs the same service with an always-writable gate.
+    fn service(&self, current: u8) -> Service {
+        Service::new(
+            Box::new(self.backend(current)),
+            u32::from(current),
+            Box::new(|| true),
+        )
     }
 }
 impl Drop for Fixture {
@@ -49,32 +59,42 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.dir).unwrap();
     }
 }
+fn stored(f: &Fixture, name: &str) -> Vec<u8> {
+    efivars::read(&f.root, name).unwrap().unwrap().1
+}
+fn vab() -> usize {
+    usize::try_from(VAB_OFFSET).unwrap()
+}
 
 #[test]
 fn missing_merge_defaults_but_missing_slot_cannot_invent_rom_number() {
     let f = Fixture::new();
-    let s = f.storage();
+    // The variable names come from BootedRom, so only identity precedes them.
+    efivars::write(&f.root, "BootedRom", 7, b"stock\0").unwrap();
+    let mut backend = f.backend(1);
     assert_eq!(
-        s.merge(1).unwrap(),
+        backend.read_merge().unwrap(),
         Merge {
-            status: 0,
+            status: MergeStatus::None,
             source: 1
         }
     );
-    assert!(s.state().is_err());
-    // Construction is safe even when neither path exists.
-    Storage::open(
+    assert!(backend.read_state().is_err());
+    // Construction is infallible and touches nothing; every storage-dependent
+    // operation reports failure instead.
+    let mut absent = EsuBackend::open(
         Path::new("/nonexistent/efivars"),
         Path::new("/nonexistent/misc"),
-        "stock",
-    )
-    .unwrap();
+        1,
+    );
+    assert!(absent.read_state().is_err());
+    assert!(absent.prepare().is_err());
 }
 
 #[test]
 fn unavailable_or_unmanaged_identity_does_not_gate_hal_and_is_retried() {
     let f = Fixture::new();
-    let mut hal = Hal::new(&f.root, &f.misc, 1);
+    let mut backend = f.backend(1);
     for identity in [
         None,
         Some(b"direct\0".as_slice()),
@@ -83,13 +103,24 @@ fn unavailable_or_unmanaged_identity_does_not_gate_hal_and_is_retried() {
         if let Some(data) = identity {
             efivars::write(&f.root, "BootedRom", 7, data).unwrap();
         }
-        assert_eq!(hal.reconcile(), Err(COMMAND_FAILED));
+        // The same instance retries identity on every state-dependent call.
+        assert!(backend.reconcile().is_err());
+        assert!(backend.read_state().is_err());
+        let mut hal = f.service(1);
         assert_eq!(hal.execute(2, 0), Ok(Reply::Int(1)));
         assert_eq!(hal.execute(3, 0), Ok(Reply::Int(2)));
         assert_eq!(hal.execute(5, 0), Ok(Reply::Text(c"_a")));
+        assert_eq!(
+            hal.execute(16_777_214, 0),
+            Ok(Reply::Text(c"2400346954240a5de495a1debc81429dd012d7b7"))
+        );
+        assert_eq!(hal.execute(16_777_215, 0), Ok(Reply::Int(1)));
         assert_eq!(hal.execute(1, 0), Err(COMMAND_FAILED));
     }
     f.managed();
+    assert!(backend.reconcile().is_ok());
+    assert_eq!(backend.read_state().unwrap().slots.len(), 2);
+    let mut hal = f.service(1);
     assert_eq!(hal.execute(1, 0), Ok(Reply::Int(1)));
 }
 
@@ -97,8 +128,8 @@ fn unavailable_or_unmanaged_identity_does_not_gate_hal_and_is_retried() {
 fn persistent_read_and_write_errors_are_aidl_command_failures() {
     let f = Fixture::new();
     f.managed();
-    let mut hal = Hal::new(&f.root, &f.misc, 1);
-    hal.reconcile().unwrap();
+    f.backend(1).reconcile().unwrap();
+    let mut hal = f.service(1);
     std::fs::remove_file(f.variable("Slot-stock")).unwrap();
     for _ in 0..2 {
         assert_eq!(hal.execute(1, 0), Err(COMMAND_FAILED));
@@ -107,7 +138,7 @@ fn persistent_read_and_write_errors_are_aidl_command_failures() {
     assert_eq!(hal.execute(8, 0), Err(COMMAND_FAILED));
     std::fs::remove_dir(f.variable("Slot-stock")).unwrap();
     f.managed();
-    hal.reconcile().unwrap();
+    f.backend(1).reconcile().unwrap();
     std::fs::create_dir(f.variable("MergeStatus-stock")).unwrap();
     for _ in 0..2 {
         assert_eq!(hal.execute(11, 3), Err(COMMAND_FAILED));
@@ -119,29 +150,48 @@ fn persistent_read_and_write_errors_are_aidl_command_failures() {
 fn writes_are_byte_exact_and_preserve_other_roms_and_misc_regions() {
     let f = Fixture::new();
     f.managed();
-    let other = State::initial(2, 0).unwrap().encode();
+    let other = Gbs1::initial(2, 0).unwrap().encode();
     efivars::write(&f.root, "Slot-other", 7, &other).unwrap();
     let mut before = std::fs::read(&f.misc).unwrap();
-    let old = Merge {
+    let old = Gbm1 {
         status: 2,
         source: 1,
     }
     .message();
-    before[32768..32775].copy_from_slice(&old[..7]);
+    before[vab()..vab() + 7].copy_from_slice(&old[..7]);
     std::fs::write(&f.misc, &before).unwrap();
-    let mut hal = Hal::new(&f.root, &f.misc, 1);
-    hal.reconcile().unwrap();
+    let mut backend = f.backend(1);
+    backend.reconcile().unwrap();
+    let mut hal = Service::new(Box::new(backend), 1, Box::new(|| true));
     assert_eq!(hal.execute(9, 0), Ok(Reply::Void));
     assert_eq!(hal.execute(11, 3), Ok(Reply::Void));
-    let mut expected = State::initial(1, 1).unwrap();
-    expected.set_active(0).unwrap();
+    // Byte-exact records: the esu wire format is the on-disk contract.
+    let expected = Gbs1 {
+        rom_number: 1,
+        selected: 1,
+        pending: 0,
+        slots: [
+            Slot {
+                priority: 15,
+                tries: 7,
+                successful: false,
+                verity_corrupted: false,
+            },
+            Slot {
+                priority: 14,
+                tries: 7,
+                successful: true,
+                verity_corrupted: false,
+            },
+        ],
+    };
     let wire = [7u32.to_le_bytes().as_slice(), expected.encode().as_slice()].concat();
     assert_eq!(std::fs::read(f.variable("Slot-stock")).unwrap(), wire);
     assert_eq!(
         efivars::read(&f.root, "Slot-other").unwrap(),
         Some((7, other.to_vec()))
     );
-    let merge = Merge {
+    let merge = Gbm1 {
         status: 3,
         source: 1,
     };
@@ -150,9 +200,9 @@ fn writes_are_byte_exact_and_preserve_other_roms_and_misc_regions() {
         [7u32.to_le_bytes().as_slice(), merge.encode().as_slice()].concat()
     );
     let after = std::fs::read(&f.misc).unwrap();
-    assert_eq!(&after[..32768], &before[..32768]);
-    assert_eq!(&after[32775..], &before[32775..]);
-    assert_eq!(&after[32768..32775], &merge.message()[..7]);
+    assert_eq!(&after[..vab()], &before[..vab()]);
+    assert_eq!(&after[vab() + 7..], &before[vab() + 7..]);
+    assert_eq!(&after[vab()..vab() + 7], &merge.message()[..7]);
 }
 
 #[test]
@@ -160,17 +210,146 @@ fn failed_misc_mirror_leaves_authority_committed_and_reconciliation_retries() {
     let f = Fixture::new();
     f.managed();
     std::fs::remove_file(&f.misc).unwrap();
-    let mut hal = Hal::new(&f.root, &f.misc, 1);
-    assert_eq!(hal.reconcile(), Err(COMMAND_FAILED));
+    let mut hal = f.service(1);
+    assert!(f.backend(1).reconcile().is_err());
     assert_eq!(hal.execute(2, 0), Ok(Reply::Int(1)));
     let merge = Merge {
-        status: 3,
+        status: MergeStatus::Merging,
         source: 1,
     };
-    assert!(f.storage().save_merge(merge).is_err());
-    assert_eq!(f.storage().merge(1).unwrap(), merge);
+    assert!(f.backend(1).write_merge(merge).is_err());
+    assert_eq!(f.backend(1).read_merge().unwrap(), merge);
     std::fs::write(&f.misc, vec![0xa5; 65536]).unwrap();
     assert_eq!(hal.execute(4, 0), Ok(Reply::Int(3)));
     let after = std::fs::read(&f.misc).unwrap();
-    assert_eq!(&after[32768..32832], &merge.message());
+    assert_eq!(
+        &after[vab()..vab() + 64],
+        &Gbm1 {
+            status: 3,
+            source: 1
+        }
+        .message()
+    );
+}
+
+#[test]
+fn rom_one_records_a_pending_switch_and_rom_two_selects_immediately() {
+    let f = Fixture::new();
+    f.managed();
+    let mut hal = f.service(1);
+    assert_eq!(hal.execute(9, 0), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!(
+        (record.rom_number, record.selected, record.pending),
+        (1, 1, 0)
+    );
+    assert_eq!(record.booted_slot(), 0);
+    assert_eq!(hal.execute(1, 0), Ok(Reply::Int(0)));
+    // Requesting the confirmed slot cancels the pending switch.
+    assert_eq!(hal.execute(9, 1), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!((record.selected, record.pending), (1, NO_PENDING));
+    assert_eq!(hal.execute(1, 0), Ok(Reply::Int(1)));
+    // ROM >= 2 selects immediately and never carries a pending request.
+    efivars::write(
+        &f.root,
+        "Slot-stock",
+        7,
+        &Gbs1::initial(2, 0).unwrap().encode(),
+    )
+    .unwrap();
+    let mut hal = f.service(1);
+    assert_eq!(hal.execute(9, 1), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!(
+        (record.rom_number, record.selected, record.pending),
+        (2, 1, NO_PENDING)
+    );
+    assert_eq!(hal.execute(1, 0), Ok(Reply::Int(1)));
+    assert_eq!(hal.execute(6, 1), Ok(Reply::Bool(true)));
+}
+
+#[test]
+fn success_and_unbootable_keep_the_gbs1_health_policy() {
+    let f = Fixture::new();
+    f.managed();
+    let mut hal = f.service(1);
+    // markBootSuccessful keeps the existing nonzero try count and never confirms
+    // or erases a pending firmware request.
+    assert_eq!(hal.execute(8, 0), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!(
+        record.slots[1],
+        Slot {
+            priority: 15,
+            tries: 7,
+            successful: true,
+            verity_corrupted: false
+        }
+    );
+    assert_eq!(record.pending, NO_PENDING);
+    assert_eq!(hal.execute(7, 1), Ok(Reply::Bool(true)));
+    // A fully zeroed slot is raised to one try, one priority and the success bit.
+    efivars::write(
+        &f.root,
+        "Slot-stock",
+        7,
+        &Gbs1 {
+            slots: [Slot::default(); 2],
+            ..Gbs1::initial(1, 1).unwrap()
+        }
+        .encode(),
+    )
+    .unwrap();
+    let mut hal = f.service(1);
+    assert_eq!(hal.execute(6, 1), Ok(Reply::Bool(false)));
+    assert_eq!(hal.execute(8, 0), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!(
+        record.slots[1],
+        Slot {
+            priority: 1,
+            tries: 1,
+            successful: true,
+            verity_corrupted: false
+        }
+    );
+    assert_eq!(hal.execute(7, 1), Ok(Reply::Bool(true)));
+    // setSlotAsUnbootable zeroes priority, tries and success, clears the matching
+    // pending request and never selects an alternate slot.
+    assert_eq!(hal.execute(9, 0), Ok(Reply::Void));
+    let requested = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!(requested.pending, 0);
+    assert_eq!(hal.execute(10, 0), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert_eq!(record.slots[0], Slot::default());
+    assert_eq!((record.selected, record.pending), (1, NO_PENDING));
+    assert_eq!(hal.execute(1, 0), Ok(Reply::Int(1)));
+    assert_eq!(hal.execute(6, 0), Ok(Reply::Bool(false)));
+}
+
+#[test]
+fn slot_queries_stay_available_and_invalid_slots_fail_first() {
+    let f = Fixture::new();
+    let mut hal = f.service(1);
+    // No identity, no Slot record and no mirror reachable: these answers remain.
+    assert_eq!(hal.execute(2, 0), Ok(Reply::Int(1)));
+    assert_eq!(hal.execute(3, 0), Ok(Reply::Int(2)));
+    assert_eq!(hal.execute(5, 0), Ok(Reply::Text(c"_a")));
+    assert_eq!(hal.execute(5, 1), Ok(Reply::Text(c"_b")));
+    assert_eq!(hal.execute(5, 2), Ok(Reply::Text(c"")));
+    assert_eq!(hal.execute(5, -1), Ok(Reply::Text(c"")));
+    // Index validation precedes storage access, exactly as AOSP does.
+    for code in [6, 7, 9, 10] {
+        for slot in [2, -1, i32::MAX] {
+            assert_eq!(hal.execute(code, slot), Err(INVALID_SLOT));
+        }
+    }
+    assert_eq!(hal.execute(8, 0), Err(COMMAND_FAILED));
+    f.managed();
+    std::fs::remove_file(f.variable("Slot-stock")).unwrap();
+    std::fs::create_dir(f.variable("Slot-stock")).unwrap();
+    let mut hal = f.service(1);
+    assert_eq!(hal.execute(6, 5), Err(INVALID_SLOT));
+    assert_eq!(hal.execute(6, 0), Err(COMMAND_FAILED));
 }

@@ -34,7 +34,7 @@ Early processing applies admitted policies, stages usable trees into tmpfs `/dev
 
 Directory attrs may name `/vendor` itself. Every staged inode takes explicit attrs or existing target lstat/SELinux xattr metadata. Missing metadata is `OverlayAttrsMissing`; vfat labels/modes are never inherited. The affected optional layer is skipped rather than aborting every other module. Module source symlinks and special inodes are not supported by the host package contract.
 
-When supplied, the optional Boot HAL module is generated from its built executable and checked-in `esu/modules/boot-hal/{module.prop,attrs,sepolicy.rule}`. It replaces the fixed stock QTI executable without changing the service name or SELinux transition. The Cuttlefish assembler also accepts payloads without a Boot HAL.
+When supplied, the optional Boot HAL module is generated from its built executable and checked-in `esu/modules/boot-hal/{module.prop,attrs,sepolicy.rule}`. It replaces the fixed stock QTI executable without changing the service name or SELinux transition. The Cuttlefish assembler also accepts payloads without a Boot HAL. That executable is built by `payloads/boot-hal/build-android.sh` from the vendored generic-bootctl core (`payloads/boot-hal/vendor/generic-bootctl`, pinned; see [`PROVENANCE.md`](../../payloads/boot-hal/PROVENANCE.md)); only the esu backend, the GBS1/GBM1 wire records and the misc mirror remain in the payload crate.
 
 ## Linux host boot-patch
 
