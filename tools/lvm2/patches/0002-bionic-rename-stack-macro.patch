@@ -1,0 +1,4249 @@
+diff -r a/daemons/dmeventd/dmeventd.c b/daemons/dmeventd/dmeventd.c
+--- a/daemons/dmeventd/dmeventd.c	2026-09-30 03:19:39.000000000 -0600
++++ b/daemons/dmeventd/dmeventd.c	2026-10-08 15:56:45.305408758 -0600
+@@ -573,7 +573,7 @@
+ 	}
+ 
+ 	/*
+-	 * We use a smaller stack since it gets preallocated in its entirety
++	 * We use a smaller log_stack since it gets preallocated in its entirety
+ 	 */
+ 	pthread_attr_setstacksize(&attr, THREAD_STACK_SIZE + getpagesize());
+ 
+@@ -971,7 +971,7 @@
+ 				_systemd_activation ? "systemd" : "direct",
+ 				_exit_on,
+ 				idle_buf)) < 0) {
+-		stack;
++		log_stack;
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -1455,7 +1455,7 @@
+ 
+ 		/* Before restarting event loop reset any pending SIGALRM signal */
+ 		if (!_reset_pending_signal(SIGALRM)) {
+-			stack;
++			log_stack;
+ 			break; /* Something is wrong... */
+ 		}
+ 
+@@ -1688,7 +1688,7 @@
+ 
+ 	if (!(dso_data = _lookup_dso(message_data)) &&
+ 	    !(dso_data = _load_dso(message_data))) {
+-		stack;
++		log_stack;
+ #ifdef ELIBACC
+ 		return -ELIBACC;
+ #else
+@@ -1718,7 +1718,7 @@
+ 		/* Only creating thread during event processing
+ 		 * Remaining initialization happens within monitoring thread */
+ 		if (!(thread = _alloc_thread_status(message_data, dso_data))) {
+-			stack;
++			log_stack;
+ 			return -ENOMEM;
+ 		}
+ 
+@@ -1726,7 +1726,7 @@
+ 		_set_timeout_to_thread(thread, message_data->timeout_secs);
+ 
+ 		if ((ret = _create_thread(thread))) {
+-			stack;
++			log_stack;
+ 			_free_thread_status(thread);
+ 			return ret;
+ 		}
+@@ -1752,7 +1752,7 @@
+ 	   almost as good as dead already... */
+ 	if ((message_data->events_field & DM_EVENT_TIMEOUT) &&
+ 	    (ret = _register_for_timeout(thread))) {
+-		stack;
++		log_stack;
+ 		_unregister_for_event(message_data);
+ 	}
+ 
+@@ -2211,7 +2211,7 @@
+ 			free(answer);
+ 		}
+ 	} else if (msg->cmd != DM_EVENT_CMD_ACTIVE && !_parse_message(&message_data)) {
+-		stack;
++		log_stack;
+ 		ret = -EINVAL;
+ 	} else
+ 		ret = _handle_request(msg, &message_data);
+@@ -2247,7 +2247,7 @@
+ 	_do_process_request(&msg);
+ 
+ 	if (!_client_write(fifos, &msg))
+-		stack;
++		log_stack;
+ 
+ 	DEBUGLOG("<<< CMD:%s (0x%x) completed (result %d).", _decode_cmd(cmd), (unsigned) cmd, (int) msg.cmd);
+ 
+diff -r a/daemons/dmeventd/libdevmapper-event.c b/daemons/dmeventd/libdevmapper-event.c
+--- a/daemons/dmeventd/libdevmapper-event.c	2026-09-30 03:19:39.000000000 -0600
++++ b/daemons/dmeventd/libdevmapper-event.c	2026-10-08 15:56:45.305934437 -0600
+@@ -397,7 +397,7 @@
+ 	 * read status return code from daemon.
+ 	 */
+ 	if (!_daemon_write(fifos, msg)) {
+-		stack;
++		log_stack;
+ 		free(msg->data);
+ 		msg->data = NULL;
+ 		return -EIO;
+@@ -408,7 +408,7 @@
+ 		msg->data = NULL;
+ 
+ 		if (!_daemon_read(fifos, msg) || !msg->data) {
+-			stack;
++			log_stack;
+ 			return -EIO;
+ 		}
+ 	} while (!_check_message_id(msg));
+diff -r a/daemons/dmeventd/plugins/raid/dmeventd_raid.c b/daemons/dmeventd/plugins/raid/dmeventd_raid.c
+--- a/daemons/dmeventd/plugins/raid/dmeventd_raid.c	2026-09-30 03:19:39.000000000 -0600
++++ b/daemons/dmeventd/plugins/raid/dmeventd_raid.c	2026-10-08 15:56:45.306454195 -0600
+@@ -334,7 +334,7 @@
+ 
+ 	/* Mark dead legs attempted and run lvconvert --repair --use-policies. */
+ 	if (!_raid_run_repair(state, &event, device)) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+diff -r a/daemons/dmeventd/plugins/thin/dmeventd_thin.c b/daemons/dmeventd/plugins/thin/dmeventd_thin.c
+--- a/daemons/dmeventd/plugins/thin/dmeventd_thin.c	2026-09-30 03:19:39.000000000 -0600
++++ b/daemons/dmeventd/plugins/thin/dmeventd_thin.c	2026-10-08 15:56:45.306793707 -0600
+@@ -183,7 +183,7 @@
+ 		if (_use_policy(dmt, state))
+ 			goto out;
+ 
+-		stack;
++		log_stack;
+ 
+ 		/*
+ 		 * Rather update oldish status
+diff -r a/daemons/dmeventd/plugins/vdo/dmeventd_vdo.c b/daemons/dmeventd/plugins/vdo/dmeventd_vdo.c
+--- a/daemons/dmeventd/plugins/vdo/dmeventd_vdo.c	2026-09-30 03:19:39.000000000 -0600
++++ b/daemons/dmeventd/plugins/vdo/dmeventd_vdo.c	2026-10-08 15:56:45.306973484 -0600
+@@ -167,7 +167,7 @@
+ 		if (_use_policy(dmt, state))
+ 			goto out;
+ 
+-		stack;
++		log_stack;
+ 
+ 		if (!(new_dmt = dm_task_create(DM_DEVICE_STATUS)))
+ 			goto_out;
+diff -r a/lib/activate/activate.c b/lib/activate/activate.c
+--- a/lib/activate/activate.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/activate/activate.c	2026-10-08 15:56:45.314956470 -0600
+@@ -1005,7 +1005,7 @@
+ 		log_debug_activation("Retrying open_count check for %s.",
+ 				     display_lvname(lv));
+ 		if (!lv_info(lv->vg->cmd, lv, 0, &info, 1, 0) || !info.exists) {
+-			stack; /* device disappeared? */
++			log_stack; /* device disappeared? */
+ 			return 1;
+ 		} else if (!info.open_count)
+ 			return 1;
+@@ -1036,7 +1036,7 @@
+ 		return_0;
+ 
+ 	if (!(r = dev_manager_transient(dm, lv)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 
+@@ -1061,7 +1061,7 @@
+ 		return_0;
+ 
+ 	if (!(r = dev_manager_snapshot_percent(dm, lv, percent)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 
+@@ -1089,7 +1089,7 @@
+ 	if (!dev_manager_snapshot_status(dm, lv, flush, status, &exists)) {
+ 		dev_manager_destroy(dm);
+ 		if (exists)
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -1120,7 +1120,7 @@
+ 		return_0;
+ 
+ 	if (!(r = dev_manager_mirror_percent(dm, lv, wait, percent, event_nr)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 
+@@ -1170,7 +1170,7 @@
+ 
+ 	if (!(*dev_health = dm_pool_strdup(lv->vg->cmd->mem,
+ 					  raid_status->raid->dev_health))) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+@@ -1243,7 +1243,7 @@
+ 	if (!raid_status->raid->sync_action ||
+ 	    !(*sync_action = dm_pool_strdup(lv->vg->cmd->mem,
+ 					    raid_status->raid->sync_action))) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+@@ -1335,7 +1335,7 @@
+ 	if (!dev_manager_raid_status(dm, lv, status, &exists)) {
+ 		dev_manager_destroy(dm);
+ 		if (exists)
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 	/* User has to call dm_pool_destroy(status->mem)! */
+@@ -1399,7 +1399,7 @@
+ 	if (!dev_manager_cache_status(dm, cache_lv, status, &exists)) {
+ 		dev_manager_destroy(dm);
+ 		if (exists)
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 	/* User has to call dm_pool_destroy(status->mem)! */
+@@ -1419,7 +1419,7 @@
+ 	if (!dev_manager_thin_pool_status(dm, lv, flush, thin_pool_status, &exists)) {
+ 		dev_manager_destroy(dm);
+ 		if (exists)
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -1440,7 +1440,7 @@
+ 	if (!dev_manager_thin_status(dm, lv, flush, thin_status, &exists)) {
+ 		dev_manager_destroy(dm);
+ 		if (exists)
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -1460,7 +1460,7 @@
+ 
+ 	if (!(r = dev_manager_thin_device_id(dm, lv, device_id, &exists)))
+ 		if (exists)
+-			stack;
++			log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 
+@@ -1486,7 +1486,7 @@
+ 	if (!dev_manager_vdo_pool_status(dm, lv, flush, vdo_status, &exists)) {
+ 		dev_manager_destroy(dm);
+ 		if (exists)
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -1553,7 +1553,7 @@
+ 	struct lvinfo info;
+ 
+ 	if (!lv_info(cmd, lv, 0, &info, 1, 0)) {
+-		stack;
++		log_stack;
+ 		return -1;
+ 	}
+ 
+@@ -1569,7 +1569,7 @@
+ 		return_0;
+ 
+ 	if (!(r = dev_manager_activate(dm, lv, laopts)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 	return r;
+@@ -1588,7 +1588,7 @@
+ 	laopts->read_only = _passes_readonly_filter(lv->vg->cmd, lv);
+ 
+ 	if (!(r = dev_manager_preload(dm, lv, laopts, flush_required)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 
+@@ -1612,7 +1612,7 @@
+ 		return_0;
+ 
+ 	if (!(r = dev_manager_deactivate(dm, lv)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 	return r;
+@@ -1634,7 +1634,7 @@
+ 		return_0;
+ 
+ 	if (!(r = dev_manager_suspend(dm, lv, laopts, lockfs, flush_required)))
+-		stack;
++		log_stack;
+ 
+ 	dev_manager_destroy(dm);
+ 	return r;
+@@ -1968,7 +1968,7 @@
+ 	if (lv_is_cow(lv) && (laopts->no_merging || !lv_is_merging_cow(lv) ||
+ 			      lv_has_target_type(lv->vg->cmd->mem, lv, NULL, TARGET_NAME_SNAPSHOT))) {
+ 		if (!(r = monitor_dev_for_events(cmd, lv->snapshot->lv, NULL, monitor)))
+-			stack;
++			log_stack;
+ 		return r;
+ 	}
+ 
+@@ -1984,7 +1984,7 @@
+ 		dm_list_iterate_safe(snh, snht, &lv->snapshot_segs)
+ 			if (!monitor_dev_for_events(cmd, dm_list_struct_base(snh,
+ 				struct lv_segment, origin_list)->cow, NULL, monitor)) {
+-				stack;
++				log_stack;
+ 				r = 0;
+ 			}
+ 
+@@ -1996,13 +1996,13 @@
+ 	    (log_seg = first_seg(seg->log_lv)) != NULL &&
+ 	    seg_is_mirrored(log_seg))
+ 		if (!monitor_dev_for_events(cmd, seg->log_lv, NULL, monitor)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 		}
+ 
+ 	dm_list_iterate_items(seg, &lv->segments) {
+ 		if (sigint_caught()) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 			break;
+ 		}
+@@ -2013,7 +2013,7 @@
+ 				continue;
+ 			if (!monitor_dev_for_events(cmd, seg_lv(seg, s), NULL,
+ 						    monitor)) {
+-				stack;
++				log_stack;
+ 				r = 0;
+ 			}
+ 		}
+@@ -2026,20 +2026,20 @@
+ 		if (seg->pool_lv &&
+ 		    !monitor_dev_for_events(cmd, seg->pool_lv,
+ 					    (!monitor) ? laopts : NULL, monitor)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 		}
+ 
+ 		if (seg->external_lv &&
+ 		    !monitor_dev_for_events(cmd, seg->external_lv,
+ 					    (!monitor) ? laopts : NULL, monitor)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 		}
+ 
+ 		if (seg->metadata_lv &&
+ 		    !monitor_dev_for_events(cmd, seg->metadata_lv, NULL, monitor)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 		}
+ 
+@@ -2120,7 +2120,7 @@
+ 			 * so they skip this dm mirror table refreshing step.
+ 			 */
+ 			if (!_lv_activate_lv(lv, &mirr_laopts)) {
+-				stack;
++				log_stack;
+ 				r = 0;
+ 			}
+ 		}
+@@ -2130,7 +2130,7 @@
+ 		for (i = 0;; i++) {
+ 			pending = 0;
+ 			if (!seg->segtype->ops->target_monitored(seg, &pending, &monitored)) {
+-				stack;
++				log_stack;
+ 				r = 0;
+ 				break;
+ 			}
+@@ -2139,7 +2139,7 @@
+ 			log_very_verbose("%s %smonitoring still pending: waiting...",
+ 					 display_lvname(lv), monitor ? "" : "un");
+ 			if (!sigint_usleep(10000 * i)) {
+-				stack;
++				log_stack;
+ 				r = 0;
+ 				break;
+ 			}
+@@ -2341,7 +2341,7 @@
+ 
+ 	if (!monitor_dev_for_events(cmd, lv, laopts, 0))
+ 		/* FIXME Consider aborting here */
+-		stack;
++		log_stack;
+ 
+ 	/* Require fs synchronization when taking a thin snapshot */
+ 	if (laopts->origin_only && lv_is_thin_volume(lv) && lv_is_thin_volume(lv_pre))
+@@ -2481,7 +2481,7 @@
+ 	critical_section_dec(cmd, "resumed");
+ 
+ 	if (!monitor_dev_for_events(cmd, lv, laopts, 1))
+-		stack;
++		log_stack;
+ 
+ 	r = 1;
+ out:
+@@ -2597,7 +2597,7 @@
+ 	}
+ 
+ 	if (!monitor_dev_for_events(cmd, lv, &laopts, 0))
+-		stack;
++		log_stack;
+ 
+ 	critical_section_inc(cmd, "deactivating");
+ 	r = _lv_deactivate(lv);
+@@ -2738,11 +2738,11 @@
+ 
+ 	critical_section_inc(cmd, "activating");
+ 	if (!(r = _lv_activate_lv(lv, laopts)))
+-		stack;
++		log_stack;
+ 	critical_section_dec(cmd, "activated");
+ 
+ 	if (r && !monitor_dev_for_events(cmd, lv, laopts, 1))
+-		stack;
++		log_stack;
+ out:
+ 	return r;
+ }
+@@ -2888,7 +2888,7 @@
+ 		return NULL; /* Skip pvmove/locked LV tracking */
+ 
+ 	dm_list_iterate_items(sl, &lv->segs_using_this_lv) {
+-		/* Recursive call for upper-stack holder */
++		/* Recursive call for upper-log_stack holder */
+ 		if ((holder = lv_holder_is_active(sl->seg->lv)))
+ 			return holder;
+ 
+diff -r a/lib/activate/dev_manager.c b/lib/activate/dev_manager.c
+--- a/lib/activate/dev_manager.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/activate/dev_manager.c	2026-10-08 15:56:45.316992653 -0600
+@@ -368,7 +368,7 @@
+ 		seg_status->type = SEG_STATUS_SNAPSHOT;
+ 	} else if (segtype_is_vdo_pool(segtype)) {
+ 		if (!_vdo_pool_message_stats(seg_status->mem, seg->lv, &seg_status->vdo_pool))
+-			stack;
++			log_stack;
+ 		if (!parse_vdo_pool_status(seg_status->mem, seg->lv, params, dminfo, &seg_status->vdo_pool))
+ 			return_0;
+ 		seg_status->type = SEG_STATUS_VDO_POOL;
+@@ -476,7 +476,7 @@
+ 
+ 		if (!target_name ||
+ 		    !_get_segment_status_from_target_params(target_name, target_params, dminfo, seg_status))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	r = 1;
+@@ -571,7 +571,7 @@
+ 				r = 1;
+ 				goto out; /* safe to use */
+ 			}
+-			stack;
++			log_stack;
+ 		}
+ 	}
+ 
+@@ -737,7 +737,7 @@
+ 		return_0;
+ 
+ 	if (!dm_get_status_snapshot(mem, params, &s))
+-		stack;
++		log_stack;
+         else
+ 		r = s->invalid;
+ 
+@@ -756,7 +756,7 @@
+ 		return_0;
+ 
+ 	if (!dm_get_status_raid(mem, params, &s))
+-		stack;
++		log_stack;
+ 	else if (s->sync_action && !strcmp(s->sync_action, "frozen")) {
+ 		log_warn("WARNING: %s frozen raid device (%u:%u) needs inspection.",
+ 			 dev_name(dev), MAJOR(dev->dev), MINOR(dev->dev));
+@@ -905,9 +905,9 @@
+ 		/*
+ 		 * FIXME: Snapshot origin could be sitting on top of a mirror
+ 		 * which could be blocking I/O. We should add a check for the
+-		 * stack here and see if there's blocked mirror underneath.
++		 * log_stack here and see if there's blocked mirror underneath.
+ 		 * Currently, mirrors used as origin or snapshot is not
+-		 * supported anymore and in general using mirrors in a stack
++		 * supported anymore and in general using mirrors in a log_stack
+ 		 * is disabled by default (with a warning that if enabled,
+ 		 * it could cause various deadlocks).
+ 		 * Similar situation can happen with RAID devices where
+@@ -919,9 +919,9 @@
+ 		 * for an example where this causes problems.
+ 		 *
+ 		 * This is a quick check for now, but replace it with more
+-		 * robust and better check that would check the stack
++		 * robust and better check that would check the log_stack
+ 		 * correctly, not just snapshots but any combination possible
+-		 * in a stack - use proper dm tree to check this instead.
++		 * in a log_stack - use proper dm tree to check this instead.
+ 		 */
+ 		if (check.check_suspended &&
+ 		    (!strcmp(target_type, TARGET_NAME_SNAPSHOT) || !strcmp(target_type, TARGET_NAME_SNAPSHOT_ORIGIN)) &&
+@@ -1164,7 +1164,7 @@
+ 	if (!(r = _info(cmd, name, dlid,
+ 			with_open_count, with_read_ahead, with_name_check,
+ 			dminfo, read_ahead, seg_status)))
+-		stack;
++		log_stack;
+ out:
+ 	dm_pool_free(cmd->mem, name);
+ 
+@@ -2275,7 +2275,7 @@
+ 	}
+ 
+ 	if (!_vdo_pool_message_stats(dm->mem, lv, *status))
+-		stack;
++		log_stack;
+ 
+ 	if (!parse_vdo_pool_status(dm->mem, lv, params, &info, *status))
+ 		goto_out;
+@@ -3069,7 +3069,7 @@
+ 		if (seg->external_lv &&
+ 		    !_add_lv_to_dtree(dm, dtree, seg->external_lv,
+ 				      /* For origin LV check for complete device tree */
+-				      lv_is_origin(seg->external_lv) ? 0 : 1)) /* stack */
++				      lv_is_origin(seg->external_lv) ? 0 : 1)) /* log_stack */
+ 			return_0;
+ 		if (seg->log_lv &&
+ 		    !_add_lv_to_dtree(dm, dtree, seg->log_lv, 0))
+diff -r a/lib/activate/fs.c b/lib/activate/fs.c
+--- a/lib/activate/fs.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/activate/fs.c	2026-10-08 15:56:45.317310185 -0600
+@@ -291,10 +291,10 @@
+ 	case FS_RENAME:
+ 		if (old_lv_name && !_rm_link(dev_dir, vg_name, old_lv_name,
+ 					     check_udev))
+-			stack;
++			log_stack;
+ 
+ 		if (!_mk_link(dev_dir, vg_name, lv_name, dev, check_udev))
+-			stack;
++			log_stack;
+ 		break;
+ 	default:
+ 		; /* NOTREACHED */
+@@ -409,7 +409,7 @@
+ 		}
+ 
+ 	if (!(fsp = malloc(sizeof(*fsp) + len))) {
+-		log_error("No space to stack fs operation");
++		log_error("No space to log_stack fs operation");
+ 		return 0;
+ 	}
+ 
+@@ -503,7 +503,7 @@
+ 			log_debug_activation("Syncing device names");
+ 		/* Wait for all processed udev devices */
+ 		if (!dm_udev_wait(_fs_cookie))
+-			stack;
++			log_stack;
+ 		_fs_cookie = DM_COOKIE_AUTO_CREATE; /* Reset cookie */
+ 		dm_lib_release();
+ 		_pop_fs_ops();
+diff -r a/lib/cache/lvmcache.c b/lib/cache/lvmcache.c
+--- a/lib/cache/lvmcache.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/cache/lvmcache.c	2026-10-08 15:56:45.318109492 -0600
+@@ -530,7 +530,7 @@
+ 	dm_list_iterate_items(devl, &_unused_duplicates) {
+ 		memcpy(&id, devl->dev->pvid, ID_LEN);
+ 		if (!id_write_format(&id, pvid_dashed, sizeof(pvid_dashed)))
+-			stack;
++			log_stack;
+ 
+ 		log_warn("WARNING: Not using device %s for PV %s.", dev_name(devl->dev), pvid_dashed);
+ 	}
+@@ -542,7 +542,7 @@
+ 
+ 		memcpy(&id, info->dev->pvid, ID_LEN);
+ 		if (!id_write_format(&id, pvid_dashed, sizeof(pvid_dashed)))
+-			stack;
++			log_stack;
+ 
+ 		log_warn("WARNING: PV %s prefers device %s because %s.",
+ 			 pvid_dashed, dev_name(info->dev), info->dev->duplicate_prefer_reason);
+@@ -1809,7 +1809,7 @@
+ 	}
+ 
+ 	if (!id_write_format((const struct id *)vgid, vgid_dashed, sizeof(vgid_dashed)))
+-		stack;
++		log_stack;
+ 
+ 	/*
+ 	 * Add vginfo for orphan VG
+@@ -1906,7 +1906,7 @@
+ 
+ 			if (vginfo_is_allowed && other_is_allowed) {
+ 				if (!id_write_format((const struct id *)other->vgid, other_dashed, sizeof(other_dashed)))
+-					stack;
++					log_stack;
+ 
+ 				vginfo->has_duplicate_local_vgname = 1;
+ 				other->has_duplicate_local_vgname = 1;
+@@ -2620,11 +2620,11 @@
+ 		struct format_type *fmt;
+ 
+ 		if (!lvmcache_init(cmd))
+-			stack;
++			log_stack;
+ 
+ 		dm_list_iterate_items(fmt, &cmd->formats) {
+ 			if (!lvmcache_add_orphan_vginfo(cmd, fmt->orphan_vg_name, fmt))
+-				stack;
++				log_stack;
+ 		}
+ 	}
+ }
+diff -r a/lib/commands/toolcontext.c b/lib/commands/toolcontext.c
+--- a/lib/commands/toolcontext.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/commands/toolcontext.c	2026-10-08 15:56:45.320128576 -0600
+@@ -133,7 +133,7 @@
+ 	free(line);
+ 
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 
+ 	return system_id;
+ }
+@@ -171,7 +171,7 @@
+ 				 strerror(errno), errno);
+ 
+ 		if (dm_snprintf(buf, PATH_MAX, SD_ID128_FORMAT_STR, SD_ID128_FORMAT_VAL(id)) < 0)
+-			stack;
++			log_stack;
+ 		system_id = system_id_from_string(cmd, buf);
+ 		goto out;
+ 	}
+@@ -1895,7 +1895,7 @@
+ 
+ 	_destroy_filters(cmd);
+ 	if (!(r = init_filters(cmd, 0)))
+-		stack;
++		log_stack;
+ 
+ 	/*
+ 	 * During repair code must not reset suspended flag.
+@@ -1927,7 +1927,7 @@
+ 	_destroy_formats(cmd, &cmd->formats);
+ 
+ 	if (!dev_cache_exit())
+-		stack;
++		log_stack;
+ 	_destroy_dev_types(cmd);
+ 	_destroy_tags(cmd);
+ 
+diff -r a/lib/config/config.c b/lib/config/config.c
+--- a/lib/config/config.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/config/config.c	2026-10-08 15:56:45.321462314 -0600
+@@ -2114,7 +2114,7 @@
+ 	}
+ 
+ 	if (free_fp && baton.fp && dm_fclose(baton.fp)) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+@@ -2671,7 +2671,7 @@
+ 
+ 	if (!get_default_allocation_thin_pool_chunk_size(cmd, profile, &chunk_size,
+ 							 &chunk_size_calc_policy)) {
+-		stack; /* Ignore this error, never happens... */
++		log_stack; /* Ignore this error, never happens... */
+ 		chunk_size = DEFAULT_THIN_POOL_CHUNK_SIZE * 2;
+ 	}
+ 
+diff -r a/lib/config/config_settings.h b/lib/config/config_settings.h
+--- a/lib/config/config_settings.h	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/config/config_settings.h	2026-10-08 15:56:45.323866320 -0600
+@@ -510,7 +510,7 @@
+ 	"This setting determines whether LVs using the 'mirror' segment type\n"
+ 	"are scanned for LVM labels. This affects the ability of mirrors to\n"
+ 	"be used as physical volumes. If this setting is enabled, it is\n"
+-	"impossible to create VGs on top of mirror LVs, i.e. to stack VGs on\n"
++	"impossible to create VGs on top of mirror LVs, i.e. to log_stack VGs on\n"
+ 	"mirror LVs. If this setting is disabled, allowing mirror LVs to be\n"
+ 	"scanned, it may cause LVM processes and I/O to the mirror to become\n"
+ 	"blocked. This is due to the way that the mirror segment type handles\n"
+diff -r a/lib/device/bcache.c b/lib/device/bcache.c
+--- a/lib/device/bcache.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/bcache.c	2026-10-08 15:56:45.325551411 -0600
+@@ -350,7 +350,7 @@
+ 
+ 	if (r < 0) {
+ 		if (r == -EINTR)
+-			stack;
++			log_stack;
+ 		else
+ 			_log_sys_warn("io_getevents", -r);
+ 		return false;
+@@ -1227,7 +1227,7 @@
+ 		log_warn("some blocks are still locked");
+ 
+ 	if (!bcache_flush(cache))
+-		stack;
++		log_stack;
+ 	_exit_free_list(cache);
+ 	radix_tree_destroy(cache->rtree);
+ 	cache->engine->destroy(cache->engine);
+diff -r a/lib/device/dev-cache.c b/lib/device/dev-cache.c
+--- a/lib/device/dev-cache.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/dev-cache.c	2026-10-08 15:56:45.326580067 -0600
+@@ -295,7 +295,7 @@
+ 
+ 	if (hash == REHASH)
+ 		if (!radix_tree_remove(_cache.names, path, path_len))
+-			stack;
++			log_stack;
+ 
+ 	/* Is name already there? */
+ 	dm_list_iterate_items(strl, &dev->aliases)
+@@ -703,7 +703,7 @@
+ 	struct dm_str_list *strl;
+ 
+ 	if (!radix_tree_remove(_cache.names, path, strlen(path)))
+-		stack;
++		log_stack;
+ 
+ 	dm_list_iterate_items(strl, &dev->aliases) {
+ 		if (!strcmp(strl->str, path)) {
+@@ -1197,7 +1197,7 @@
+ 	dm_list_iterate_items_safe(strl, strl2, &dev->aliases) {
+ 		log_debug("Drop alias for %u:%u %s.", MAJOR(dev->dev), MINOR(dev->dev), strl->str);
+ 		if (!radix_tree_remove(_cache.names, strl->str, strlen(strl->str)))
+-			stack;
++			log_stack;
+ 		dm_list_del(&strl->list);
+ 	}
+ }
+@@ -1472,7 +1472,7 @@
+ 			  dev_name(dev), dev->open_count);
+ 		vt->num_open++;
+ 		if (vt->close_immediate && !dev_close_immediate(dev))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	if (vt->free) {
+@@ -1606,7 +1606,7 @@
+ 				  MAJOR(dev->dev), MINOR(dev->dev), strl->str,
+ 				  MAJOR(st.st_rdev), MINOR(st.st_rdev));
+ 			if (!radix_tree_remove(_cache.names, strl->str, strlen(strl->str)))
+-				stack;
++				log_stack;
+ 			dm_list_del(&strl->list);
+ 		}
+ 	}
+@@ -1641,7 +1641,7 @@
+ 				  name, MAJOR(dev->dev), MINOR(dev->dev), dev_name(dev));
+ 
+ 			if (!radix_tree_remove(_cache.names, name, strlen(name)))
+-				stack;
++				log_stack;
+ 
+ 			_remove_alias(dev, name);
+ 
+@@ -2023,7 +2023,7 @@
+ 	if (rename(path, path2) < 0) {
+ 		/* Silently ignore if file doesn't exist */
+ 		if (errno != ENOENT)
+-			stack;
++			log_stack;
+ 		return;
+ 	}
+ 	log_debug("Devices file moved to %s", path2);
+@@ -2399,7 +2399,7 @@
+ 				continue;
+ 			if (dm_snprintf(devname, sizeof(devname), "/dev/%s", dirent->d_name) < 0) {
+ 				devname[0] = '\0';
+-				stack;
++				log_stack;
+ 			}
+ 			break;
+ 		}
+@@ -2457,7 +2457,7 @@
+ 
+ 		if (dm_snprintf(devname, sizeof(devname), "/dev/%s", namebuf) < 0) {
+ 			devname[0] = '\0';
+-			stack;
++			log_stack;
+ 		}
+ 		break;
+ 	}
+diff -r a/lib/device/dev-dasd.c b/lib/device/dev-dasd.c
+--- a/lib/device/dev-dasd.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/dev-dasd.c	2026-10-08 15:56:45.326725423 -0600
+@@ -96,7 +96,7 @@
+ 
+ out:
+ 	if (!dev_close(dev))
+-		stack;
++		log_stack;
+ 
+ 	return ret;
+ }
+diff -r a/lib/device/dev-io.c b/lib/device/dev-io.c
+--- a/lib/device/dev-io.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/dev-io.c	2026-10-08 15:56:45.327011493 -0600
+@@ -109,7 +109,7 @@
+ 	if (ioctl(fd, BLKGETSIZE64, size) < 0) {
+ 		log_warn("WARNING: %s: ioctl BLKGETSIZE64 %s", name, strerror(errno));
+ 		if (do_close && !dev_close_immediate(dev))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -120,7 +120,7 @@
+ 	log_very_verbose("%s: size is %" PRIu64 " sectors", name, *size);
+ 
+ 	if (do_close && !dev_close_immediate(dev))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -143,7 +143,7 @@
+ 	if (ioctl(dev->fd, BLKRAGET, &read_ahead_long) < 0) {
+ 		log_warn("WARNING: %s: ioctl BLKRAGET %s.", dev_name(dev), strerror(errno));
+ 		if (!dev_close_immediate(dev))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -154,7 +154,7 @@
+ 			 dev_name(dev), *read_ahead);
+ 
+ 	if (!dev_close_immediate(dev))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -177,13 +177,13 @@
+ 		log_warn("WARNING: %s: ioctl BLKDISCARD at offset %" PRIu64 " size %" PRIu64 " failed: %s.",
+ 			  dev_name(dev), offset_bytes, size_bytes, strerror(errno));
+ 		if (!dev_close_immediate(dev))
+-			stack;
++			log_stack;
+ 		/* It doesn't matter if discard failed, so return success. */
+ 		return 1;
+ 	}
+ 
+ 	if (!dev_close_immediate(dev))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -216,7 +216,7 @@
+ 	 * without reverting to read-modify-write operations"
+ 	 */
+ 	if (ioctl(fd, BLKPBSZGET, &pbs)) {
+-		stack;
++		log_stack;
+ 		pbs = 0;
+ 	}
+ #endif
+@@ -226,7 +226,7 @@
+ 	 * "the lowest possible block size that the storage device can address."
+ 	 */
+ 	if (ioctl(fd, BLKSSZGET, &lbs)) {
+-		stack;
++		log_stack;
+ 		lbs = 0;
+ 	}
+ 
+@@ -237,7 +237,7 @@
+ 	*logical_block_size = lbs;
+ 
+ 	if (do_close && !dev_close_immediate(dev))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -410,7 +410,7 @@
+ 	    ((fstat(dev->fd, &buf) < 0) || (buf.st_rdev != dev->dev))) {
+ 		log_error("%s: fstat failed: Has device name changed?", name);
+ 		if (!dev_close_immediate(dev))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+diff -r a/lib/device/dev-md.c b/lib/device/dev-md.c
+--- a/lib/device/dev-md.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/dev-md.c	2026-10-08 15:56:45.327314564 -0600
+@@ -180,7 +180,7 @@
+ 	int ret;
+ 
+ 	if (!dev_get_size(dev, &size)) {
+-		stack;
++		log_stack;
+ 		return -1;
+ 	}
+ 
+diff -r a/lib/device/dev-mpath.c b/lib/device/dev-mpath.c
+--- a/lib/device/dev-mpath.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/dev-mpath.c	2026-10-08 15:56:45.327600394 -0600
+@@ -152,15 +152,15 @@
+ 
+ 		if (section_exceptions) {
+ 			if (!str_list_add(_wwid_mem, &_ignored_exceptions, dm_pool_strdup(_wwid_mem, wwid)))
+-				stack;
++				log_stack;
+ 		} else {
+ 			if (!str_list_add(_wwid_mem, &_ignored, dm_pool_strdup(_wwid_mem, wwid)))
+-				stack;
++				log_stack;
+ 		}
+ 	}
+ 
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ }
+ 
+ static void _read_wwid_exclusions(void)
+@@ -250,7 +250,7 @@
+ 	}
+ 
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 
+ 	log_debug("multipath wwids read %d from %s", count, config_wwids_file);
+ 	*entries = count;
+@@ -717,7 +717,7 @@
+ 		}
+ 
+ 		if (!get_sysfs_value(wwid_path, sysbuf, sizeof(sysbuf), 0))
+-			stack;
++			log_stack;
+ 
+ 		if (!sysbuf[0])
+ 			continue;
+diff -r a/lib/device/dev-swap.c b/lib/device/dev-swap.c
+--- a/lib/device/dev-swap.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/dev-swap.c	2026-10-08 15:56:45.327644335 -0600
+@@ -43,7 +43,7 @@
+ 	int ret = 0;
+ 
+ 	if (!dev_get_size(dev, &size)) {
+-		stack;
++		log_stack;
+ 		return -1;
+ 	}
+ 
+diff -r a/lib/device/device_id.c b/lib/device/device_id.c
+--- a/lib/device/device_id.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/device_id.c	2026-10-08 15:56:45.330423775 -0600
+@@ -196,9 +196,9 @@
+ 		  search_pvids_count, search_pvids_hash, search_devs_count, search_devs_hash);
+ out:
+ 	if (fsync(dir_fd) < 0)
+-		stack;
++		log_stack;
+ 	if (close(dir_fd) < 0)
+-		stack;
++		log_stack;
+ }
+ 
+ void unlink_searched_devnames(struct cmd_context *cmd)
+@@ -870,19 +870,19 @@
+                 break;
+ 	case DEV_ID_TYPE_MPATH_UUID:
+ 		if (!dev_dm_uuid(cmd, dev, sysbuf, sizeof(sysbuf)))
+-			stack;
++			log_stack;
+ 		if (sysbuf[0] && !dm_uuid_has_prefix(sysbuf, "mpath-"))
+ 			sysbuf[0] = '\0';
+                 break;
+ 	case DEV_ID_TYPE_CRYPT_UUID:
+ 		if (!dev_dm_uuid(cmd, dev, sysbuf, sizeof(sysbuf)))
+-			stack;
++			log_stack;
+ 		if (sysbuf[0] && !dm_uuid_has_prefix(sysbuf, "CRYPT-"))
+ 			sysbuf[0] = '\0';
+                 break;
+ 	case DEV_ID_TYPE_LVMLV_UUID:
+ 		if (!dev_dm_uuid(cmd, dev, sysbuf, sizeof(sysbuf)))
+-			stack;
++			log_stack;
+ 		if (sysbuf[0] && !dm_uuid_has_prefix(sysbuf, "LVM-"))
+ 			sysbuf[0] = '\0';
+                 break;
+@@ -1479,7 +1479,7 @@
+ 		dm_list_add(&cmd->use_devices, &du->list);
+ 	}
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 
+ 	log_debug("Devices file comment hash %u calc hash %u", comment_hash, hash);
+ 
+@@ -1522,11 +1522,11 @@
+ 	if (!(backup_limit = (unsigned int)find_config_tree_int(cmd, devices_devicesfile_backup_limit_CFG, NULL)))
+ 		return;
+ 	if (dm_snprintf(dirpath, sizeof(dirpath), "%s/devices/backup/", cmd->system_dir) < 0) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 	if (!dm_create_dir(dirpath)) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 	if (!(tm = localtime(tp)) ||
+@@ -1572,7 +1572,7 @@
+ 		goto out;
+ 	}
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 	log_debug("Wrote backup %s", path);
+ 
+ 	backup_dir_cleanup(dirpath, "system.devices-", backup_limit, 0);
+@@ -1580,7 +1580,7 @@
+ 
+ out:
+ 	if (fp && fclose(fp))
+-		stack;
++		log_stack;
+ }
+ 
+ int device_ids_write(struct cmd_context *cmd)
+@@ -1808,9 +1808,9 @@
+ 	}
+ 
+ 	if (fsync(dir_fd) < 0)
+-		stack;
++		log_stack;
+ 	if (close(dir_fd) < 0)
+-		stack;
++		log_stack;
+ 	dir_fd = -1;
+ 
+ 	ret = 1;
+@@ -1856,7 +1856,7 @@
+ 	} else {
+ 		if (device_ids_version_unchanged(cmd)) {
+ 			if (!device_ids_write(cmd))
+-				stack;
++				log_stack;
+ 		} else
+ 			log_debug("Skip devices file update (changed).");
+ 	}
+@@ -1881,7 +1881,7 @@
+ 
+ 		if (!strncmp(line, "VERSION", 7)) {
+ 			if (fclose(fp))
+-				stack;
++				log_stack;
+ 
+ 			_copy_idline_str(line, version_buf, sizeof(version_buf));
+ 
+@@ -1894,7 +1894,7 @@
+ 	}
+ 
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 	return 0;
+ }
+ 
+@@ -2401,7 +2401,7 @@
+ 
+ 	if (update &&
+ 	    !device_ids_write(cmd))
+-		stack;
++		log_stack;
+ 	unlock_devices_file(cmd);
+ }
+ 
+@@ -3242,7 +3242,7 @@
+ 				  dev_name(dev), dev->pvid);
+ 			log_debug("suspect device id serial %s for %s", du->idname, dev_name(dev));
+ 			if (!str_list_add(cmd->mem, &cmd->device_ids_check_serial, dm_pool_strdup(cmd->mem, du->idname)))
+-				stack;
++				log_stack;
+ 			cmd->device_ids_invalid = 1;
+ 			continue;
+ 		}
+@@ -3409,7 +3409,7 @@
+ 				free(dup_devname2);
+ 				free(dup_devname3);
+ 				free(id);
+-				stack;
++				log_stack;
+ 				continue;
+ 			}
+ 
+@@ -4239,7 +4239,7 @@
+ 			free(new_idname);
+ 			free(new_idname2);
+ 			free(new_devname);
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -4383,7 +4383,7 @@
+ 		return 0;
+ 	}
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 	return 1;
+ }
+ 
+@@ -4500,7 +4500,7 @@
+ 	log_debug("lock_devices_file flock errno %d", errno);
+ 
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 	if (cmd->sysinit || cmd->ignorelockingfailure)
+ 		return 1;
+ 	return 0;
+@@ -4542,7 +4542,7 @@
+ 	_devices_file_locked = 0;
+ 
+ 	if (close(_devices_fd))
+-		stack;
++		log_stack;
+ 	_devices_fd = -1;
+ }
+ 
+diff -r a/lib/device/filesystem.c b/lib/device/filesystem.c
+--- a/lib/device/filesystem.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/filesystem.c	2026-10-08 15:56:45.330849121 -0600
+@@ -79,7 +79,7 @@
+ 
+ 		if (dm_snprintf(crypt_path, PATH_MAX, "/dev/%s", holder_name) < 0) {
+ 			ret = 0;
+-			stack;
++			log_stack;
+ 			break;
+ 		}
+ 		ret = 1;
+@@ -353,7 +353,7 @@
+ 	/* blkid FSLASTBLOCK may be incorrect for mounted xfs */
+ 	if (fsi->mounted && !strcmp(fsi->fstype, "xfs")) {
+ 		if (!(ret = fs_xfs_update_size_mounted(cmd, lv, lv_path, fsi)))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	fsi->unmounted = !fsi->mounted;
+@@ -505,7 +505,7 @@
+ 	}
+ 
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 
+ 	if (renamed) {
+ 		log_error("File system resizing not supported: fs utilities do not support renamed devices.");
+diff -r a/lib/device/online.c b/lib/device/online.c
+--- a/lib/device/online.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/online.c	2026-10-08 15:56:45.331294206 -0600
+@@ -462,11 +462,11 @@
+ void online_dir_setup(struct cmd_context *cmd)
+ {
+ 	if (!dir_create_recursive(PVS_ONLINE_DIR, 0755))
+-		stack;
++		log_stack;
+ 	if (!dir_create_recursive(VGS_ONLINE_DIR, 0755))
+-		stack;
++		log_stack;
+ 	if (!dir_create_recursive(PVS_LOOKUP_DIR, 0755))
+-		stack;
++		log_stack;
+ }
+ 
+ void online_lookup_file_remove(const char *vgname)
+diff -r a/lib/device/persist.c b/lib/device/persist.c
+--- a/lib/device/persist.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/device/persist.c	2026-10-08 15:56:45.332109681 -0600
+@@ -293,7 +293,7 @@
+ 	}
+ 
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 
+ 	if (!buf_key[0]) {
+ 		log_debug("key_file: empty.");
+@@ -1915,7 +1915,7 @@
+ void persist_finish_after(struct cmd_context *cmd, struct volume_group *vg, struct dm_list *devs, char *key)
+ {
+ 	if (!_run_stop(cmd, vg, devs, key, 0))
+-		stack;
++		log_stack;
+ 
+ 	persist_key_file_remove(cmd, vg);
+ }
+@@ -2444,7 +2444,7 @@
+ 
+ 	/* key file is an optimization, not an error condition */
+ 	if (!_write_key_file(cmd, vg, our_key_val))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -2853,7 +2853,7 @@
+ 
+ 	/* key file is an optimization, not an error condition */
+ 	if (!_write_key_file(cmd, vg, our_key_val))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ 
+diff -r a/lib/display/display.c b/lib/display/display.c
+--- a/lib/display/display.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/display/display.c	2026-10-08 15:56:45.333308909 -0600
+@@ -227,7 +227,7 @@
+ 		return;
+ 
+ 	if (!id_write_format(&pv->id, uuid, sizeof(uuid))) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 
+@@ -284,7 +284,7 @@
+ 		return;
+ 
+ 	if (!id_write_format(&pv->id, uuid, sizeof(uuid))) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 
+@@ -819,7 +819,7 @@
+ 		  display_size(vg->cmd, vg_free(vg)));
+ 
+ 	if (!id_write_format(&vg->id, uuid, sizeof(uuid))) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 
+@@ -850,7 +850,7 @@
+ 	}
+ 
+ 	if (!id_write_format(&vg->id, uuid, sizeof(uuid))) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 
+@@ -1038,7 +1038,7 @@
+ 
+ 	/* For other than Yes answer check there is really no interrupt */
+ 	if (sig || sigint_caught()) {
+-		stack;
++		log_stack;
+ 		ret = 'n';
+ 	} else if (c == EOF) {
+ 		fputs("[n]\n", stderr);
+diff -r a/lib/filters/filter-composite.c b/lib/filters/filter-composite.c
+--- a/lib/filters/filter-composite.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/filters/filter-composite.c	2026-10-08 15:56:45.333487705 -0600
+@@ -32,7 +32,7 @@
+ 		ret = (*filters)->passes_filter(cmd, *filters, dev, use_filter_name);
+ 
+ 		if (!ret) {
+-			ret = 0;	/* No 'stack': a filter, not an error. */
++			ret = 0;	/* No 'log_stack': a filter, not an error. */
+ 			break;
+ 		}
+ 	}
+diff -r a/lib/format_text/archiver.c b/lib/format_text/archiver.c
+--- a/lib/format_text/archiver.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/format_text/archiver.c	2026-10-08 15:56:45.334472150 -0600
+@@ -327,7 +327,7 @@
+ 	/* coverity[unreachable] intentional single iteration to get first item */
+ 	dm_list_iterate_items(mda, &tf->metadata_areas_in_use) {
+ 		if (!(vg = mda->ops->vg_read(cmd, tf, vg_name, mda, NULL, NULL)))
+-			stack;
++			log_stack;
+ 		break;
+ 	}
+ 
+@@ -603,12 +603,12 @@
+ 	/* Write and commit the metadata area */
+ 	dm_list_iterate_items(mda, &tf->metadata_areas_in_use) {
+ 		if (!(r = mda->ops->vg_write(tf, vg, mda))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 		if (mda->ops->vg_commit &&
+ 		    !(r = mda->ops->vg_commit(tf, vg, mda))) {
+-			stack;
++			log_stack;
+ 		}
+ 	}
+ 
+@@ -659,11 +659,11 @@
+ 
+ 	if (vg_backup) {
+ 		if (!_archive(vg_backup, 0))
+-			stack;
++			log_stack;
+ 		release_vg(vg_backup);
+ 	}
+ 	if (!_archive(vg, 0))
+-		stack;
++		log_stack;
+ 	if (!backup_locally(vg))
+-		stack;
++		log_stack;
+ }
+diff -r a/lib/format_text/import.c b/lib/format_text/import.c
+--- a/lib/format_text/import.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/format_text/import.c	2026-10-08 15:56:45.336362598 -0600
+@@ -233,7 +233,7 @@
+ 		 * so it can use cached PV state too.
+ 		 */
+ 		if (!(vg = (*vsn)->read_vg(cmd, fid->fmt, fid, cft)))
+-			stack;
++			log_stack;
+ 		else {
+ 			set_pv_devices(fid, vg);
+ 
+diff -r a/lib/format_text/text_label.c b/lib/format_text/text_label.c
+--- a/lib/format_text/text_label.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/format_text/text_label.c	2026-10-08 15:56:45.337340363 -0600
+@@ -125,7 +125,7 @@
+ 	memcpy(pvhdr->pv_uuid, &lvmcache_device(info)->pvid, sizeof(struct id));
+ 	if (!id_write_format((const struct id *)pvhdr->pv_uuid, buffer,
+ 			     sizeof(buffer))) {
+-		stack;
++		log_stack;
+ 		buffer[0] = '\0';
+ 	}
+ 
+diff -r a/lib/label/hints.c b/lib/label/hints.c
+--- a/lib/label/hints.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/label/hints.c	2026-10-08 15:56:45.338250926 -0600
+@@ -233,7 +233,7 @@
+ 	if (!(fp = fopen(_newhints_file, "w")))
+ 		return_0;
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 	log_debug("newhints created");
+ 	return 1;
+ }
+@@ -245,7 +245,7 @@
+ 	if (!(fp = fopen(_nohints_file, "w")))
+ 		return_0;
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 	return 1;
+ }
+ 
+@@ -365,7 +365,7 @@
+ 		log_warn("unlock_hints flock errno %d", errno);
+ 
+ 	if (close(_hints_fd))
+-		stack;
++		log_stack;
+ 	_hints_fd = -1;
+ }
+ 
+@@ -602,7 +602,7 @@
+ 		 * we don't want to take an ex lock here.
+ 		 */
+ 		if (!_touch_newhints())
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	return ret;
+@@ -1205,15 +1205,15 @@
+ 
+ 	/* limit potential delay blocking on hints lock next */
+ 	if (!_touch_nohints())
+-		stack;
++		log_stack;
+ 
+ 	if (!_lock_hints(cmd, LOCK_EX, 0))
+-		stack;
++		log_stack;
+ 
+ 	_unlink_nohints();
+ 
+ 	if (!_clear_hints(cmd))
+-		stack;
++		log_stack;
+ 
+ 	/*
+ 	 * Creating a newhints file here is not necessary, since
+@@ -1221,7 +1221,7 @@
+ 	 * is more efficient if it sees a newhints file first.
+ 	 */
+ 	if (!_touch_newhints())
+-		stack;
++		log_stack;
+ }
+ 
+ /*
+@@ -1237,21 +1237,21 @@
+ 	log_debug("pvscan_recreate_hints_begin");
+ 
+ 	if (!_touch_hints()) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 
+ 	/* limit potential delay blocking on hints lock next */
+ 	if (!_touch_nohints())
+-		stack;
++		log_stack;
+ 
+ 	if (!_lock_hints(cmd, LOCK_EX, 0))
+-		stack;
++		log_stack;
+ 
+ 	_unlink_nohints();
+ 
+ 	if (!_clear_hints(cmd))
+-		stack;
++		log_stack;
+ }
+ 
+ /*
+@@ -1266,7 +1266,7 @@
+ 		return;
+ 
+ 	if (!_touch_newhints())
+-		stack;
++		log_stack;
+ }
+ 
+ /*
+diff -r a/lib/label/label.c b/lib/label/label.c
+--- a/lib/label/label.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/label/label.c	2026-10-08 15:56:45.339126927 -0600
+@@ -2040,7 +2040,7 @@
+ 	unsigned int bs;
+ 
+ 	if (!dev_get_direct_block_sizes(dev, &physical_block_size, &logical_block_size)) {
+-		stack;
++		log_stack;
+ 		return; /* FIXME: error path ? */
+ 	}
+ 
+diff -r a/lib/locking/locking.c b/lib/locking/locking.c
+--- a/lib/locking/locking.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/locking/locking.c	2026-10-08 15:56:45.339430298 -0600
+@@ -190,7 +190,7 @@
+ 		/* ensure signals are blocked while VG_GLOBAL lock is held */
+ 		_update_vg_lock_count(resource, flags);
+ 	else
+-		stack;
++		log_stack;
+ 
+ 	_unblock_signals();
+ 
+@@ -317,7 +317,7 @@
+ 			dm_list_uniterate(lvh, lvs, &lvl->list) {
+ 				lvl = dm_list_item(lvh, struct lv_list);
+ 				if (!deactivate_lv(cmd, lvl->lv))
+-					stack;
++					log_stack;
+ 			}
+ 			return 0;
+ 		}
+diff -r a/lib/locking/locking.h b/lib/locking/locking.h
+--- a/lib/locking/locking.h	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/locking/locking.h	2026-10-08 15:56:45.339483730 -0600
+@@ -61,7 +61,7 @@
+ 			vg_backup_if_needed(vg); \
+ 		} \
+ 		if (!lock_vol(cmd, vol, LCK_VG_UNLOCK, NULL)) \
+-			stack;	\
++			log_stack;	\
+ 	} while (0)
+ #define unlock_and_release_vg(cmd, vg, vol) \
+ 	do { \
+diff -r a/lib/locking/lvmlockd.c b/lib/locking/lvmlockd.c
+--- a/lib/locking/lvmlockd.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/locking/lvmlockd.c	2026-10-08 15:56:45.341820454 -0600
+@@ -902,12 +902,12 @@
+ 	if (ioctl(fd, BLKGETSIZE64, &dm_size_bytes) < 0) {
+ 		log_error("Cannot get size of sanlock LV %s.", lvmlock_path);
+ 		if (close(fd))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 
+ 	/*
+ 	 * Another host may have extended the lvmlock LV.
+@@ -1277,7 +1277,7 @@
+ 		_deactivate_sanlock_lv(cmd, vg);
+ 		_remove_sanlock_lv(cmd, vg);
+ 		if (!vg_write(vg) || !vg_commit(vg))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	daemon_reply_destroy(reply);
+diff -r a/lib/log/log.h b/lib/log/log.h
+--- a/lib/log/log.h	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/log/log.h	2026-10-08 15:56:45.342496578 -0600
+@@ -28,7 +28,7 @@
+  * In addition, messages will be logged to file or syslog if they
+  * are more serious than the log level specified with the log/debug_level
+  * parameter in the configuration file.  These messages get the file
+- * and line number prepended.  'stack' (without arguments) can be used
++ * and line number prepended.  'log_stack' (without arguments) can be used
+  * to log this information at debug level.
+  *
+  * log_sys_error and log_sys_very_verbose are for errors from system calls
+@@ -108,7 +108,7 @@
+ #define log_err_once(...) LOG_LINE_WITH_ERRNO(_LOG_ERR | _LOG_ONCE, EUNCLASSIFIED, ##__VA_ARGS__)
+ #define log_fatal(...) LOG_LINE_WITH_ERRNO(_LOG_FATAL, EUNCLASSIFIED, ##__VA_ARGS__)
+ 
+-#define stack log_debug("<backtrace>")	/* Backtrace on error */
++#define log_stack log_debug("<backtrace>")	/* Backtrace on error */
+ #define log_very_verbose(...) log_info(__VA_ARGS__)
+ #define log_verbose(...) log_notice(__VA_ARGS__)
+ #define log_print(...) LOG_LINE(_LOG_WARN, ##__VA_ARGS__)
+@@ -128,13 +128,13 @@
+ #define log_sys_debug(x, y) \
+ 		log_debug("%s%s%s failed: %s", y, *y ? ": " : "", x, strerror(errno))
+ 
+-#define return_0	do { stack; return 0; } while (0)
+-#define return_NULL	do { stack; return NULL; } while (0)
+-#define return_false	do { stack; return false; } while (0)
++#define return_0	do { log_stack; return 0; } while (0)
++#define return_NULL	do { log_stack; return NULL; } while (0)
++#define return_false	do { log_stack; return false; } while (0)
+ #define return_EINVALID_CMD_LINE \
+-			do { stack; return EINVALID_CMD_LINE; } while (0)
+-#define return_ECMD_FAILED do { stack; return ECMD_FAILED; } while (0)
+-#define goto_out	do { stack; goto out; } while (0)
+-#define goto_bad	do { stack; goto bad; } while (0)
++			do { log_stack; return EINVALID_CMD_LINE; } while (0)
++#define return_ECMD_FAILED do { log_stack; return ECMD_FAILED; } while (0)
++#define goto_out	do { log_stack; goto out; } while (0)
++#define goto_bad	do { log_stack; goto bad; } while (0)
+ 
+ #endif
+diff -r a/lib/lvmpolld/lvmpolld-client.c b/lib/lvmpolld/lvmpolld-client.c
+--- a/lib/lvmpolld/lvmpolld-client.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/lvmpolld/lvmpolld-client.c	2026-10-08 15:56:45.342729537 -0600
+@@ -180,7 +180,7 @@
+ 		ret.error = 0;
+ 	} else {
+ 		_process_error_response(rep);
+-		stack;
++		log_stack;
+ 	}
+ 
+ out_rep:
+@@ -267,7 +267,7 @@
+ 		r = 1;
+ 	else {
+ 		_process_error_response(rep);
+-		stack;
++		log_stack;
+ 	}
+ 
+ out_rep:
+diff -r a/lib/metadata/cache_manip.c b/lib/metadata/cache_manip.c
+--- a/lib/metadata/cache_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/cache_manip.c	2026-10-08 15:56:45.343368670 -0600
+@@ -473,7 +473,7 @@
+ 				/* Restore normal table */
+ 				sigint_clear();
+ 				if (!lv_update_and_reload_origin(cache_lv))
+-					stack;
++					log_stack;
+ 			}
+ 			return 0;
+ 		}
+diff -r a/lib/metadata/integrity_manip.c b/lib/metadata/integrity_manip.c
+--- a/lib/metadata/integrity_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/integrity_manip.c	2026-10-08 15:56:45.343802535 -0600
+@@ -667,7 +667,7 @@
+ 	 */
+ 
+ 	if (!(r = _set_integrity_block_size(cmd, lv, is_active, settings, lbs_4k, lbs_512, pbs_4k, pbs_512)))
+-		stack;
++		log_stack;
+ 
+ 	if (!is_active && !deactivate_lv(cmd, lv)) {
+ 		log_error("Failed to deactivate LV %s after checking block size.", display_lvname(lv));
+diff -r a/lib/metadata/lv.c b/lib/metadata/lv.c
+--- a/lib/metadata/lv.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/lv.c	2026-10-08 15:56:45.344529701 -0600
+@@ -358,7 +358,7 @@
+ 		goto_bad;
+ 
+ 	if (!(ret = lvseg_kernel_discards_dup_with_info_and_seg_status(mem, &status)))
+-		stack;
++		log_stack;
+ bad:
+ 	dm_pool_destroy(status.seg_status.mem);
+ 
+@@ -743,7 +743,7 @@
+ 		 (lv_is_cache_pool_data(lv) || lv_is_cache_pool_metadata(lv)) ||
+ 		 (lv_is_thin_pool_data(lv) || lv_is_thin_pool_metadata(lv))) {
+ 		if (!(seg = get_only_segment_using_this_lv(lv)))
+-			stack;
++			log_stack;
+ 		else
+ 			parent_lv = seg->lv;
+ 	}
+@@ -1341,7 +1341,7 @@
+ 	}
+ 
+ 	if (!lv_raid_dev_health(raid_seg->lv, &raid_health)) {
+-		stack;
++		log_stack;
+ 		goto out_need;
+ 	}
+ 
+diff -r a/lib/metadata/lv_manip.c b/lib/metadata/lv_manip.c
+--- a/lib/metadata/lv_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/lv_manip.c	2026-10-08 15:56:45.349240820 -0600
+@@ -1476,8 +1476,8 @@
+ 	return 1;
+ }
+ 
+-/* Find the bottommost resizable LV in the stack.
+- * It does not matter which LV is used in this stack for cmdline tool. */
++/* Find the bottommost resizable LV in the log_stack.
++ * It does not matter which LV is used in this log_stack for cmdline tool. */
+ static struct logical_volume *_get_resizable_layer_lv(struct logical_volume *lv)
+ {
+ 	while (lv_is_cache(lv) || /* _corig */
+@@ -1491,8 +1491,8 @@
+ }
+ 
+ /* Check if LV is component of resizable LV.
+- * When resize changes size of LV this also changes the size whole stack upward.
+- * Support syntax sugar - so user can pick any LV in stack for resize. */
++ * When resize changes size of LV this also changes the size whole log_stack upward.
++ * Support syntax sugar - so user can pick any LV in log_stack for resize. */
+ static int _is_layered_lv(struct logical_volume *lv)
+ {
+ 	return (lv_is_cache_origin(lv) ||
+@@ -1502,7 +1502,7 @@
+ 		lv_is_writecache_origin(lv));
+ }
+ 
+-/* Find the topmost LV in the stack - usually such LV is visible. */
++/* Find the topmost LV in the log_stack - usually such LV is visible. */
+ static struct logical_volume *_get_top_layer_lv(struct logical_volume *lv)
+ {
+ 	struct lv_segment *seg;
+@@ -2286,10 +2286,10 @@
+ 					       (top_level_area_index != -1) ? top_level_area_index : (int) (s * stripes_per_mimage),
+ 					       only_single_area_segments, fn,
+ 					       data)))
+-				stack;
++				log_stack;
+ 		} else if (seg_type(seg, s) == AREA_PV)
+ 			if (!(r = fn(cmd, seg_pvseg(seg, s), top_level_area_index != -1 ? (uint32_t) top_level_area_index + s : s, data)))
+-				stack;
++				log_stack;
+ 		if (r != 1)
+ 			return r;
+ 	}
+@@ -2299,7 +2299,7 @@
+ 		if (!(r = _for_each_pv(cmd, seg->log_lv, 0, seg->log_lv->le_count, NULL,
+ 				       NULL, 0, 0, 0, only_single_area_segments,
+ 				       fn, data)))
+-			stack;
++			log_stack;
+ 		if (r != 1)
+ 			return r;
+ 	}
+@@ -2312,7 +2312,7 @@
+ 			if (seg_metalv(seg, s))
+ 				if (!(r = _for_each_pv(cmd, seg_metalv(seg, s), 0, seg_metalv(seg, s)->le_count, NULL,
+ 						       NULL, 0, 0, 0, 0, fn, data)))
+-					stack;
++					log_stack;
+ 			if (r != 1)
+ 				return r;
+ 		}
+@@ -2731,7 +2731,7 @@
+ 	if (!(r = _for_each_pv(ah->cmd, prev_lvseg->lv, le, len, NULL, NULL,
+ 			       0, 0, -1, 1,
+ 			       _is_condition, &pvmatch)))
+-		stack;
++		log_stack;
+ 
+ 	if (r != 2)
+ 		return 0;
+@@ -2760,7 +2760,7 @@
+ 			       prev_lvseg->le + prev_lvseg->len - 1, 1, NULL, NULL,
+ 			       0, 0, -1, 1,
+ 			       _is_condition, &pvmatch)))
+-		stack;
++		log_stack;
+ 
+ 	if (r != 2)
+ 		return 0;
+@@ -3426,7 +3426,7 @@
+ 		return_0;
+ 
+ 	if (!_log_parallel_areas(ah->mem, ah->parallel_areas, ah->cling_tag_list_cn))
+-		stack;
++		log_stack;
+ 
+ 	alloc_state.areas_size = dm_list_size(pvms);
+ 	if (alloc_state.areas_size &&
+@@ -4610,11 +4610,11 @@
+ 
+ 	if (segtype_is_pool(segtype)) {
+ 		if (!(r = create_pool(lv, segtype, ah, stripes, stripe_size)))
+-			stack;
++			log_stack;
+ 	} else if (!segtype_is_mirror(segtype) && !segtype_is_raid(segtype)) {
+ 		if (!(r = lv_add_segment(ah, 0, ah->area_count, lv, segtype,
+ 					 stripe_size, 0u, 0)))
+-			stack;
++			log_stack;
+ 	} else {
+ 		/*
+ 		 * For RAID, all the devices are AREA_LV.
+@@ -5442,11 +5442,11 @@
+ 
+ 	/* Top-level LV first */
+ 	if (!_add_pes(lv, &pe_total))
+-		stack;
++		log_stack;
+ 
+ 	/* Any sub-LVs */
+ 	if (!for_each_sub_lv(lv, _add_pes, &pe_total))
+-		stack;
++		log_stack;
+ 
+ 	return pe_total;
+ }
+@@ -6802,7 +6802,7 @@
+ 
+ 	/*
+ 	 * Some checks apply to the LV command arg (don't require top/bottom
+-	 * LVs in a stack), and don't require knowing if the command is doing
++	 * LVs in a log_stack), and don't require knowing if the command is doing
+ 	 * extend or reduce (determined later).
+ 	 */
+ 
+@@ -6829,7 +6829,7 @@
+ 	 * only by extending an underlying LV.  Extending some top level
+ 	 * LVs results in extending multiple underlying LVs.
+ 	 *
+-	 * lv_top is the top level LV in stack.
++	 * lv_top is the top level LV in log_stack.
+ 	 * lv_main is the main LV to be resized.
+ 	 * lv_meta is always a thin pool metadata LV.
+ 	 *
+@@ -7168,7 +7168,7 @@
+ 			}
+ 
+ 			if (!fs_block_size_and_type(lv_path, NULL, fstype, &nofs)) {
+-				stack; /* Continue as if FS would have been detected */
++				log_stack; /* Continue as if FS would have been detected */
+ 				nofs = 0;
+ 			}
+ 		}
+@@ -7222,7 +7222,7 @@
+ 	/*
+ 	 * The core of the actual lv resizing.
+ 	 * Allocate or free extents in the VG, adjust LV segments to reflect
+-	 * new requested size, write VG metadata, reload the dm device stack
++	 * new requested size, write VG metadata, reload the dm device log_stack
+ 	 * (reload from the top LV.)  Do lv_meta first.
+ 	 * When extending lv_meta, also extend (or create) the pool's spare
+ 	 * meta lv to match the size of lv_meta (only do this when the
+@@ -7237,7 +7237,7 @@
+ 	if (!lp_meta.size_changed)
+ 		goto do_main;
+ 	if ((&vg->pvs == lp->pvh) && !handle_pool_metadata_spare(vg, 0, lp->pvh, 1))
+-		stack;
++		log_stack;
+ 	if (!lv_update_and_reload(lv_top))
+ 		goto_out;
+ 	log_debug("Resized thin pool metadata %s to %u extents.", display_lvname(lv_meta), lp_meta.extents);
+@@ -7285,7 +7285,7 @@
+ 
+ 	if (lv_main && lv_is_cow_covering_origin(lv_main)) {
+ 		if (!monitor_dev_for_events(cmd, lv_main, 0, 0))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	if (is_extend && lp->fsopt[0]) {
+@@ -8300,7 +8300,7 @@
+ 				  display_lvname(lock_lv));
+ 		return 0;
+ 	} else if (!(r = vg_commit(vg)))
+-		stack; /* !vg_commit() has implicit vg_revert() */
++		log_stack; /* !vg_commit() has implicit vg_revert() */
+ 
+ 	log_very_verbose("Updating logical volume %s in kernel.",
+ 			 display_lvname(lock_lv));
+@@ -8492,7 +8492,7 @@
+ 		}
+ 	}
+ 	if (lv_changed && !lv_merge_segments(lv))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -9842,7 +9842,7 @@
+ 				      lp->cache_mode,
+ 				      lp->policy_name,
+ 				      lp->policy_settings)) {
+-			stack;
++			log_stack;
+ 			goto revert_new_lv;
+ 		}
+ 	} else if (lv_is_raid(lv) && !seg_is_any_raid0(first_seg(lv))) {
+@@ -9856,7 +9856,7 @@
+ 					  lp->chunk_size,
+ 					  lp->discards,
+ 					  lp->zero_new_blocks)) {
+-			stack;
++			log_stack;
+ 			goto revert_new_lv;
+ 		}
+ 	} else if (pool_lv && lv_is_virtual(lv) && /* not yet thin LV */
+@@ -9894,7 +9894,7 @@
+ 		if (!add_mirror_log(cmd, lv, lp->log_count,
+ 				    first_seg(lv)->region_size,
+ 				    lp->pvh, lp->alloc)) {
+-			stack;
++			log_stack;
+ 			goto revert_new_lv;
+ 		}
+ 	}
+@@ -9953,7 +9953,7 @@
+ 		cmd->lockd_created_thin_pool = 1;
+ 		/* Save pool info to use in lockd_lvcreate_done() */
+ 		if (!(lp->lockd_name = dm_pool_strdup(cmd->mem, lv->name)))
+-			stack;
++			log_stack;
+ 	}
+ 	if (cmd->lockd_creating_thin_volume)
+ 		cmd->lockd_created_thin_volume = 1;
+@@ -10044,7 +10044,7 @@
+ 			}
+ 			/* At this point remove pool messages, snapshot is active */
+ 			if (!update_thin_pool_lv(pool_lv, 0)) {
+-				stack;
++				log_stack;
+ 				goto revert_new_lv;
+ 			}
+ 		} else if (!dm_list_empty(&first_seg(pool_lv)->thin_messages)) {
+@@ -10073,7 +10073,7 @@
+ 			}
+ 			/* Keep thin pool active until thin volume is activated */
+ 			if (!update_thin_pool_lv(pool_lv, 1)) {
+-				stack;
++				log_stack;
+ 				goto revert_new_lv;
+ 			}
+ 		}
+@@ -10125,7 +10125,7 @@
+ 	if (seg_is_vdo_pool(lp)) {
+ 		if (!convert_vdo_pool_lv(lv, &lp->vcp.vdo_params, &lp->virtual_extents,
+ 					 1, lp->vdo_pool_header_size)) {
+-			stack;
++			log_stack;
+ 			goto deactivate_and_revert_new_lv;
+ 		}
+ 		if ((lv->status & LV_ACTIVATION_SKIP) &&
+@@ -10147,7 +10147,7 @@
+ 		} else {
+ 			if (!(tmp_lv = lv_cache_create(pool_lv, lv))) {
+ 				/* 'lv' still keeps created new LV */
+-				stack;
++				log_stack;
+ 				goto deactivate_and_revert_new_lv;
+ 			}
+ 		}
+diff -r a/lib/metadata/metadata.c b/lib/metadata/metadata.c
+--- a/lib/metadata/metadata.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/metadata.c	2026-10-08 15:56:45.352683324 -0600
+@@ -386,7 +386,7 @@
+ 	if (find_pv_in_vg(vg, pv_name) ||
+ 	    find_pv_in_vg_by_uuid(vg, &pv->id)) {
+ 		if (!id_write_format(&pv->id, uuid, sizeof(uuid))) {
+-			stack;
++			log_stack;
+ 			uuid[0] = '\0';
+ 		}
+ 		log_error("Physical volume '%s (%s)' already in the VG.",
+@@ -700,7 +700,7 @@
+ 	set_vg_notify(vg->cmd);
+ 
+ 	if (!backup_remove(vg->cmd, vg->name))
+-		stack;
++		log_stack;
+ 
+ 	if (ret)
+ 		log_print_unless_silent("Volume group \"%s\" successfully removed", vg->name);
+@@ -2038,7 +2038,7 @@
+ 
+ 	dm_list_iterate_items(lvl, &vg->lvs)
+ 		if (!_lv_postorder_visit(lvl->lv, fn, data)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 		}
+ 
+@@ -2353,7 +2353,7 @@
+ 
+ 			if (!id_write_format(&pvl->pv->id, uuid,
+ 					     sizeof(uuid)))
+-				stack;
++				log_stack;
+ 			log_error(INTERNAL_ERROR "Duplicate PV id "
+ 				  "%s detected for %s in %s.",
+ 				  uuid, pv_dev_name(pvl->pv),
+@@ -2407,10 +2407,10 @@
+ 		if (!id_equal(&lvl->lv->lvid.id[0], &lvl->lv->vg->id)) {
+ 			if (!id_write_format(&lvl->lv->lvid.id[0], uuid,
+ 					     sizeof(uuid)))
+-				stack;
++				log_stack;
+ 			if (!id_write_format(&lvl->lv->vg->id, uuid2,
+ 					     sizeof(uuid2)))
+-				stack;
++				log_stack;
+ 			log_error(INTERNAL_ERROR "LV %s has VG UUID %s but its VG %s has UUID %s",
+ 				  lvl->lv->name, uuid, lvl->lv->vg->name, uuid2);
+ 			r = 0;
+@@ -2524,7 +2524,7 @@
+ 
+ 			if (!id_write_format(&lvl->lv->lvid.id[1], uuid,
+ 					     sizeof(uuid)))
+-				stack;
++				log_stack;
+ 			log_error(INTERNAL_ERROR "Duplicate LV id %s detected for %s in %s.",
+ 				  uuid, lvl->lv->name, vg->name);
+ 		}
+@@ -2537,7 +2537,7 @@
+ 		}
+ 
+ 	if (!_lv_postorder_vg(vg, _lv_validate_references_single, &vhash)) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+@@ -2578,7 +2578,7 @@
+ 	}
+ 
+ 	if (vg_max_lv_reached(vg))
+-		stack;
++		log_stack;
+ 
+ 	if (!(vhash.lv_lock_args = radix_tree_create(NULL, NULL))) {
+ 		log_error("Failed to allocate lv_lock_args hash");
+@@ -2734,9 +2734,9 @@
+ 
+ 		if (!id_equal(&hlv->lvid.id[0], &hlv->vg->id)) {
+ 			if (!id_write_format(&hlv->lvid.id[0], uuid, sizeof(uuid)))
+-				stack;
++				log_stack;
+ 			if (!id_write_format(&hlv->vg->id, uuid2, sizeof(uuid2)))
+-				stack;
++				log_stack;
+ 			log_error(INTERNAL_ERROR "Historical LV %s has VG UUID %s but its VG %s has UUID %s",
+ 				  hlv->name, uuid, hlv->vg->name, uuid2);
+ 			r = 0;
+@@ -2761,7 +2761,7 @@
+ 				goto out;
+ 			}
+ 			if (!id_write_format(&hlv->lvid.id[1], uuid, sizeof(uuid)))
+-				stack;
++				log_stack;
+ 			log_error(INTERNAL_ERROR "Duplicate historical LV id %s detected for %s in %s.",
+ 				  uuid, hlv->name, vg->name);
+ 		}
+@@ -3063,7 +3063,7 @@
+ 				log_warn("WARNING: Failed to write an MDA of VG %s.", vg->name);
+ 				mda->status |= MDA_FAILED;
+ 			} else {
+-				stack;
++				log_stack;
+ 				revert = 1;
+ 				break;
+ 			}
+@@ -3081,7 +3081,7 @@
+ 
+ 			if (mda->ops->vg_revert &&
+ 			    !mda->ops->vg_revert(vg->fid, vg, mda)) {
+-				stack;
++				log_stack;
+ 			}
+ 		}
+ 		return 0;
+@@ -3093,14 +3093,14 @@
+ 			continue;
+ 		if (mda->ops->vg_precommit &&
+ 		    !mda->ops->vg_precommit(vg->fid, vg, mda)) {
+-			stack;
++			log_stack;
+ 			/* Revert */
+ 			dm_list_iterate_items(mda, &vg->fid->metadata_areas_in_use) {
+ 				if (mda->status & MDA_FAILED)
+ 					continue;
+ 				if (mda->ops->vg_revert &&
+ 				    !mda->ops->vg_revert(vg->fid, vg, mda)) {
+-					stack;
++					log_stack;
+ 				}
+ 			}
+ 			return 0;
+@@ -3136,7 +3136,7 @@
+ 			continue;
+ 		if (mda->ops->vg_commit &&
+ 		    !mda->ops->vg_commit(vg->fid, vg, mda)) {
+-			stack;
++			log_stack;
+ 		} else
+ 			good++;
+ 	}
+@@ -3191,7 +3191,7 @@
+ 	dm_list_iterate_items(mda, &vg->fid->metadata_areas_in_use) {
+ 		if (mda->ops->vg_revert &&
+ 		    !mda->ops->vg_revert(vg->fid, vg, mda)) {
+-			stack;
++			log_stack;
+ 		}
+ 	}
+ }
+@@ -3211,7 +3211,7 @@
+ 	uint32_t ext_flags;
+ 
+ 	if (!(pv = _pv_read(b->cmd, b->fmt, b->vg, info))) {
+-		stack;
++		log_stack;
+ 		return 1;
+ 	}
+ 
+@@ -3238,7 +3238,7 @@
+ 
+ 	/*
+ 	if (!_check_or_repair_orphan_pv_ext(pv, info, baton)) {
+-		stack;
++		log_stack;
+ 		return 0;
+ 	}
+ 	*/
+diff -r a/lib/metadata/mirror.c b/lib/metadata/mirror.c
+--- a/lib/metadata/mirror.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/mirror.c	2026-10-08 15:56:45.353892417 -0600
+@@ -1247,7 +1247,7 @@
+ 		if (r < removed_once || !removed_once) {
+ 			/* Some mirrors are removed from the temporary mirror,
+ 			 * but the temporary layer still exists.
+-			 * Down the stack and retry for remainder. */
++			 * Down the log_stack and retry for remainder. */
+ 			next_lv = find_temporary_mirror(next_lv);
+ 			if (!next_lv) {
+ 				preferred_only = 0;
+@@ -1293,8 +1293,8 @@
+  * Collapsing temporary mirror layers.
+  *
+  * When mirrors are added to already-mirrored LV, a temporary mirror layer
+- * is inserted at the top of the stack to reduce resync work.
+- * The function will remove the intermediate layer and collapse the stack
++ * is inserted at the top of the log_stack to reduce resync work.
++ * The function will remove the intermediate layer and collapse the log_stack
+  * as far as mirrors are in-sync.
+  *
+  * The function is destructive: to remove intermediate mirror layers,
+@@ -2018,7 +2018,7 @@
+ 					  (region_size > lv->vg->extent_size) ?
+ 					  lv->vg->extent_size : region_size,
+ 					  alloc, mirror_in_sync() ? 1 : 0))) {
+-		stack;
++		log_stack;
+ 		goto out_remove_images;
+ 	}
+ 
+@@ -2030,7 +2030,7 @@
+ 		goto out_remove_log;
+ 
+ 	if (log_count && !attach_mirror_log(first_seg(lv), log_lv))
+-		stack;
++		log_stack;
+ 
+ 	alloc_destroy(ah);
+ 	return 1;
+diff -r a/lib/metadata/raid_manip.c b/lib/metadata/raid_manip.c
+--- a/lib/metadata/raid_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/raid_manip.c	2026-10-08 15:56:45.358206112 -0600
+@@ -675,7 +675,7 @@
+ 			  display_lvname(lock_lv));
+ 		vg_revert(vg);
+ 	} else if (!(r = vg_commit(vg)))
+-		stack; /* !vg_commit() has implicit vg_revert() */
++		log_stack; /* !vg_commit() has implicit vg_revert() */
+ 
+ 	if (r && lv_list) {
+ 		dm_list_iterate_items(lvl, lv_list) {
+@@ -2221,7 +2221,7 @@
+ 			  display_lvname(lv));
+ 		vg_revert(lv->vg);
+ 	} else if (!(r = vg_commit(vg)))
+-		stack; /* !vg_commit() has implicit vg_revert() */
++		log_stack; /* !vg_commit() has implicit vg_revert() */
+ 
+ 	return r;
+ }
+@@ -2725,7 +2725,7 @@
+ 
+ 	/* Metadata LVs must be cleared before being added to the array */
+ 	if (!_clear_lvs(lv->vg, &meta_lvs)) {
+-		stack;
++		log_stack;
+ 		goto fail;
+ 	}
+ 
+@@ -4921,7 +4921,7 @@
+ 			  (new_stripes == 1)) ? SEG_TYPE_NAME_LINEAR : new_segtype->name);
+ 
+ 	if (!_log_possible_conversion_types(lv, new_segtype))
+-		stack;
++		log_stack;
+ 
+ 	return 0;
+ }
+@@ -4934,7 +4934,7 @@
+ 		   (new_stripes == 1)) ? SEG_TYPE_NAME_LINEAR : new_segtype->name);
+ 
+ 	if (!_log_possible_conversion_types(lv, new_segtype))
+-		stack;
++		log_stack;
+ 
+ 	return 0;
+ }
+@@ -7189,11 +7189,11 @@
+ 					lv_iorig = seg_lv(seg_image, 0);
+ 
+ 					if (dm_snprintf(tmp_name_buf, NAME_LEN, "%s_imeta", lv_image->name) < 0) {
+-						stack;
++						log_stack;
+ 						continue;
+ 					}
+ 					if (!(tmp_name_dup = dm_pool_strdup(lv->vg->vgmem, tmp_name_buf))) {
+-						stack;
++						log_stack;
+ 						continue;
+ 					}
+ 
+@@ -7201,11 +7201,11 @@
+ 						return_0;
+ 
+ 					if (dm_snprintf(tmp_name_buf, NAME_LEN, "%s_iorig", lv_image->name) < 0) {
+-						stack;
++						log_stack;
+ 						continue;
+ 					}
+ 					if (!(tmp_name_dup = dm_pool_strdup(lv->vg->vgmem, tmp_name_buf))) {
+-						stack;
++						log_stack;
+ 						continue;
+ 					}
+ 
+@@ -7511,7 +7511,7 @@
+ 			continue;
+ 
+ 		if (!deactivate_lv(lv->vg->cmd, seg_metalv(raid_seg, s))) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 		}
+ 	}
+diff -r a/lib/metadata/thin_manip.c b/lib/metadata/thin_manip.c
+--- a/lib/metadata/thin_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/thin_manip.c	2026-10-08 15:56:45.359397204 -0600
+@@ -505,7 +505,7 @@
+ 	if (!(f = tmpfile())) {
+ 		log_error("Cannot create temporary file to prepare metadata.");
+ 		if (!deactivate_lv(cmd, metadata_lv))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+@@ -532,13 +532,13 @@
+ 	else if (fflush(f))
+ 		log_sys_error("fflush", md_path);
+ 	else if (!(r = exec_cmd(cmd, argv, &status, 1)))
+-		stack;
++		log_stack;
+ 
+ 	if (fclose(f))
+ 		log_sys_debug("fclose", md_path);
+ 
+ 	if (!deactivate_lv(cmd, metadata_lv))
+-		stack;
++		log_stack;
+ 
+ 	return r;
+ }
+@@ -658,7 +658,7 @@
+ 			activate = 0; /* Was already active */
+ 
+ 		if (!(ret = _check_pool_create(lv)))
+-			stack; /* Safety guard, needs local presence of thin-pool target */
++			log_stack; /* Safety guard, needs local presence of thin-pool target */
+ 		else {
+ 			if (!(ret = suspend_lv_origin(lv->vg->cmd, lv)))
+ 				/* Send messages */
+diff -r a/lib/metadata/vdo_manip.c b/lib/metadata/vdo_manip.c
+--- a/lib/metadata/vdo_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/vdo_manip.c	2026-10-08 15:56:45.360027327 -0600
+@@ -389,7 +389,7 @@
+ 	/* Wait for the UDS index to finish initializing */
+ 	for (;;) {
+ 		if (!lv_vdo_pool_status(vdo_pool_lv, 0, &vdo_status)) {
+-			stack;
++			log_stack;
+ 			break;
+ 		}
+ 
+diff -r a/lib/metadata/vg.c b/lib/metadata/vg.c
+--- a/lib/metadata/vg.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/vg.c	2026-10-08 15:56:45.360307807 -0600
+@@ -119,7 +119,7 @@
+ 	struct lv_list *lvl;
+ 
+ 	if (vg_max_lv_reached(vg))
+-		stack;
++		log_stack;
+ 
+ 	lvl = &lv->lvl;
+ 	lvl->lv = lv;
+@@ -142,7 +142,7 @@
+ 	 * So just remove the name from active lv_names */
+ 	if (lv->vg->lv_names &&
+ 	    !radix_tree_remove(lv->vg->lv_names, lv->name, strlen(lv->name)))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+diff -r a/lib/metadata/writecache_manip.c b/lib/metadata/writecache_manip.c
+--- a/lib/metadata/writecache_manip.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/metadata/writecache_manip.c	2026-10-08 15:56:45.360612708 -0600
+@@ -157,12 +157,12 @@
+ 	}
+ 
+ 	if (!(cvol_name_dup = dm_pool_strdup(vg->vgmem, cvol_name))) {
+-		stack;
++		log_stack;
+ 		return;
+ 	}
+ 
+ 	if (!lv_set_name(lv_fast, cvol_name_dup))
+-		stack;
++		log_stack;
+ }
+ 
+ static int _lv_detach_writecache_cachevol_inactive(struct logical_volume *lv, int noflush)
+diff -r a/lib/mirror/mirrored.c b/lib/mirror/mirrored.c
+--- a/lib/mirror/mirrored.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/mirror/mirrored.c	2026-10-08 15:56:45.360857517 -0600
+@@ -378,7 +378,7 @@
+ 		return_0;
+ 
+ 	if ((r = _add_log(mem, seg, laopts, node, area_count, region_size)) <= 0) {
+-		stack;
++		log_stack;
+ 		return r;
+ 	}
+ 
+diff -r a/lib/misc/lvm-exec.c b/lib/misc/lvm-exec.c
+--- a/lib/misc/lvm-exec.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/misc/lvm-exec.c	2026-10-08 15:56:45.361191489 -0600
+@@ -180,7 +180,7 @@
+ 	if (pdata->pid == 0) {
+ 		/* Child -> writer, convert pipe[0] to STDOUT */
+ 		if (!_reopen_fd_to_null(STDIN_FILENO))
+-			stack;
++			log_stack;
+ 		else if (close(pipefd[0 /*read*/]))
+ 			log_sys_error("close", "pipe[0]");
+ 		else if (close(STDOUT_FILENO))
+diff -r a/lib/misc/lvm-file.c b/lib/misc/lvm-file.c
+--- a/lib/misc/lvm-file.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/misc/lvm-file.c	2026-10-08 15:56:45.361363315 -0600
+@@ -267,7 +267,7 @@
+ 		if (warn_if_read_only || (errno != EROFS && errno != EACCES))
+ 			log_sys_error("open", file);
+ 		else
+-			stack;
++			log_stack;
+ 
+ 		return -1;
+ 	}
+diff -r a/lib/misc/lvm-flock.c b/lib/misc/lvm-flock.c
+--- a/lib/misc/lvm-flock.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/misc/lvm-flock.c	2026-10-08 15:56:45.361504210 -0600
+@@ -245,7 +245,7 @@
+ 	else {
+ 		free(ll->res);
+ 		free(ll);
+-		stack;
++		log_stack;
+ 	}
+ 
+ 	return r;
+diff -r a/lib/misc/lvm-wrappers.c b/lib/misc/lvm-wrappers.c
+--- a/lib/misc/lvm-wrappers.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/misc/lvm-wrappers.c	2026-10-08 15:56:45.362042990 -0600
+@@ -123,26 +123,26 @@
+ 	if (fstat(fd, &st)) {
+ 		log_sys_error("fstat", "/dev/urandom");
+ 		if (close(fd))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+ 	if (!S_ISCHR(st.st_mode)) {
+ 		log_error("/dev/urandom is not a character device.");
+ 		if (close(fd))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+ 	if (read(fd, buf, len) != (ssize_t) len) {
+ 		log_sys_error("read", "read_urandom: /dev/urandom");
+ 		if (close(fd))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+diff -r a/lib/mm/memlock.c b/lib/mm/memlock.c
+--- a/lib/mm/memlock.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/mm/memlock.c	2026-10-08 15:56:45.362488895 -0600
+@@ -182,7 +182,7 @@
+ 	size_t hblks;
+ 	char *areas[MAX_AREAS];
+ 
+-	/* Check if we could preallocate requested stack */
++	/* Check if we could preallocate requested log_stack */
+ 	if (getrlimit(RLIMIT_STACK, &limit) == 0) {
+ 		limit.rlim_cur /= 2;
+ 		if (_size_stack > limit.rlim_cur)
+@@ -190,7 +190,7 @@
+ 		if ((stack_mem = alloca(_size_stack)))
+ 			_touch_memory(stack_mem, _size_stack);
+ 	} else
+-		log_warn("WARNING: Failed to get stack size limit, ignoring reserved_stack setting.");
++		log_warn("WARNING: Failed to get log_stack size limit, ignoring reserved_stack setting.");
+ 
+ #ifdef HAVE_MALLINFO2
+ 	/* Prefer mallinfo2 call when available with newer glibc */
+@@ -548,7 +548,7 @@
+ {
+ 	if (!_size_stack || !_size_malloc_tmp) {
+ 		log_debug_mem("Skipping memory locking (reserved memory: "
+-			      FMTsize_t "  stack: " FMTsize_t ").",
++			      FMTsize_t "  log_stack: " FMTsize_t ").",
+ 			      _size_malloc_tmp, _size_stack);
+ 		return;
+ 	}
+@@ -582,11 +582,11 @@
+ 		}
+ 
+ 		if (!_disable_mmap())
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	if (!_memlock_maps(cmd, LVM_MLOCK, &_mstats))
+-		stack;
++		log_stack;
+ }
+ 
+ static void _unlock_mem(struct cmd_context *cmd)
+@@ -595,7 +595,7 @@
+ 
+ 	if (!_size_stack || !_size_malloc_tmp) {
+ 		log_debug_mem("Skipping memory unlocking (reserved memory: "
+-			      FMTsize_t "  stack: " FMTsize_t ").",
++			      FMTsize_t "  log_stack: " FMTsize_t ").",
+ 			      _size_malloc_tmp, _size_stack);
+ 		return;
+ 	}
+@@ -603,7 +603,7 @@
+ 	log_very_verbose("Unlocking memory");
+ 
+ 	if (!_memlock_maps(cmd, LVM_MUNLOCK, &unlock_mstats))
+-		stack;
++		log_stack;
+ 
+ 	if (!_use_mlockall) {
+ 		_restore_mmap();
+@@ -734,7 +734,7 @@
+ #ifdef ENABLE_SANITIZER
+ 	_size_stack = _size_malloc_tmp = 0;
+ #else
+-	/* When threaded, caller already limited stack size so just use the default. */
++	/* When threaded, caller already limited log_stack size so just use the default. */
+ 	_size_stack = 1024ULL * (cmd->threaded ? DEFAULT_RESERVED_STACK :
+ 				 find_config_tree_int(cmd, activation_reserved_stack_CFG, NULL));
+ 	_size_malloc_tmp = find_config_tree_int(cmd, activation_reserved_memory_CFG, NULL) * 1024ULL;
+diff -r a/lib/raid/raid.c b/lib/raid/raid.c
+--- a/lib/raid/raid.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/raid/raid.c	2026-10-08 15:56:45.363085727 -0600
+@@ -719,7 +719,7 @@
+ 		if ((segtype = _init_raid_segtype(cmd, &_raid_types[i], dso, monitored)) &&
+ 		    !lvm_register_segtype(seglib, segtype)) {
+ 			/* segtype is already destroyed */
+-			stack;
++			log_stack;
+ 			r = 0;
+ 			break;
+ 		}
+diff -r a/lib/report/properties.c b/lib/report/properties.c
+--- a/lib/report/properties.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/report/properties.c	2026-10-08 15:56:45.364006090 -0600
+@@ -164,21 +164,21 @@
+ 
+ 	if (lv_is_cache(lv) || lv_is_used_cache_pool(lv)) {
+ 		if (!lv_cache_status(lv, &cache_status))
+-			stack;
++			log_stack;
+ 		else {
+ 			percent = cache_status->data_usage;
+ 			dm_pool_destroy(cache_status->mem);
+ 		}
+ 	} else  if (lv_is_thin_volume(lv)) {
+ 		if (!lv_thin_status(lv, 0, &thin_status))
+-			stack;
++			log_stack;
+ 		else {
+ 			percent = thin_status->usage;
+ 			dm_pool_destroy(thin_status->mem);
+ 		}
+ 	} else if (lv_is_thin_pool(lv)) {
+ 		if (!lv_thin_pool_status(lv, 0, &thin_pool_status))
+-			stack;
++			log_stack;
+ 		else {
+ 			percent = thin_pool_status->data_usage;
+ 			dm_pool_destroy(thin_pool_status->mem);
+@@ -196,14 +196,14 @@
+ 
+ 	if (lv_is_cache(lv) || lv_is_used_cache_pool(lv)) {
+ 		if (!lv_cache_status(lv, &cache_status))
+-			stack;
++			log_stack;
+ 		else {
+ 			percent = cache_status->metadata_usage;
+ 			dm_pool_destroy(cache_status->mem);
+ 		}
+ 	} else if (lv_is_thin_pool(lv)) {
+ 		if (!lv_thin_pool_status(lv, 0, &thin_pool_status))
+-			stack;
++			log_stack;
+ 		else {
+ 			percent = thin_pool_status->metadata_usage;
+ 			dm_pool_destroy(thin_pool_status->mem);
+diff -r a/lib/report/report.c b/lib/report/report.c
+--- a/lib/report/report.c	2026-09-30 03:19:39.000000000 -0600
++++ b/lib/report/report.c	2026-10-08 15:56:45.366121636 -0600
+@@ -4727,11 +4727,11 @@
+ 
+ 	if (object_id &&
+ 	    !id_write_format(object_id, object_uuid, sizeof(object_uuid)))
+-		stack;
++		log_stack;
+ 
+ 	if (object_group_id &&
+ 	    !id_write_format(object_group_id, object_group_uuid, sizeof(object_group_uuid)))
+-		stack;
++		log_stack;
+ 
+ 	if (handle)
+ 		return dm_report_object(handle, &log_item);
+diff -r a/libdaemon/server/daemon-server.c b/libdaemon/server/daemon-server.c
+--- a/libdaemon/server/daemon-server.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdaemon/server/daemon-server.c	2026-10-08 15:56:45.368282713 -0600
+@@ -39,7 +39,7 @@
+ 	pthread_attr_t attr;
+ 	pthread_attr_init(&attr);
+ 	/*
+-	 * We use a smaller stack since it gets preallocated in its entirety
++	 * We use a smaller log_stack since it gets preallocated in its entirety
+ 	 */
+ 	pthread_attr_setstacksize(&attr, stacksize + getpagesize());
+ 	return pthread_create(t, &attr, fun, arg);
+diff -r a/libdaemon/server/daemon-server.h b/libdaemon/server/daemon-server.h
+--- a/libdaemon/server/daemon-server.h	2026-09-30 03:19:39.000000000 -0600
++++ b/libdaemon/server/daemon-server.h	2026-10-08 15:56:45.368383947 -0600
+@@ -89,7 +89,7 @@
+ 
+ typedef struct daemon_state {
+ 	/*
+-	 * The maximal stack size for individual daemon threads. This is
++	 * The maximal log_stack size for individual daemon threads. This is
+ 	 * essential for daemons that need to be locked into memory, since
+ 	 * pthread's default is 10M per thread.
+ 	 */
+diff -r a/libdm/dm-tools/dmsetup.c b/libdm/dm-tools/dmsetup.c
+--- a/libdm/dm-tools/dmsetup.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/dm-tools/dmsetup.c	2026-10-08 15:56:45.382109689 -0600
+@@ -679,7 +679,7 @@
+ 	/* Final interval? */
+ 	if (_count == 2) {
+ 		if (close(_timer_fd))
+-			stack;
++			log_stack;
+ 		/* Tell _update_interval_times() to shut down. */
+ 		_timer_fd = TIMER_STOPPED;
+ 	}
+@@ -750,7 +750,7 @@
+ 		else if (errno == EINVAL)
+ 			log_error("Report interval too short.");
+ 		else
+-			stack; /* other reason */
++			log_stack; /* other reason */
+ 		return 0;
+ 	}
+ 
+@@ -3407,7 +3407,7 @@
+ 	if (private) {
+ 		if (!dm_device_get_name(info->major, info->minor,
+ 					1, buf, PATH_MAX)) {
+-			stack;
++			log_stack;
+ 			goto out_abandon;
+ 		}
+ 	}
+@@ -6124,7 +6124,7 @@
+ 		cmajor = (int) MAJOR(deps->device[i]);
+ 		cminor = (int) MINOR(deps->device[i]);
+ 
+-		/* Only device-mapper devices can be a VDO or stack above one */
++		/* Only device-mapper devices can be a VDO or log_stack above one */
+ 		if (!dm_is_dm_major((uint32_t) cmajor))
+ 			continue;
+ 
+@@ -7157,9 +7157,9 @@
+ 			setenv("DM_DEBUG_WITH_LINE_NUMBERS", "1", 0);
+ 		if (_switches[VERBOSE_ARG] > 2) {
+ 			if (!(_initial_timestamp = dm_timestamp_alloc()))
+-				stack;
++				log_stack;
+ 			else if (!dm_timestamp_get(_initial_timestamp))
+-				stack;
++				log_stack;
+ 			else
+ 				log_debug("Timestamp:       0.000000000 seconds");
+ 		}
+diff -r a/libdm/ioctl/libdm-iface.c b/libdm/ioctl/libdm-iface.c
+--- a/libdm/ioctl/libdm-iface.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/ioctl/libdm-iface.c	2026-10-08 15:56:45.383528660 -0600
+@@ -343,7 +343,7 @@
+ 			log_sys_error("mknod", control);
+ 			ret = 0;
+ 		} else if (_control_exists(control, major, minor) != 1) {
+-			stack; /* Invalid control node created by parallel command ? */
++			log_stack; /* Invalid control node created by parallel command ? */
+ 			ret = 0;
+ 		}
+ 	}
+@@ -619,7 +619,7 @@
+ 
+ 	r = dm_task_run(task);
+ 	if (!dm_task_get_driver_version(task, version, size))
+-		stack;
++		log_stack;
+ 
+ 	if (r && task->dmi.v4) {
+ 		unsigned *v = task->dmi.v4->version;
+@@ -1572,12 +1572,12 @@
+ 			continue;
+ 		if (!dm_task_set_name(dmt, dirent->d_name)) {
+ 			r = 0;
+-			stack;
++			log_stack;
+ 			continue; /* try next name */
+ 		}
+ 		if (!dm_task_run(dmt)) {
+ 			r = 0;
+-			stack;  /* keep going */
++			log_stack;  /* keep going */
+ 		}
+ 	}
+ 
+@@ -1726,7 +1726,7 @@
+ 		if (!dm_task_set_cookie(dmt, &cookie,
+ 					(event_nr & DM_UDEV_FLAGS_MASK) >>
+ 					DM_UDEV_FLAGS_SHIFT))
+-			stack; /* keep going */
++			log_stack; /* keep going */
+ 	}
+ 
+ 	if (!dm_task_run(dmt))
+@@ -1779,7 +1779,7 @@
+ 				      dmt->read_only, dmt->secure_data,
+ 				      dmt->ima_measurement,
+ 				      info.major, info.minor))) {
+-		stack;
++		log_stack;
+ 		_udev_complete(dmt);
+ 		goto revert;
+ 	}
+@@ -1793,7 +1793,7 @@
+ 	dm_task_destroy(task);
+ 
+ 	if (!r) {
+-		stack;
++		log_stack;
+ 		_udev_complete(dmt);
+ 		goto revert;
+ 	}
+@@ -2649,7 +2649,7 @@
+ 
+ 	if (dmt->record_timestamp)
+ 		if (!dm_timestamp_get(dmt->ioctl_timestamp))
+-			stack;
++			log_stack;
+ 
+ 	if (!_dm_ioctl_post(dmt, dmi, r)) {
+ 		_dm_zfree_dmi(dmi);
+diff -r a/libdm/libdm-common.c b/libdm/libdm-common.c
+--- a/libdm/libdm-common.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-common.c	2026-10-08 15:56:45.371536040 -0600
+@@ -1802,7 +1802,7 @@
+ 	}
+ 
+ 	if (!(nop = dm_malloc(sizeof(*nop) + len))) {
+-		log_error("Insufficient memory to stack mknod operation");
++		log_error("Insufficient memory to log_stack mknod operation");
+ 		return 0;
+ 	}
+ 
+@@ -2087,7 +2087,7 @@
+ 		if (!_sanitize_line(buffer) ||
+ 		    !_mountinfo_parse_line(buffer, &maj, &min, target) ||
+ 		    !read_fn(buffer, maj, min, target, cb_data)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 			break;
+ 		}
+@@ -2325,7 +2325,7 @@
+ 		if (_sysfs_get_dm_name(major, minor, buf, buf_size))
+ 			return 1;
+ 		else
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	/*
+@@ -2419,7 +2419,7 @@
+ 	if ((major == data->maj) && (minor == data->min)) {
+ 		if (!dm_device_get_name(major, minor, 1, kernel_dev_name,
+ 					sizeof(kernel_dev_name))) {
+-			stack;
++			log_stack;
+ 			*kernel_dev_name = '\0';
+ 		}
+ 		log_verbose("Device %s (%u:%u) appears to be mounted on %s.",
+@@ -2439,7 +2439,7 @@
+ 	};
+ 
+ 	if (!dm_mountinfo_read(_device_has_mounted_fs, &data))
+-		stack;
++		log_stack;
+ 
+ 	if (data.mounted)
+ 		return 1;
+@@ -2868,7 +2868,7 @@
+ 			     gen_cookie, gen_semid, val);
+ 
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 
+ 	*semid = gen_semid;
+ 	*cookie = gen_cookie;
+@@ -2877,7 +2877,7 @@
+ 
+ bad:
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 
+ 	*cookie = 0;
+ 
+diff -r a/libdm/libdm-config.c b/libdm/libdm-config.c
+--- a/libdm/libdm-config.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-config.c	2026-10-08 15:56:45.372108930 -0600
+@@ -535,7 +535,7 @@
+ 		if (!_section(p, &root))
+ 			return_NULL;
+ 
+-	/* Clear dangling parent pointers to stack variable */
++	/* Clear dangling parent pointers to log_stack variable */
+ 	for (cn = root.child; cn; cn = cn->sib)
+ 		cn->parent = NULL;
+ 
+@@ -637,7 +637,7 @@
+ 	} else {
+ 		len = p->te - p->tb;
+ 		if (len < (sizeof(buf) - 1)) {
+-			/* Use stack for smaller string */
++			/* Use log_stack for smaller string */
+ 			str = buf;
+ 			memcpy(str, p->tb, len);
+ 			str[len] = '\0';
+@@ -1554,7 +1554,7 @@
+ 			return_0;
+ 	}
+ 	cft->root = dummy.child;
+-	/* Clear dangling parent pointers to stack variable */
++	/* Clear dangling parent pointers to log_stack variable */
+ 	for (cn = cft->root; cn; cn = cn->sib)
+ 		if (cn->parent == &dummy)
+ 			cn->parent = NULL;
+diff -r a/libdm/libdm-deptree.c b/libdm/libdm-deptree.c
+--- a/libdm/libdm-deptree.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-deptree.c	2026-10-08 15:56:45.373943396 -0600
+@@ -657,7 +657,7 @@
+ 			"%s (" FMTu32 ":" FMTu32 ")",
+ 			dnode->name ? dnode->name : "",
+ 			dnode->info.major, dnode->info.minor) < 0) {
+-		stack;
++		log_stack;
+ 		return dnode->name;
+ 	}
+ 
+@@ -782,7 +782,7 @@
+ 
+ 	dm_list_iterate_items(dlink, list) {
+ 		if (!(uuid = dm_tree_node_get_uuid(dlink->node))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -1001,7 +1001,7 @@
+ 	/* Iterate through parents of this node */
+ 	dm_list_iterate_items(dlink, &node->used_by) {
+ 		if (!(uuid = dm_tree_node_get_uuid(dlink->node))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -1282,7 +1282,7 @@
+ 	/* Can't recurse if not a mapped device or there are no dependencies */
+ 	if (!node->info.exists || !deps || !deps->count) {
+ 		if (!_add_to_bottomlevel(node)) {
+-			stack;
++			log_stack;
+ 			node = NULL;
+ 		}
+ 		goto out;
+@@ -1396,7 +1396,7 @@
+ 		dec_suspended();
+ 
+ 	if (!(r = dm_task_get_info(dmt, newinfo)))
+-		stack;
++		log_stack;
+ 
+ out:
+ 	dm_task_destroy(dmt);
+@@ -1817,17 +1817,17 @@
+ 
+ 	while ((child = dm_tree_next_child(&handle, dnode, 0))) {
+ 		if (!(dinfo = dm_tree_node_get_info(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+ 		if (!(name = dm_tree_node_get_name(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+ 		if (!(uuid = dm_tree_node_get_uuid(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -1862,7 +1862,7 @@
+ 
+ 			/* Check toplevel node for holders/mounted fs */
+ 			if (!_check_device_not_in_use(name, &info)) {
+-				stack;
++				log_stack;
+ 				r = 0;
+ 				continue;
+ 			}
+@@ -1902,7 +1902,7 @@
+ 		if (child->callback &&
+ 		    !child->callback(child, DM_NODE_CALLBACK_DEACTIVATED,
+ 				     child->callback_data))
+-			stack;
++			log_stack;
+ 			/* FIXME Deactivation must currently ignore failure
+ 			 * here so that lvremove can continue: we need an
+ 			 * alternative way to handle this state without
+@@ -1939,17 +1939,17 @@
+ 	/* Suspend nodes at this level of the tree */
+ 	while ((child = dm_tree_next_child(&handle, dnode, 0))) {
+ 		if (!(dinfo = dm_tree_node_get_info(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+ 		if (!(name = dm_tree_node_get_name(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+ 		if (!(uuid = dm_tree_node_get_uuid(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -1977,7 +1977,7 @@
+ 		/* If child has some real messages send them */
+ 		if ((child->props.send_messages > 1) && r) {
+ 			if (!(r = _node_send_messages(child, uuid_prefix, uuid_prefix_len, 1)))
+-				stack;
++				log_stack;
+ 			else {
+ 				log_debug_activation("Sent messages to thin-pool %s and "
+ 						     "skipping suspend of its children.",
+@@ -2009,7 +2009,7 @@
+ 			continue;
+ 
+ 		if (!(uuid = dm_tree_node_get_uuid(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -2057,7 +2057,7 @@
+ 			continue;
+ 
+ 		if (!(sibling_name = dm_tree_node_get_name(sibling))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -2089,7 +2089,7 @@
+ 
+ 	/* Wait for udev before reactivating siblings */
+ 	if (!dm_udev_wait(dm_tree_get_cookie(dnode)))
+-		stack;
++		log_stack;
+ 
+ 	dm_tree_set_cookie(dnode, 0);
+ 
+@@ -2101,7 +2101,7 @@
+ 		}
+ 
+ 		if (!(uuid = dm_tree_node_get_uuid(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -2149,7 +2149,7 @@
+ 	/* Activate children first */
+ 	while ((child = dm_tree_next_child(&handle, dnode, 0))) {
+ 		if (!(uuid = dm_tree_node_get_uuid(child))) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 
+@@ -2175,7 +2175,7 @@
+ 			}
+ 
+ 			if (!(uuid = dm_tree_node_get_uuid(child))) {
+-				stack;
++				log_stack;
+ 				continue;
+ 			}
+ 
+@@ -2183,7 +2183,7 @@
+ 				continue;
+ 
+ 			if (!(name = dm_tree_node_get_name(child))) {
+-				stack;
++				log_stack;
+ 				continue;
+ 			}
+ 
+@@ -2227,12 +2227,12 @@
+ 			 */
+ 			if (r && (child->props.send_messages > 1) &&
+ 			    !(r = _node_send_messages(child, uuid_prefix, uuid_prefix_len, 1)))
+-				stack;
++				log_stack;
+ 
+ 			/* Reactivate only for fresh activated origin */
+ 			if (r && child->props.reactivate_siblings &&
+ 			    (!(r = _reactivate_siblings(dnode, uuid_prefix, uuid_prefix_len))))
+-				stack;
++				log_stack;
+ 		}
+ 		if (awaiting_peer_rename)
+ 			priority--; /* redo priority level */
+@@ -2318,7 +2318,7 @@
+ do {\
+ 	int w;\
+ 	if ((w = dm_snprintf(params + p, paramsize - (size_t) p, str)) < 0) {\
+-		stack; /* Out of space */\
++		log_stack; /* Out of space */\
+ 		return -1;\
+ 	}\
+ 	p += w;\
+@@ -2914,7 +2914,7 @@
+ 		EMIT_PARAMS(pos, " allow_discards");
+ 
+ 	if (!dm_task_secure_data(dmt))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ }
+@@ -3237,7 +3237,7 @@
+ 		dm_free(params);
+ 
+ 		if (!ret)
+-			stack;
++			log_stack;
+ 
+ 		if (ret >= 0)
+ 			return ret;
+@@ -3380,7 +3380,7 @@
+ static int _dm_tree_wait_and_revert_activated(struct dm_tree_node *dnode)
+ {
+ 	if (!dm_udev_wait(dm_tree_get_cookie(dnode)))
+-		stack;
++		log_stack;
+ 
+ 	dm_tree_set_cookie(dnode, 0);
+ 
+@@ -3447,13 +3447,13 @@
+ 		if (!child->info.inactive_table &&
+ 		    child->props.segment_count &&
+ 		    !_load_node(child)) {
+-			stack;
++			log_stack;
+ 			/*
+ 			 * If the table load fails, try to device in the kernel
+ 			 * together with other created and preloaded devices.
+ 			 */
+ 			if (!_dm_tree_wait_and_revert_activated(dnode))
+-				stack;
++				log_stack;
+ 			r = 0;
+ 			continue;
+ 		}
+@@ -3489,7 +3489,7 @@
+ 				  child->info.suspended)) {
+ 			log_error("Unable to resume %s.", _node_name(child));
+ 			if (!_dm_tree_wait_and_revert_activated(dnode))
+-				stack;
++				log_stack;
+ 			r = 0;
+ 			continue;
+ 		}
+@@ -3499,9 +3499,9 @@
+ 			/* When creating new node also check transaction_id. */
+ 			if (child->props.send_messages &&
+ 			    !_node_send_messages(child, uuid_prefix, uuid_prefix_len, 0)) {
+-				stack;
++				log_stack;
+ 				if (!_dm_tree_wait_and_revert_activated(dnode))
+-					stack;
++					log_stack;
+ 				r = 0;
+ 				continue;
+ 			}
+@@ -3519,7 +3519,7 @@
+ 	if (update_devs_flag ||
+ 	    (r && !dnode->info.exists && dnode->callback)) {
+ 		if (!dm_udev_wait(dm_tree_get_cookie(dnode)))
+-			stack;
++			log_stack;
+ 		dm_tree_set_cookie(dnode, 0);
+ 
+ 		if (r && !dnode->info.exists && dnode->callback &&
+diff -r a/libdm/libdm-file.c b/libdm/libdm-file.c
+--- a/libdm/libdm-file.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-file.c	2026-10-08 15:56:45.374126153 -0600
+@@ -250,12 +250,12 @@
+                log_error("Cannot check lock status of lockfile [%s], error was [%s]",
+                          lockfile, strerror(errno));
+                if (close(fd))
+-                       stack;
++                       log_stack;
+                return 0;
+        }
+ 
+        if (close(fd))
+-               stack;
++               log_stack;
+ 
+        return (lock.l_type == F_UNLCK) ? 0 : 1;
+ }
+diff -r a/libdm/libdm-report.c b/libdm/libdm-report.c
+--- a/libdm/libdm-report.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-report.c	2026-10-08 15:56:45.376322371 -0600
+@@ -916,7 +916,7 @@
+ 	}
+ 
+ 	if (!_copy_field(rh, fp, field_num, implicit)) {
+-		stack;
++		log_stack;
+ 		dm_pool_free(rh->mem, fp);
+ 		return NULL;
+ 	}
+@@ -3787,7 +3787,7 @@
+ 	}
+ 
+ 	if (!(fs->value = dm_pool_zalloc(rh->selection->mem, sizeof(struct field_selection_value)))) {
+-		stack;
++		log_stack;
+ 		goto error_field_id;
+ 	}
+ 
+@@ -3796,7 +3796,7 @@
+ 	      custom && ((struct time_value *) custom)->range))
+ 		 &&
+ 	    !(fs->value->next = dm_pool_zalloc(rh->selection->mem, sizeof(struct field_selection_value)))) {
+-		stack;
++		log_stack;
+ 		goto error_field_id;
+ 	}
+ 
+@@ -4805,7 +4805,7 @@
+ 		/* Including trailing '\0'! */
+ 		buf_size = width + 1;
+ 		if (buf_size < sizeof(buf_local))
+-			/* Use local buffer on stack for smaller strings */
++			/* Use local buffer on log_stack for smaller strings */
+ 			buf = buf_local;
+ 		else if (!(buf = dm_malloc(buf_size))) {
+ 			log_error("dm_report: Could not allocate memory for output line buffer.");
+@@ -5294,7 +5294,7 @@
+ 
+ 	/*
+ 	 * If this report is in JSON group, it must be at the
+-	 * top of the stack of reports so the output from
++	 * top of the log_stack of reports so the output from
+ 	 * different reports do not interleave with each other.
+ 	 */
+ 	if (_get_topmost_report_group_item(rh->group_item->group) != rh->group_item) {
+diff -r a/libdm/libdm-stats.c b/libdm/libdm-stats.c
+--- a/libdm/libdm-stats.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-stats.c	2026-10-08 15:56:45.378179878 -0600
+@@ -178,12 +178,12 @@
+ 	if (!fgets(buf, sizeof(buf), comm)) {
+ 		log_error("Could not read from %s", PROC_SELF_COMM);
+ 		if (fclose(comm))
+-			stack;
++			log_stack;
+ 		return NULL;
+ 	}
+ 
+ 	if (fclose(comm))
+-		stack;
++		log_stack;
+ 
+ 	return dm_strdup(buf);
+ }
+@@ -874,7 +874,7 @@
+ 			if (*c == *v)
+ 				break;
+ 		if (!*v) {
+-			stack;
++			log_stack;
+ 			goto badchar;
+ 		}
+ 
+@@ -898,7 +898,7 @@
+ 			if (*c == ',')
+ 				c++;
+ 			else if (*c || (*c == ' ')) { /* Expected ',' or NULL. */
+-				stack;
++				log_stack;
+ 				goto badchar;
+ 			}
+ 
+@@ -1149,13 +1149,13 @@
+ 	_stats_update_groups(dms);
+ 
+ 	if (fclose(list_rows))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ 
+ bad:
+ 	if (fclose(list_rows))
+-		stack;
++		log_stack;
+ 	dm_pool_abandon_object(mem);
+ 	dm_pool_abandon_object(group_mem);
+ 
+@@ -1418,14 +1418,14 @@
+ 	region->counters = dm_pool_end_object(mem);
+ 
+ 	if (fclose(stats_rows))
+-		stack;
++		log_stack;
+ 
+ 	return 1;
+ 
+ bad:
+ 	if (stats_rows)
+ 		if (fclose(stats_rows))
+-			stack;
++			log_stack;
+ 	dm_pool_abandon_object(mem);
+ 
+ 	return 0;
+@@ -3651,7 +3651,7 @@
+ 				break;
+ 
+ 		if (!*v) {
+-			stack;
++			log_stack;
+ 			goto badchar;
+ 		}
+ 
+@@ -3681,14 +3681,14 @@
+ 				else if (*c == 'n')
+ 					mult = 1;
+ 				else {
+-					stack;
++					log_stack;
+ 					goto badchar;
+ 				}
+ 				c += 2; /* Advance over 'ms', 'us', or 'ns'. */
+ 			} else if (*c == ',')
+ 				c++;
+ 			else if (*c) { /* Expected ',' or NULL. */
+-				stack;
++				log_stack;
+ 				goto badchar;
+ 			}
+ 
+@@ -3757,7 +3757,7 @@
+ 	if (bounds->dms || bounds->region) {
+ 		log_error("Freeing invalid histogram bounds pointer %p.",
+ 			  (void *) bounds);
+-		stack;
++		log_stack;
+ 	}
+ 	/* dm_free() expects a (void *). */
+ 	dm_free((void *) bounds);
+diff -r a/libdm/libdm-timestamp.c b/libdm/libdm-timestamp.c
+--- a/libdm/libdm-timestamp.c	2026-09-30 03:19:39.000000000 -0600
++++ b/libdm/libdm-timestamp.c	2026-10-08 15:56:45.378784500 -0600
+@@ -54,7 +54,7 @@
+ 	struct dm_timestamp *ts = NULL;
+ 
+ 	if (!(ts = dm_zalloc(sizeof(*ts))))
+-		stack;
++		log_stack;
+ 
+ 	return ts;
+ }
+@@ -102,7 +102,7 @@
+ 	struct dm_timestamp *ts;
+ 
+ 	if (!(ts = dm_zalloc(sizeof(*ts))))
+-		stack;
++		log_stack;
+ 
+ 	return ts;
+ }
+diff -r a/test/lib/brick-shelltest.h b/test/lib/brick-shelltest.h
+--- a/test/lib/brick-shelltest.h	2026-09-30 03:19:39.000000000 -0600
++++ b/test/lib/brick-shelltest.h	2026-10-08 15:56:45.386580509 -0600
+@@ -947,7 +947,7 @@
+ // sum block-layer sectors on leaf devices and track the growth of used
+ // memory (MemTotal - MemFree) from /proc/meminfo.
+ //
+-// "Leaf" = top-level block device (not a partition) with no dm/md stack
++// "Leaf" = top-level block device (not a partition) with no dm/md log_stack
+ // above it (empty or missing /sys/class/block/<dev>/slaves/).  Counting
+ // only leaves avoids charging the same bio twice (dm -> backing device).
+ //
+@@ -969,7 +969,7 @@
+         return false; // partition: its I/O is also counted on the whole device
+     DIR *d = ::opendir( ( base + "/slaves" ).c_str() );
+     if ( !d )
+-        return true; // no slaves/ -> not a dm/md stack, count it
++        return true; // no slaves/ -> not a dm/md log_stack, count it
+     bool any = false;
+     for ( struct dirent *e = ::readdir( d ); e; e = ::readdir( d ) )
+         if ( e->d_name[0] != '.' ) {
+diff -r a/tools/command.c b/tools/command.c
+--- a/tools/command.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/command.c	2026-10-08 15:56:45.394063568 -0600
+@@ -661,7 +661,7 @@
+ 
+ 			if (!def->str) {
+ 				/* FIXME */
+-				stack;
++				log_stack;
+ 				return;
+ 			}
+ 		}
+@@ -1502,7 +1502,7 @@
+ 
+ 				if (!newdesc) {
+ 					/* FIXME */
+-					stack;
++					log_stack;
+ 					return 0;
+ 				}
+ 
+@@ -1513,7 +1513,7 @@
+ 				cmd->desc = newdesc;
+ 			} else if (!(cmd->desc = dm_pool_strdup(cmdtool->libmem, line_orig))) {
+ 				/* FIXME */
+-				stack;
++				log_stack;
+ 				return 0;
+ 			}
+ 
+diff -r a/tools/dumpconfig.c b/tools/dumpconfig.c
+--- a/tools/dumpconfig.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/dumpconfig.c	2026-10-08 15:56:45.394738752 -0600
+@@ -952,7 +952,7 @@
+ 		_set_value_format_flags(cft->root, DM_CONFIG_VALUE_FMT_COMMON_EXTRA_SPACES);
+ 
+ 	if (!config_write(cft, &tree_spec, file, argc, argv)) {
+-		stack;
++		log_stack;
+ 		r = ECMD_FAILED;
+ 	}
+ out:
+diff -r a/tools/lvchange.c b/tools/lvchange.c
+--- a/tools/lvchange.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvchange.c	2026-10-08 15:56:45.395591543 -0600
+@@ -395,7 +395,7 @@
+ 
+ 	if (!_vg_write_commit(lv, "intermediate")) {
+ 		if (!_reactivate_lv(lv, active))
+-			stack;
++			log_stack;
+ 		return 0;
+ 	}
+ 
+diff -r a/tools/lvconvert.c b/tools/lvconvert.c
+--- a/tools/lvconvert.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvconvert.c	2026-10-08 15:56:45.398258919 -0600
+@@ -722,7 +722,7 @@
+ 
+ 	if (removed) {
+ 		if (!vg_write(vg) || !vg_commit(vg)) {
+-			stack;
++			log_stack;
+ 			return;
+ 		}
+ 		log_warn("WARNING: %d missing and now unallocated Physical Volumes removed from VG.", removed);
+@@ -1253,7 +1253,7 @@
+  * _lvconvert_mirrors
+  *
+  * Determine what is being done.  Are we doing a conversion, repair, or
+- * collapsing a stack?  Once determined, call helper functions.
++ * collapsing a log_stack?  Once determined, call helper functions.
+  */
+ static int _lvconvert_mirrors(struct cmd_context *cmd,
+ 			      struct logical_volume *lv,
+@@ -2555,7 +2555,7 @@
+ 
+ 	/* Try to allocate new pool metadata spare LV */
+ 	if (!handle_pool_metadata_spare(pool_lv->vg, 0, pvh, poolmetadataspare))
+-		stack;
++		log_stack;
+ 
+ 	if (!detach_pool_metadata_lv(first_seg(pool_lv), &mlv))
+ 		return_0;
+@@ -2715,7 +2715,7 @@
+ 
+ 	/* Try to allocate new pool metadata spare LV */
+ 	if (!handle_pool_metadata_spare(cache_lv->vg, 0, pvh, poolmetadataspare))
+-		stack;
++		log_stack;
+ 
+ 	if (!detach_pool_metadata_lv(first_seg(pool_lv), &mlv))
+ 		return_0;
+@@ -2879,7 +2879,7 @@
+ 	}
+ 
+ 	if (!lv_update_and_reload(thin_lv)) {
+-		stack;
++		log_stack;
+ 		goto deactivate_and_revert_new_lv;
+ 	}
+ 
+@@ -3890,7 +3890,7 @@
+ 	lp.stripes = 1;
+ 
+ 	if (!(ret = _lvconvert_mirrors_repair(cmd, lv, &lp, use_pvh)))
+-		stack;
++		log_stack;
+ 
+ 	if (lp.need_polling) {
+ 		if (!lv_is_active(lv))
+@@ -5852,7 +5852,7 @@
+ 			log_error("See lvchange --cachesettings cleaner=1");
+ 
+ 			if (!active_begin && active_clean && !deactivate_lv(cmd, lv))
+-				stack;
++				log_stack;
+ 			return 0;
+ 		}
+ 
+@@ -5895,7 +5895,7 @@
+ 	 * then deactivate before the detach.
+ 	 */
+ 	if (!active_begin && active_clean && !deactivate_lv(cmd, lv))
+-		stack;
++		log_stack;
+ 
+ 	if (is_clean)
+ 		noflush = 1;
+@@ -5995,7 +5995,7 @@
+ 		unlock_and_release_vg(cmd, vg, vg->name);
+ 
+ 		if (is_lockd && !lockd_vg(cmd, id->vg_name, "un", 0, &lks))
+-			stack;
++			log_stack;
+ 
+ 		log_print_unless_silent("Detaching writecache cleaning %llu blocks", (unsigned long long)dirty);
+ 		log_print_unless_silent("This command can be cancelled and rerun to complete writecache detach.");
+@@ -6010,7 +6010,7 @@
+ 		 * a flush message.
+ 		 */
+ 		if (!deactivate_lv(cmd, lv))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	log_print_unless_silent("Detaching writecache completed cleaning.");
+@@ -6048,7 +6048,7 @@
+ 
+ out_lockd:
+ 	if (is_lockd && !lockd_vg(cmd, id->vg_name, "un", 0, &lks))
+-		stack;
++		log_stack;
+ 
+ 	return ret;
+ }
+@@ -6270,7 +6270,7 @@
+ 
+ 	if (dm_snprintf(proc_meminfo, sizeof(proc_meminfo),
+ 			"%s/meminfo", cmd->proc_dir) < 0) {
+-		stack;
++		log_stack;
+ 		goto skip_proc;
+ 	}
+ 
+@@ -6281,7 +6281,7 @@
+ 		if (strncmp(line, "MemTotal:", 9))
+ 			continue;
+ 		if (sscanf(line, "%*s%llu%*s", &proc_mem_kb) != 1) {
+-			stack;
++			log_stack;
+ 			break;
+ 		}
+ 		break;
+@@ -6404,13 +6404,13 @@
+ 
+ 	if (!_set_writecache_block_size(cmd, lv, &block_size_sectors)) {
+ 		if (!is_active && !deactivate_lv(cmd, lv))
+-			stack;
++			log_stack;
+ 		goto_bad;
+ 	}
+ 
+ 	if (!_check_writecache_memory(cmd, lv_fast, block_size_sectors)) {
+ 		if (!is_active && !deactivate_lv(cmd, lv))
+-			stack;
++			log_stack;
+ 		goto_bad;
+ 	}
+ 
+diff -r a/tools/lvconvert_poll.c b/tools/lvconvert_poll.c
+--- a/tools/lvconvert_poll.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvconvert_poll.c	2026-10-08 15:56:45.398385143 -0600
+@@ -190,7 +190,7 @@
+ 		return PROGRESS_FINISHED_ALL; /* Already merged by someone else */
+ 
+ 	if (!lv_thin_device_id(lv, &device_id)) {
+-		stack;
++		log_stack;
+ 		return PROGRESS_CHECK_FAILED;
+ 	}
+ 
+diff -r a/tools/lvm.c b/tools/lvm.c
+--- a/tools/lvm.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvm.c	2026-10-08 15:56:45.399455832 -0600
+@@ -357,7 +357,7 @@
+ 
+ 	if (cmd->cmd_report.report_group) {
+ 		if (!dm_report_group_destroy(cmd->cmd_report.report_group))
+-			stack;
++			log_stack;
+ 		cmd->cmd_report.report_group = NULL;
+ 	}
+ 
+diff -r a/tools/lvmcmdline.c b/tools/lvmcmdline.c
+--- a/tools/lvmcmdline.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvmcmdline.c	2026-10-08 15:56:45.401048519 -0600
+@@ -3225,7 +3225,7 @@
+ 
+ 	if ((ret = _process_common_commands(cmd))) {
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 		goto out;
+ 	}
+ 
+@@ -3318,10 +3318,10 @@
+ 	if (config_string_cft) {
+ 		/* Move this? */
+ 		if (!refresh_toolcontext(cmd))
+-			stack;
++			log_stack;
+ 	} else if (config_profile_command_cft || config_profile_metadata_cft) {
+ 		if (!process_profilable_config(cmd))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	if (ret == EINVALID_CMD_LINE && !cmd->is_interactive)
+diff -r a/tools/lvmdevices.c b/tools/lvmdevices.c
+--- a/tools/lvmdevices.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvmdevices.c	2026-10-08 15:56:45.401545237 -0600
+@@ -741,7 +741,7 @@
+ 					log_print("Adding multipath device %s for multipath component %s.",
+ 						  dev_name(mpath_dev), dev_name(du->dev));
+ 					if (!device_id_add(cmd, mpath_dev, dev->pvid, NULL, NULL, 0))
+-						stack;
++						log_stack;
+ 				} else {
+ 					log_print_unless_silent("Missing multipath device %s for multipath component %s.",
+ 						dev_name(mpath_dev), dev_name(du->dev));
+diff -r a/tools/lvrename.c b/tools/lvrename.c
+--- a/tools/lvrename.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/lvrename.c	2026-10-08 15:56:45.401834537 -0600
+@@ -187,7 +187,7 @@
+ 	}
+ 
+ 	if (!apply_lvname_restrictions(lv_name_new)) {
+-		stack;
++		log_stack;
+ 		return EINVALID_CMD_LINE;
+ 	}
+ 
+diff -r a/tools/polldaemon.c b/tools/polldaemon.c
+--- a/tools/polldaemon.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/polldaemon.c	2026-10-08 15:56:45.402353755 -0600
+@@ -105,7 +105,7 @@
+ 		    !parms->poll_fns->update_metadata(cmd, vg, lv, lvs_changed, 0)) {
+ 			log_error("ABORTING: Segment progression failed.");
+ 			if (!parms->poll_fns->finish_copy(cmd, vg, lv, lvs_changed))
+-				stack;
++				log_stack;
+ 			return 0;
+ 		}
+ 		*finished = 0;	/* Another segment */
+@@ -139,7 +139,7 @@
+ 		if (!_nanosleep(parms->interval, 0))
+ 			return_0;
+ 		if (!lvmcache_label_scan(cmd))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	return 1;
+@@ -160,7 +160,7 @@
+ 	char saved_uuid[sizeof(union lvid)] = { 0 };
+ 
+ 	if (!lvmcache_label_scan(cmd))
+-		stack;
++		log_stack;
+ 
+ 	/* Poll for completion */
+ 	while (!finished) {
+@@ -251,7 +251,7 @@
+ 		unlock_and_release_vg(cmd, vg, vg->name);
+ 
+ 		if (is_lockd && !lockd_vg(cmd, id->vg_name, "un", 0, &lks))
+-			stack;
++			log_stack;
+ 
+ 		wait_before_testing = 1;
+ 	}
+@@ -262,7 +262,7 @@
+ 	if (vg)
+ 		unlock_and_release_vg(cmd, vg, vg->name);
+ 	if (is_lockd && !lockd_vg(cmd, id->vg_name, "un", 0, &lks))
+-		stack;
++		log_stack;
+ 
+ 	return ret;
+ }
+@@ -389,7 +389,7 @@
+ 		if (parms->lv_type && !(lv->status & parms->lv_type))
+ 			continue;
+ 		if (!_check_lv_status(cmd, vg, lv, idl->id->display_name, parms, &finished)) {
+-			stack;
++			log_stack;
+ 			goto err;
+ 		}
+ 		if (!finished)
+@@ -414,9 +414,9 @@
+ 		parms->outstanding_count = 0;
+ 		r = process_each_vg(cmd, 0, NULL, NULL, NULL, READ_FOR_UPDATE, 0, handle, _poll_vg);
+ 		if (!lock_global(cmd, "un"))
+-			stack;
++			log_stack;
+ 		if (r != ECMD_PROCESSED) {
+-			stack;
++			log_stack;
+ 			break;
+ 		}
+ 		if (!parms->outstanding_count)
+@@ -584,7 +584,7 @@
+ 				dm_list_del(&idl->list);
+ 			else if (!parms->aborting) {
+ 				if (!_report_progress(cmd, idl->id, lpdp.parms))
+-					stack;
++					log_stack;
+ 			}
+ 		}
+ 
+@@ -643,7 +643,7 @@
+ 	}
+ 
+ 	if (!(r = _lvmpolld_poll_for_all_vgs(cmd, parms, handle)))
+-		stack;
++		log_stack;
+ 
+ 	destroy_processing_handle(cmd, handle);
+ 
+@@ -687,7 +687,7 @@
+ 
+ 	if (id) {
+ 		if (!wait_for_single_lv(cmd, id, parms)) {
+-			stack;
++			log_stack;
+ 			ret = ECMD_FAILED;
+ 		}
+ 	} else {
+diff -r a/tools/pvck.c b/tools/pvck.c
+--- a/tools/pvck.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/pvck.c	2026-10-08 15:56:45.403743265 -0600
+@@ -309,7 +309,7 @@
+ 	uint64_t mda2_offset;
+ 
+ 	if (!dev_get_size(dev, &dev_sectors))
+-		stack;
++		log_stack;
+ 
+ 	dev_bytes = dev_sectors * 512;
+ 	extra_bytes = dev_bytes % ONE_MB_IN_BYTES;
+@@ -330,7 +330,7 @@
+ 	uint64_t mda2_size;
+ 
+ 	if (!dev_get_size(dev, &dev_sectors))
+-		stack;
++		log_stack;
+ 
+ 	dev_bytes = dev_sectors * 512;
+ 	extra_bytes = dev_bytes % ONE_MB_IN_BYTES;
+@@ -649,9 +649,9 @@
+ 
+ 	if (fp) {
+ 		if (fflush(fp))
+-			stack;
++			log_stack;
+ 		if (fclose(fp))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	return 1;
+@@ -900,9 +900,9 @@
+ 	free(meta_buf);
+ 
+ 	if (fflush(fp))
+-		stack;
++		log_stack;
+ 	if (fclose(fp))
+-		stack;
++		log_stack;
+ 	return ret;
+ }
+ 
+@@ -1030,9 +1030,9 @@
+ 		fprintf(fp, "%s", meta_buf);
+ 
+ 		if (fflush(fp))
+-			stack;
++			log_stack;
+ 		if (fclose(fp))
+-			stack;
++			log_stack;
+ 	}
+ 
+  out:
+@@ -1739,7 +1739,7 @@
+ 		uint64_t extra_bytes;
+ 
+ 		if (!dev_get_size(dev, &dev_sectors))
+-			stack;
++			log_stack;
+ 
+ 		dev_bytes = dev_sectors * 512;
+ 		extra_bytes = dev_bytes % ONE_MB_IN_BYTES;
+@@ -2875,7 +2875,7 @@
+ 	}
+ 
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 
+ 	if (!_is_backup_file(cmd, back_buf, back_size)) {
+ 		log_error("File does not appear to contain a metadata backup.");
+@@ -2903,9 +2903,9 @@
+ 		fprintf(fp, "%s", text_buf);
+ 
+ 		if (fflush(fp))
+-			stack;
++			log_stack;
+ 		if (fclose(fp))
+-			stack;
++			log_stack;
+ 	}
+ 	ret = 1;
+ out:
+@@ -2915,7 +2915,7 @@
+ 
+ fail_close:
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 	return 0;
+ }
+ 
+@@ -3015,7 +3015,7 @@
+ 	text_buf[text_size++] = 0; /* null terminating byte */
+ 
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 
+ 	if (_is_backup_file(cmd, text_buf, text_size)) {
+ 		char *back_buf = text_buf;
+@@ -3043,7 +3043,7 @@
+ 
+ out:
+ 	if (close(fd))
+-		stack;
++		log_stack;
+ 	return 0;
+ }
+ 
+diff -r a/tools/pvmove.c b/tools/pvmove.c
+--- a/tools/pvmove.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/pvmove.c	2026-10-08 15:56:45.404286535 -0600
+@@ -1048,12 +1048,12 @@
+ 
+ 		if (!is_abort) {
+ 			if (!pp.found_pv) {
+-				stack;
++				log_stack;
+ 				return EINVALID_CMD_LINE;
+ 			}
+ 
+ 			if (pp.setup_result != ECMD_PROCESSED) {
+-				stack;
++				log_stack;
+ 				return pp.setup_result;
+ 			}
+ 		} else {
+diff -r a/tools/pvscan.c b/tools/pvscan.c
+--- a/tools/pvscan.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/pvscan.c	2026-10-08 15:56:45.405239449 -0600
+@@ -75,7 +75,7 @@
+ 
+ 	if (arg_is_set(cmd, uuid_ARG)) {
+ 		if (!id_write_format(&pv->id, uuid, sizeof(uuid))) {
+-			stack;
++			log_stack;
+ 			return ECMD_FAILED;
+ 		}
+ 
+@@ -838,7 +838,7 @@
+ 
+ 		if (!do_all) {
+ 			if (!lvmcache_label_scan(cmd))
+-				stack;
++				log_stack;
+ 		}
+ 
+ 		read_flags |= PROCESS_SKIP_SCAN;
+@@ -1240,7 +1240,7 @@
+ 			} else {
+ 				log_print_pvscan(cmd, "PV %s online, VG %s is complete.", dev_name(dev), vgname);
+ 				if (!str_list_add(cmd->mem, complete_vgnames, dm_pool_strdup(cmd->mem, vgname)))
+-					stack;
++					log_stack;
+ 				vg_complete = 1;
+ 			}
+ 		}
+diff -r a/tools/reporter.c b/tools/reporter.c
+--- a/tools/reporter.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/reporter.c	2026-10-08 15:56:45.405974395 -0600
+@@ -1220,7 +1220,7 @@
+ out:
+ 	if (report_handle) {
+ 		if (report_in_group && !dm_report_group_pop(cmd->cmd_report.report_group))
+-			stack;
++			log_stack;
+ 		dm_report_free(report_handle);
+ 	}
+ 
+@@ -1248,14 +1248,14 @@
+ 	if (orphan) {
+ 		if (((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_PVS])) != ECMD_PROCESSED) ||
+ 		    ((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_PVSEGS])) != ECMD_PROCESSED))
+-			stack;
++			log_stack;
+ 	} else {
+ 		if (((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_VGS])) != ECMD_PROCESSED) ||
+ 		    ((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_PVS])) != ECMD_PROCESSED) ||
+ 		    ((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_LVS])) != ECMD_PROCESSED) ||
+ 		    ((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_PVSEGS])) != ECMD_PROCESSED) ||
+ 		    ((r = _do_report(cmd, handle, args, &args->single_args[REPORT_IDX_FULL_SEGS])) != ECMD_PROCESSED))
+-			stack;
++			log_stack;
+ 	}
+ 
+ 	if (!args->log_only && !dm_report_group_pop(cmd->cmd_report.report_group))
+@@ -1592,7 +1592,7 @@
+ 	return 1;
+ bad:
+ 	if (!dm_report_group_destroy(new_report_group))
+-		stack;
++		log_stack;
+ 	if (tmp_log_rh)
+ 		dm_report_free(tmp_log_rh);
+ 	return 0;
+@@ -1601,7 +1601,7 @@
+ void report_format_destroy(struct cmd_context *cmd)
+ {
+ 	if (!dm_report_group_destroy(cmd->cmd_report.report_group))
+-		stack;
++		log_stack;
+ 	cmd->cmd_report.report_group = NULL;
+ 
+ 	if (cmd->cmd_report.log_rh) {
+diff -r a/tools/toollib.c b/tools/toollib.c
+--- a/tools/toollib.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/toollib.c	2026-10-08 15:56:45.408564188 -0600
+@@ -346,7 +346,7 @@
+ 		ret = process_single_pvseg(cmd, NULL, &_free_pv_segment, handle);
+ 		_update_selection_result(handle, &whole_selected);
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 		if (ret > ret_max)
+ 			ret_max = ret;
+ 	} else {
+@@ -357,7 +357,7 @@
+ 			ret = process_single_pvseg(cmd, vg, pvseg, handle);
+ 			_update_selection_result(handle, &whole_selected);
+ 			if (ret != ECMD_PROCESSED)
+-				stack;
++				log_stack;
+ 			if (ret > ret_max)
+ 				ret_max = ret;
+ 		}
+@@ -385,7 +385,7 @@
+ 		ret = process_single_seg(cmd, seg, handle);
+ 		_update_selection_result(handle, &whole_selected);
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 		if (ret > ret_max)
+ 			ret_max = ret;
+ 	}
+@@ -574,7 +574,7 @@
+ 		vp_new->system_id = vp_def->system_id;
+ 	} else {
+ 		if (!(vp_new->system_id = system_id_from_string(cmd, system_id_arg_str)))
+-			stack;
++			log_stack;
+ 
+ 		if (!vp_new->system_id || !vp_new->system_id[0])
+ 			log_warn("WARNING: A VG without a system ID allows unsafe access from other hosts.");
+@@ -912,7 +912,7 @@
+ 	dm_list_iterate_items(lvl, &vg->lvs) {
+ 		if (sigint_caught()) {
+ 			r = 0;
+-			stack;
++			log_stack;
+ 			break;
+ 		}
+ 
+@@ -920,7 +920,7 @@
+ 		    !(lv_is_cow(lvl->lv) && !lv_is_virtual_origin(origin_from_cow(lvl->lv))) &&
+ 		    !lv_refresh(cmd, lvl->lv)) {
+ 			r = 0;
+-			stack;
++			log_stack;
+ 		}
+ 	}
+ 
+@@ -2355,7 +2355,7 @@
+ 			log_set_report_object_name_and_id(vg_name + sizeof(VG_ORPHANS), NULL);
+ 		} else {
+ 			if (vg_uuid && !id_write_format((const struct id*)vg_uuid, uuid, sizeof(uuid)))
+-				stack;
++				log_stack;
+ 			log_set_report_object_name_and_id(vg_name, (const struct id*)vg_uuid);
+ 		}
+ 
+@@ -2363,7 +2363,7 @@
+ do_lockd:
+ 		memset(&lks, 0, sizeof(lks));
+ 		if (is_lockd && !lockd_vg(cmd, vg_name, NULL, 0, &lks)) {
+-			stack;
++			log_stack;
+ 			ret_max = ECMD_FAILED;
+ 			report_log_ret_code(ret_max);
+ 			continue;
+@@ -2371,7 +2371,7 @@
+ 
+ 		vg = vg_read(cmd, vg_name, vg_uuid, read_flags, &lks, &error_flags, &error_vg);
+ 		if (_ignore_vg(cmd, error_flags, error_vg, vg_name, arg_vgnames, read_flags, &skip, &notfound)) {
+-			stack;
++			log_stack;
+ 			ret_max = ECMD_FAILED;
+ 			report_log_ret_code(ret_max);
+ 			if (error_vg)
+@@ -2403,7 +2403,7 @@
+ 			ret = process_single_vg(cmd, vg_name, vg, handle);
+ 			_update_selection_result(handle, &whole_selected);
+ 			if (ret != ECMD_PROCESSED)
+-				stack;
++				log_stack;
+ 			report_log_ret_code(ret);
+ 			if (ret > ret_max)
+ 				ret_max = ret;
+@@ -2413,7 +2413,7 @@
+ endvg:
+ 		release_vg(vg);
+ 		if (is_lockd && !lockd_vg(cmd, vg_name, "un", 0, &lks))
+-			stack;
++			log_stack;
+ 
+ 		log_set_report_object_name_and_id(NULL, NULL);
+ 	}
+@@ -2472,7 +2472,7 @@
+ 			 */
+ 			if (lvmcache_vg_is_foreign(cmd, vgnl->vg_name, vgnl->vgid)) {
+ 				if (!id_write_format((const struct id*)vgnl->vgid, uuid, sizeof(uuid)))
+-					stack;
++					log_stack;
+ 				dm_list_del(&vgnl->list);
+ 			} else {
+ 				found++;
+@@ -3621,7 +3621,7 @@
+ 		if (handle_supplied)
+ 			_update_selection_result(handle, &whole_selected);
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 		report_log_ret_code(ret);
+ 		if (ret > ret_max)
+ 			ret_max = ret;
+@@ -3674,7 +3674,7 @@
+ 			if (handle_supplied)
+ 				_update_selection_result(handle, &whole_selected);
+ 			if (ret != ECMD_PROCESSED)
+-				stack;
++				log_stack;
+ 			report_log_ret_code(ret);
+ 			if (ret > ret_max)
+ 				ret_max = ret;
+@@ -3814,7 +3814,7 @@
+ 				lv_name++;
+ 			if (!(vgname = extract_vgname(cmd, vgname))) {
+ 				if (ret_max < ECMD_FAILED) {
+-					stack;
++					log_stack;
+ 					ret_max = ECMD_FAILED;
+ 				}
+ 				continue;
+@@ -4038,7 +4038,7 @@
+ 
+ 		uuid[0] = '\0';
+ 		if (vg_uuid && !id_write_format((const struct id*)vg_uuid, uuid, sizeof(uuid)))
+-			stack;
++			log_stack;
+ 
+ 		log_set_report_object_name_and_id(vg_name, (const struct id*)vg_uuid);
+ 
+@@ -4085,7 +4085,7 @@
+ 
+ 		vg = vg_read(cmd, vg_name, vg_uuid, read_flags, &lks, &error_flags, &error_vg);
+ 		if (_ignore_vg(cmd, error_flags, error_vg, vg_name, arg_vgnames, read_flags, &skip, &notfound)) {
+-			stack;
++			log_stack;
+ 			ret_max = ECMD_FAILED;
+ 			report_log_ret_code(ret_max);
+ 			if (error_vg)
+@@ -4109,7 +4109,7 @@
+ 		ret = process_each_lv_in_vg(cmd, vg, &lvnames, tags_arg, 0,
+ 					    handle, check_single_lv, process_single_lv);
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 		report_log_ret_code(ret);
+ 		if (ret > ret_max)
+ 			ret_max = ret;
+@@ -4118,7 +4118,7 @@
+ endvg:
+ 		release_vg(vg);
+ 		if (is_lockd && !lockd_vg(cmd, vg_name, "un", 0, &lks))
+-			stack;
++			log_stack;
+ 		log_set_report_object_name_and_id(NULL, NULL);
+ 	}
+ 	do_report_ret_code = 0;
+@@ -4534,7 +4534,7 @@
+ 
+ 	vg_uuid[0] = '\0';
+ 	if (!id_write_format(&vg->id, vg_uuid, sizeof(vg_uuid)))
+-		stack;
++		log_stack;
+ 
+ 	if (!handle && (!(handle = init_processing_handle(cmd, NULL)))) {
+ 		ret_max = ECMD_FAILED;
+@@ -4624,7 +4624,7 @@
+ 			if (!skip) {
+ 				ret = process_single_pv(cmd, vg, pv, handle);
+ 				if (ret != ECMD_PROCESSED)
+-					stack;
++					log_stack;
+ 				report_log_ret_code(ret);
+ 				if (ret > ret_max)
+ 					ret_max = ret;
+@@ -4721,7 +4721,7 @@
+ 		vg = vg_read(cmd, vg_name, vg_uuid, read_flags, &lks, &error_flags, &error_vg);
+ 		if (_ignore_vg(cmd, error_flags, error_vg, vg_name, NULL, read_flags, &skip, &notfound) ||
+ 		    (!vg && !error_vg)) {
+-			stack;
++			log_stack;
+ 			ret_max = ECMD_FAILED;
+ 			report_log_ret_code(ret_max);
+ 			if (!skip || (!vg && !error_vg))
+@@ -4748,7 +4748,7 @@
+ 					 process_all_pvs, skip, error_flags,
+ 					 handle, process_single_pv);
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 
+ 		report_log_ret_code(ret);
+ 
+@@ -4762,7 +4762,7 @@
+ 			unlock_and_release_vg(cmd, error_vg, vg_name);
+ 		release_vg(vg);
+ 		if (is_lockd && !lockd_vg(cmd, vg_name, "un", 0, &lks))
+-			stack;
++			log_stack;
+ 
+ 		/* Quit early when possible. */
+ 		if (!process_all_pvs && dm_list_empty(arg_tags) && dm_list_empty(arg_devices)) {
+@@ -4886,7 +4886,7 @@
+ 				  &arg_devices, &arg_tags, process_all_pvs,
+ 				  handle, process_single_pv);
+ 	if (ret != ECMD_PROCESSED)
+-		stack;
++		log_stack;
+ 	if (ret > ret_max)
+ 		ret_max = ret;
+ 
+@@ -4949,7 +4949,7 @@
+ 		ret = process_single_pv(cmd, vg, pvl->pv, handle);
+ 		_update_selection_result(handle, &whole_selected);
+ 		if (ret != ECMD_PROCESSED)
+-			stack;
++			log_stack;
+ 		report_log_ret_code(ret);
+ 		if (ret > ret_max)
+ 			ret_max = ret;
+@@ -4986,7 +4986,7 @@
+ 		/* save for removal */
+ 		if (!str_list_add(cmd->mem, &lp->removed_uuids,
+ 				  dm_build_dm_uuid(cmd->mem, UUID_PREFIX, lv->lvid.s, NULL)))
+-			stack;
++			log_stack;
+ 
+ 	return ECMD_PROCESSED;
+ }
+@@ -6293,7 +6293,7 @@
+ 
+ 	/* TODO: when vgcreate uses only existing PVs this doesn't change and can be skipped */
+ 	if (!device_ids_write(cmd))
+-		stack;
++		log_stack;
+ 
+ 	/*
+ 	 * Don't keep devs open excl in bcache because the excl will prevent
+diff -r a/tools/vgchange.c b/tools/vgchange.c
+--- a/tools/vgchange.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/vgchange.c	2026-10-08 15:56:45.410029971 -0600
+@@ -130,7 +130,7 @@
+ 		expected_count++;
+ 
+ 		if (!lv_change_activate(cmd, lv, activate)) {
+-			stack;
++			log_stack;
+ 			r = 0;
+ 			continue;
+ 		}
+@@ -153,7 +153,7 @@
+ 	 */
+ 	if (count && is_change_activating(activate) &&
+ 	    !vgchange_background_polling(cmd, vg)) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+@@ -319,7 +319,7 @@
+ 	}
+ 
+ 	if (!_activate_lvs_in_vg(cmd, vg, activate)) {
+-		stack;
++		log_stack;
+ 		r = 0;
+ 	}
+ 
+@@ -393,7 +393,7 @@
+ 			goto out;
+ 		}
+ 		if (fclose(fp))
+-			stack;
++			log_stack;
+ 	}
+ out:
+ 	/* Print message only if there was not found a missing VG */
+@@ -945,7 +945,7 @@
+ 		return;
+ 
+ 	if (!get_rootvg_dev_uuid(cmd, dm_uuid_out))
+-		stack;
++		log_stack;
+ }
+ 
+ static int _vgchange_autoactivation_setup(struct cmd_context *cmd,
+@@ -1633,7 +1633,7 @@
+ 
+ 	if (arg_is_set(cmd, lockstart_ARG) && vp.lock_start_count) {
+ 		if (!lockd_global(cmd, "un"))
+-			stack;
++			log_stack;
+ 
+ 		if ((cmd->lockopt & LOCKOPT_NOWAIT) || (cmd->lockopt & LOCKOPT_AUTONOWAIT)) {
+ 			log_print_unless_silent("Starting locking.  VG can only be read until locks are ready.");
+diff -r a/tools/vgcreate.c b/tools/vgcreate.c
+--- a/tools/vgcreate.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/vgcreate.c	2026-10-08 15:56:45.410189096 -0600
+@@ -195,7 +195,7 @@
+ 		}
+ 
+ 		if (!lock_global(cmd, "un"))
+-			stack;
++			log_stack;
+ 
+ 		if (cmd->lockopt & LOCKOPT_NOWAIT) {
+ 			log_print_unless_silent("Starting locking.  VG is read-only until locks are ready.");
+diff -r a/tools/vgimportdevices.c b/tools/vgimportdevices.c
+--- a/tools/vgimportdevices.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/vgimportdevices.c	2026-10-08 15:56:45.410747247 -0600
+@@ -74,7 +74,7 @@
+ 
+ 		memcpy(pvid, &pvl->pv->id.uuid, ID_LEN);
+ 		if (!device_id_add(cmd, pv->dev, pvid, idtypestr, NULL, 0)) {
+-			stack;
++			log_stack;
+ 			continue;
+ 		}
+ 		vp->added_devices++;
+diff -r a/tools/vgremove.c b/tools/vgremove.c
+--- a/tools/vgremove.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/vgremove.c	2026-10-08 15:56:45.411046037 -0600
+@@ -65,7 +65,7 @@
+ 
+ 		if ((ret = process_each_lv_in_vg(cmd, vg, NULL, NULL, 1, &void_handle,
+ 						 NULL, (process_single_lv_fn_t)lvremove_single)) != ECMD_PROCESSED) {
+-			stack;
++			log_stack;
+ 			return ret;
+ 		}
+ 	}
+diff -r a/tools/vgrename.c b/tools/vgrename.c
+--- a/tools/vgrename.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/vgrename.c	2026-10-08 15:56:45.411157421 -0600
+@@ -109,7 +109,7 @@
+ 	dev_dir = cmd->dev_dir;
+ 
+ 	if (!lockd_rename_vg_before(cmd, vg)) {
+-		stack;
++		log_stack;
+ 		goto error;
+ 	}
+ 
+@@ -122,7 +122,7 @@
+ 	/* store it on disks */
+ 	log_verbose("Writing out updated volume group");
+ 	if (!vg_write(vg) || !vg_commit(vg)) {
+-		stack;
++		log_stack;
+ 		goto error;
+ 	}
+ 
+@@ -151,7 +151,7 @@
+ 	lockd_rename_vg_final(cmd, vg, 1);
+ 
+ 	if (!backup_remove(cmd, vg_name))
+-		stack;
++		log_stack;
+ 
+ 	unlock_vg(cmd, vg, vp->vg_name_new);
+ 	vp->unlock_new_name = 0;
+diff -r a/tools/vgsplit.c b/tools/vgsplit.c
+--- a/tools/vgsplit.c	2026-09-30 03:19:39.000000000 -0600
++++ b/tools/vgsplit.c	2026-10-08 15:56:45.411479363 -0600
+@@ -296,7 +296,7 @@
+  * Check for any RAID LVs with allocations on PVs of @vg_to.
+  *
+  * If these don't have any allocations on PVs of @vg_from,
+- * move their whole lv stack across to @vg_to including the
++ * move their whole lv log_stack across to @vg_to including the
+  * top-level RAID LV.
+  */
+ static int _move_raids(struct volume_group *vg_from,
+@@ -315,7 +315,7 @@
+ 		if (!lv_is_on_pvs(lv, &vg_to->pvs))
+ 			continue;
+ 
+-		/* If allocations are on PVs of @vg_to -> move RAID LV stack across */
++		/* If allocations are on PVs of @vg_to -> move RAID LV log_stack across */
+ 		if (!_move_one_lv(vg_from, vg_to, lvh, &lvht))
+ 			return_0;
+ 	}
+@@ -668,7 +668,7 @@
+ 	 * First move any required RAID LVs across recursively.
+ 	 * Reject if they get split between VGs.
+ 	 *
+-	 * This moves the whole LV stack across, thus _move_lvs() below
++	 * This moves the whole LV log_stack across, thus _move_lvs() below
+ 	 * ain't hit any of their MetaLVs/DataLVs any more but'll still
+ 	 * work for all other type specific moves following it.
+ 	 */
