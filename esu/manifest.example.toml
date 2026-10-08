@@ -17,7 +17,7 @@ rom = "roms"
 modules_order = ["boot-hal", "thin", "fw-views", "avb-graft"]
 
 # Kernel images live ONLY in cpio /lib, never on the ESP. name/path/params are
-# required. Core and efivarfs load first to resolve identity before scripts.
+# required. Core, efivarfs frontend and EFVS backend load before identity/scripts.
 # Remaining kernel modules initialize before PID1 helpers; GPT resolves and
 # publishes projections after the helpers have created their backend devices.
 # `by-name:<partition>` parameters resolve the unique sysfs PARTNAME/dev_t.
@@ -40,4 +40,9 @@ params = ""
 [[modules]]
 name = "efivarfs"
 path = "lib/efivarfs.ko"
+params = ""
+
+[[modules]]
+name = "efivar_store"
+path = "lib/efivar_store.ko"
 params = "dev=by-name:bdsvars"

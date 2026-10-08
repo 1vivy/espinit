@@ -178,9 +178,14 @@ impl Fixture {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut manifest = "schema_version = 1\nrom = \"roms\"\nmodules_order = []\n".to_owned();
-        for name in ["kernelesp", "thin", "gpt", "efivarfs"] {
+        for name in ["kernelesp", "thin", "gpt", "efivarfs", "efivar_store"] {
+            let params = if name == "efivar_store" {
+                "dev=by-name:bdsvars"
+            } else {
+                ""
+            };
             manifest.push_str(&format!(
-                "[[modules]]\nname = \"{name}\"\npath = \"lib/{name}.ko\"\nparams = \"\"\n"
+                "[[modules]]\nname = \"{name}\"\npath = \"lib/{name}.ko\"\nparams = \"{params}\"\n"
             ));
         }
         fs::write(payload.join("manifest.toml"), manifest).unwrap();
@@ -257,7 +262,7 @@ impl Fixture {
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
-        for name in ["thin", "gpt", "efivarfs"] {
+        for name in ["thin", "gpt", "efivarfs", "efivar_store"] {
             let bytes = named_module_fixture(name);
             fs::write(modules.join(format!("{name}.ko")), &bytes).unwrap();
             let mut receipt = receipt.clone();
@@ -665,6 +670,20 @@ fn missing_manifest_rom_or_module_receipt_never_publishes() {
     let fixture = Fixture::new();
     fs::remove_file(fixture.args.modules_dir.join("kernelesp.ko")).unwrap();
     fixture.reject("required manifest module missing");
+    for name in ["efivarfs", "efivar_store"] {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.args.modules_dir.join(format!("{name}.ko"))).unwrap();
+        fixture.reject("required manifest module missing");
+        let fixture = Fixture::new();
+        fs::remove_file(
+            fixture
+                .args
+                .modules_dir
+                .join(format!("{name}.ko.compat.json")),
+        )
+        .unwrap();
+        fixture.reject("No such file");
+    }
 }
 
 #[test]

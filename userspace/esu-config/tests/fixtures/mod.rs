@@ -23,6 +23,10 @@ params = "debug=0"
 [[modules]]
 name = "efivarfs"
 path = "lib/efivarfs.ko"
+params = ""
+[[modules]]
+name = "efivar_store"
+path = "lib/efivar_store.ko"
 params = "dev=by-name:bdsvars"
 "#;
 

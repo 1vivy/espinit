@@ -48,7 +48,7 @@ class ModuleReport(TypedDict):
     imports: Imports
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = {"kernelesp": ROOT / "kernel", **{name: ROOT / "modules" / name for name in ("thin", "gpt", "efivarfs")}}
+MODULES = {"kernelesp": ROOT / "kernel", **{name: ROOT / "modules" / name for name in ("thin", "gpt", "efivarfs", "efivar_store")}}
 FLAGS = "SMP preempt mod_unload modversions aarch64"
 INPUTS = ("Module.symvers", "System.map", "include/generated/utsrelease.h")
 BRANCH = "android16-6.12"
@@ -197,9 +197,10 @@ def receipt_path(module: PathInput) -> Path:
 
 
 def provenance(output: Path, module: PathInput, identity: Kmi, imports: Imports) -> Provenance:
-    return {"schema_version": 2, "kmi": identity,
-            "kmi_out_inputs": {str(output / name): digest(output / name) for name in INPUTS},
-            "module_sha256": digest(module), "imports": imports}
+    result: Provenance = {"schema_version": 2, "kmi": identity,
+                         "kmi_out_inputs": {str(output / name): digest(output / name) for name in INPUTS},
+                         "module_sha256": digest(module), "imports": imports}
+    return result
 
 
 def verify_payload(output: PathInput, modules: Sequence[PathInput]) -> list[ModuleReport]:
@@ -219,6 +220,22 @@ def verify_payload(output: PathInput, modules: Sequence[PathInput]) -> list[Modu
     return reports
 
 
+def efvs_source(directory: Path) -> Path:
+    """Build only the recorded revision, not an arbitrary checkout or working tree."""
+    revision = (directory / "SOURCE_REVISION").read_text().strip()
+    require(re.fullmatch(r"[0-9a-f]{40}", revision), "efvs: invalid source revision")
+    checkout = directory / ".source"
+    if not checkout.exists():
+        repository = os.environ.get("EFIVAR_STORE_REPO", "https://github.com/1vivy/efivar-store.git")
+        subprocess.run(["/usr/bin/git", "clone", "--no-checkout", repository, str(checkout)], check=True)
+    present = subprocess.run(["/usr/bin/git", "-C", str(checkout), "cat-file", "-e", revision + "^{commit}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if present.returncode != 0:
+        subprocess.run(["/usr/bin/git", "-C", str(checkout), "fetch", "origin", revision], check=True)
+    subprocess.run(["/usr/bin/git", "-C", str(checkout), "checkout", "--detach", revision], check=True)
+    require(subprocess.check_output(["/usr/bin/git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]).strip() == b"", "efvs: source checkout is dirty")
+    return checkout / "linux"
+
+
 def build(args: argparse.Namespace) -> ModuleReport:
     require(len(args.module) == 1 and args.module[0] in MODULES, "build: specify one module name")
     require(args.kmi_src, "build: --kmi-src or KMI_SRC is required")
@@ -230,9 +247,19 @@ def build(args: argparse.Namespace) -> ModuleReport:
     module = directory / (name + ".ko")
     receipt_path(module).unlink(missing_ok=True)
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CONFIG_", "KBUILD_")) and key not in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "KCFLAGS", "KCPPFLAGS", "CFLAGS_MODULE", "LDFLAGS_MODULE")}
-    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(directory), "ARCH=arm64", "LLVM=1", "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1", "CONFIG_KERNELESP=m"]
+    build_directory = efvs_source(directory) if name == "efivar_store" else directory
+    if name == "efivar_store":
+        env["RUSTC_BOOTSTRAP"] = "1"
+        env["RUSTC"] = os.environ.get("EFVS_RUSTC", str(Path.home() / ".rustup/toolchains/1.82.0-x86_64-unknown-linux-gnu/bin/rustc"))
+    llvm = os.environ.get("EFVS_LLVM", "/usr/bin/") if name == "efivar_store" else "1"
+    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(build_directory), "ARCH=arm64", "LLVM=" + llvm, "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1", "CONFIG_KERNELESP=m"]
+    if name == "efivar_store":
+        command.append("RUSTC=" + env["RUSTC"])
     subprocess.run(command + ["clean"], env=env, check=True)
     subprocess.run(command + ["modules", f"-j{args.jobs}"], env=env, check=True)
+    if name == "efivar_store":
+        import shutil
+        shutil.copyfile(build_directory / (name + ".ko"), module)
     imports = verify_module(module, name, output)
     receipt_path(module).write_text(json.dumps(provenance(output, module, identity, imports), indent=2, sort_keys=True) + "\n")
     return {"module": name, "kmi": identity, "imports": imports}

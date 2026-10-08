@@ -8,7 +8,7 @@ Source and host checks are not proof of an enforcing device boot. The Cuttlefish
 
 - `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the saved `/init.esureal`, preserving any existing init wrapper and its `/init.real`.
 - `kernelesp.ko` provides the core UAPI, strict module relocation loader, KernelSU SELinux rules and boot-mode-gated init RC injection. Ownership-checked direct wrappers for `execve`, `execveat` and `setresuid` call their saved originals; they do not compete with KernelSU's `sys_enter` redirect for one rewritten syscall number.
-- `thin.ko` and `gpt.ko` provide thin storage and an in-memory projected partition view. `efivarfs.ko` exposes bdsvars through the standard efivarfs file API.
+- `thin.ko` and `gpt.ko` provide thin storage and an in-memory projected partition view. Pristine upstream `efivarfs.ko` is the filesystem frontend; separate Rust `efivar_store.ko` serves the EFVS checkpoint/log on the bdsvars partition. Firmware initializes a blank partition; Linux never formats or compacts it.
 - `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.esureal`; second-stage init reuses a writable `/debug_ramdisk`, or mounts a parent tmpfs only when the read-only directory is empty, then recreates both child mounts and copies the ESP binaries with stock toybox. A populated read-only parent fails closed instead of hiding content. The core relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
 - Runtime ROM identity is `BootedRom` in bdsvars. `Slot-<id>` supplies the authoritative number, 1 through 5. PID 1 temporarily mounts efivarfs at `/efivars`; the daemon and Boot HAL use `/dev/efivars`. Missing identity (or `direct`) is unmanaged; a managed identity with missing or malformed Slot fails closed. No bootconfig selector or default ROM number substitutes for it.
 - The daemon's only writable persistent state is `/data/adb/esu/log`, created at post-fs-data. Modules, binaries and configuration never come from `/data/adb` or `/metadata/esu`.
@@ -40,7 +40,7 @@ per-ROM newc takeover archive (legacy-LZ4):
   init                         static esuinit, 0755
   init.esureal                 preserved prior init or wrapper, 0755
   esu-build-id                  12 lowercase hex + LF
-  lib/{kernelesp,thin,gpt,efivarfs}.ko
+  lib/{kernelesp,thin,gpt,efivarfs,efivar_store}.ko
 ```
 
 Kernel modules are ramdisk-only. Any `.ko` inside an ESP source payload is rejected by the host packager. esuinit mounts `/debug_ramdisk/esp` without SELinux context options and detaches it before stock init can cover that path. Open loop backing files retain their references. Second-stage init mounts the same device with the same RO/RW mode; `/dev/esp` is a read-only, nosuid/nodev/noexec bind view whose per-mount RO flag does not freeze writable loop backing.
@@ -148,12 +148,31 @@ make -C kernel phone JOBS=13
 make -C modules/thin JOBS=13
 make -C modules/gpt JOBS=13
 make -C modules/efivarfs JOBS=13
+EFIVAR_STORE_REPO=/path/to/efivar-store make -C modules/efivar_store JOBS=4
 python3 scripts/kmi_modules.py verify --kmi-out "$KMI_OUT" \
   --module kernel/kernelesp.ko --module modules/thin/thin.ko \
-  --module modules/gpt/gpt.ko --module modules/efivarfs/efivarfs.ko
+  --module modules/gpt/gpt.ko --module modules/efivarfs/efivarfs.ko \
+  --module modules/efivar_store/efivar_store.ko
 ```
 
 Admission verifies architecture/type, module name, MODVERSIONS CRCs against `Module.symvers`, and non-versioned imports against `System.map`. Schema-2 compatibility receipts bind the module hash and all KMI reference input hashes. Do not repair CRCs, vermagic or receipts by hand. PID 1 and `esud insmod` share the strict runtime loader; unavailable imports fail before insertion.
+
+The backend build checks out only `modules/efivar_store/SOURCE_REVISION` in an
+ignored private clone; `EFIVAR_STORE_REPO` overrides the default public repository
+for local integration. Its schema-2 receipt binds the final module and matching
+KMI inputs. See [frontend provenance](modules/efivarfs/PROVENANCE.md) and
+[backend build/toolchain provenance](modules/efivar_store/PROVENANCE.md).
+The tested recipe pairs upstream rustc 1.82.0 metadata with LLVM 23.1.1 linking
+tools (`EFVS_RUSTC`, `EFVS_LLVM=/usr/bin/` overrides). Android LLVM 19.0.1
+produced invalid linked IR from upstream Rust LLVM 19.1.1 bitcode despite a
+successful link and admission; only the later toolchain passed the production
+loader QEMU test. Exact Android rustc pairing remains unproven.
+
+PID 1 loads `kernelesp`, then the efivarfs frontend, then the EFVS backend with
+the discovered bdsvars `dev=major:minor`, before mounting efivarfs or reading
+BootedRom. A missing partition is unmanaged; a malformed/blank store fails
+closed without writing it. ESP manifests declare both EFI modules, but their
+images remain cpio-only.
 
 Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](payloads/boot-hal/build-android.sh), which builds the vendored generic-bootctl core from its in-tree pin (`ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh`).
 

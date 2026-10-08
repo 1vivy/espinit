@@ -171,11 +171,12 @@ fn load_and_check_payload(
     esp_mount: &str,
     esp_device: (u32, u32),
 ) -> Result<(), Failure> {
-    for entry in manifest
-        .modules
-        .iter()
-        .filter(|entry| !matches!(entry.name.as_str(), "kernelesp" | "efivarfs" | "gpt"))
-    {
+    for entry in manifest.modules.iter().filter(|entry| {
+        !matches!(
+            entry.name.as_str(),
+            "kernelesp" | "efivarfs" | "efivar_store" | "gpt"
+        )
+    }) {
         let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
         if !loader::module_loaded(&entry.name) {
             loader::load_managed_module(&path, entry)?;
@@ -219,15 +220,15 @@ fn load_and_check_payload(
 /// none. These two fixed kernel modules are always supplied by the cpio.
 fn load_identity_modules() -> Result<Option<u64>, Failure> {
     let bdsvars = classify_bdsvars(esu_platform::block::partition_by_name("bdsvars"))?;
-    for name in ["kernelesp", "efivarfs"] {
-        if name == "efivarfs" && bdsvars.is_none() {
+    for name in ["kernelesp", "efivarfs", "efivar_store"] {
+        if name != "kernelesp" && bdsvars.is_none() {
             continue;
         }
         let entry = config::ModuleEntry {
             name: name.into(),
             path: format!("lib/{name}.ko"),
-            params: if name == "efivarfs" {
-                let device = bdsvars.expect("efivarfs requires a discovered bdsvars partition");
+            params: if name == "efivar_store" {
+                let device = bdsvars.expect("backend requires a discovered bdsvars partition");
                 format!(
                     "dev={}:{}",
                     rustix::fs::major(device),

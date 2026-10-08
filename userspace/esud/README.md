@@ -59,7 +59,7 @@ it as a core payload failure; admitted critical modules remain strict.
 `disable` and `remove` skip module validation. Supplied executable architecture,
 path containment and input integrity checks remain mandatory.
 
-`--modules-dir` must contain `kernelesp.ko`, `thin.ko`, `gpt.ko`, `efivarfs.ko` and each corresponding schema-2 `.ko.compat.json`. All four must be declared as `lib/<name>.ko`. The embedded unmodified `scripts/kmi_modules.py verify` runs with Python 3.11+ against explicit `--kmi-out`; stale receipts, absent imports and CRC mismatches fail closed. Compatibility receipts are inputs, not ESP kernel modules. Any `.ko` anywhere inside the payload is rejected.
+`--modules-dir` must contain `kernelesp.ko`, `thin.ko`, `gpt.ko`, `efivarfs.ko`, `efivar_store.ko` and each corresponding schema-2 `.ko.compat.json`. All five must be declared as `lib/<name>.ko`. The frontend and Rust EFVS backend are separate images; PID 1 loads the frontend, then backend with its device parameter, before mounting. The embedded `scripts/kmi_modules.py verify` runs with Python 3.11+ against explicit `--kmi-out`; stale receipts, absent imports and CRC mismatches fail closed. Compatibility receipts are inputs, not ESP kernel modules. Any `.ko` anywhere inside the payload is rejected.
 
 All executables must match the PID-1 ELF architecture. PID 1, BusyBox and early helpers must be static. No supplied executable is run. Inputs must be regular files; symlink ancestors/entries, traversal, FAT case collisions, unsafe names and special inodes fail. The output must not exist, its parent must exist, and it must be outside the source tree. A preexisting `bin/esuinit` must match `--esuinit` byte-for-byte.
 

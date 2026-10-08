@@ -509,7 +509,8 @@ fn verify_modules(
             "lib/kernelesp.ko",
             "lib/thin.ko",
             "lib/gpt.ko",
-            "lib/efivarfs.ko"
+            "lib/efivarfs.ko",
+            "lib/efivar_store.ko"
         ]
         .iter()
         .all(|path| declared.contains(&path.to_string())),

@@ -181,7 +181,7 @@ fn installed_admission_refuses_a_manifest_without_the_identity_pair() {
     assert_eq!(missing.component, "efivarfs");
 
     for (entry, replacement, component) in [
-        ("dev=by-name:bdsvars", "dev=8:16", "efivarfs"),
+        ("dev=by-name:bdsvars", "dev=8:16", "efivar_store"),
         ("lib/kernelesp.ko", "lib/other.ko", "kernelesp"),
     ] {
         let text = fixtures::MANIFEST.replace(entry, replacement);

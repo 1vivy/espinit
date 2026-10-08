@@ -288,14 +288,14 @@ fn rom_validation_order_is_pinned() {
 }
 
 /// C1 identity-bootstrap contract: an installed manifest must carry the fixed
-/// cpio identity pair, because those modules were loaded before the manifest
-/// was read. The pair is admitted by `validate_bootstrap`, so a missing or
-/// altered `kernelesp`/`efivarfs` entry is rejected instead of booting a
-/// manifest that disagrees with the running kernel.
+/// cpio identity modules, loaded before the manifest was read.
+/// The frontend/backend pair is admitted by `validate_bootstrap`, so
+/// altered `kernelesp`/`efivarfs`/`efivar_store` entries are rejected rather than
+/// accepting a manifest that disagrees with the running kernel.
 #[test]
 fn installed_manifest_identity_bootstrap_is_admitted() {
-    // The pair is not part of the schema: a structurally valid manifest without
-    // it parses, and the identity admission is the step that refuses it.
+    // Bootstrap modules are not part of structural schema parsing; identity
+    // admission separately rejects omissions or disagreement with running ops.
     let without = parse_manifest(fixtures::MANIFEST_NO_EFIVARFS).unwrap();
     let missing = validate_bootstrap(&without).unwrap_err();
     assert_eq!(missing.code, "IdentityModuleMissing");
@@ -303,10 +303,28 @@ fn installed_manifest_identity_bootstrap_is_admitted() {
 
     let manifest = parse_manifest(fixtures::MANIFEST).unwrap();
     validate_bootstrap(&manifest).unwrap();
+    let mut without_backend = manifest.clone();
+    without_backend
+        .modules
+        .retain(|entry| entry.name != "efivar_store");
+    let error = validate_bootstrap(&without_backend).unwrap_err();
+    assert_eq!(error.code, "IdentityModuleMissing");
+    assert_eq!(error.component, "efivar_store");
+    let mut altered_frontend = manifest.clone();
+    altered_frontend
+        .modules
+        .iter_mut()
+        .find(|entry| entry.name == "efivarfs")
+        .unwrap()
+        .params = "dev=by-name:bdsvars".into();
+    let error = validate_bootstrap(&altered_frontend).unwrap_err();
+    assert_eq!(error.code, "IdentityModuleMismatch");
+    assert_eq!(error.component, "efivarfs");
 
     for (entry, component) in [
-        ("dev=by-name:bdsvars", "efivarfs"),
+        ("dev=by-name:bdsvars", "efivar_store"),
         ("lib/efivarfs.ko", "efivarfs"),
+        ("lib/efivar_store.ko", "efivar_store"),
         ("lib/kernelesp.ko", "kernelesp"),
     ] {
         let replacement = match entry {
@@ -368,7 +386,7 @@ fn valid_managed_configuration_preserves_order_and_projection() {
             .iter()
             .map(|module| module.name.as_str())
             .collect::<Vec<_>>(),
-        ["kernelesp", "gpt", "efivarfs"]
+        ["kernelesp", "gpt", "efivarfs", "efivar_store"]
     );
     assert_eq!(manifest.modules[1].params, "debug=0");
     assert_eq!(rom.partitions[0].backend, "/dev/block/by-name/system");

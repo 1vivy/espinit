@@ -264,7 +264,11 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), Error> {
 /// Fixed cpio identity modules were loaded before reading an ESP manifest, so a
 /// manifest that disagrees with them can never describe the running boot.
 pub fn validate_bootstrap(manifest: &Manifest) -> Result<(), Error> {
-    for (name, params) in [("kernelesp", ""), ("efivarfs", "dev=by-name:bdsvars")] {
+    for (name, params) in [
+        ("kernelesp", ""),
+        ("efivarfs", ""),
+        ("efivar_store", "dev=by-name:bdsvars"),
+    ] {
         let entry = manifest
             .modules
             .iter()

@@ -9,3 +9,6 @@ AGENTS.md
 __pycache__
 /dist
 *.ko.compat.json
+/.worktrees/
+/modules/efivarfs/vars-patched.c
+/modules/efivar_store/.source/
