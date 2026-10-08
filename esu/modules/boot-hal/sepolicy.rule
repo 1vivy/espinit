@@ -25,8 +25,9 @@ allow esu_bootctl hal_bootctl_hwservice hwservice_manager { add find }
 #
 # The esd device-name tree: the staging logical volumes, the physical partitions
 # the projection hides and the device-mapper control node esud publishes there.
-# `esu_blk_device` is declared by the `ota` module's sepolicy.rule; this module
-# depends on that declaration.
+# `esu_blk_device` is declared by the `ota` module's sepolicy.rule, and this
+# module depends on that declaration. (Statements split on semicolons, so
+# comments here must not contain one.)
 allow esu_bootctl esu_blk_device dir search
 allow esu_bootctl esu_blk_device blk_file { getattr open read write }
 allow esu_bootctl esu_blk_device chr_file { getattr open read write ioctl }
