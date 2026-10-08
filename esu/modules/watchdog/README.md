@@ -44,10 +44,19 @@ step, logging every step to kmsg with the `esu watchdog:` prefix:
    process a `sys.powerctl` request. The restart is a plain restart, never
    `RESTART2 bootloader`, so Surfacer and GBL stay in the boot path; the BCB
    command is what routes the next restart into the one-shot fastboot path.
+   Under AOSP's `androidboot.init_fatal_panic=true` (the lab crash profile) the
+   watchdog writes sysrq `c` first, as esuinit's fatal path does, so a 900e
+   minidump keeps the printk ring.
 
 Every step is best effort: a missing ESP mount, a missing misc partition or a
 failed write is logged and never delays the restart. Failure of the restart
 itself is retried twice more, then reported as a nonzero exit.
+
+Device status (2026-10-08): on an enforcing hang the BCB request and the reset
+worked (`bootonce-bootloader` / `esu:watchdog:boot_completed` read back from misc,
+Surfacer logged and consumed it), but `esu/receipts/watchdog.txt` did not reach
+the ESP; the reason is not known because its kmsg notes were lost with the reset.
+The panic branch was added so the next such failure leaves a 900e dump instead.
 
 ## Scope
 
