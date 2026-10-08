@@ -336,6 +336,11 @@ fn resolve_loop(path: &str) -> io::Result<ResolvedBackend> {
 /// projection requires the loader's read-write ESP mount (only a managed ROM
 /// `>= 2` installs one) and an `O_RDWR` backing file with a read-write loop, so
 /// the ROM's OTA can rewrite the preallocated image for a later boot.
+///
+/// Every call takes its own loop device from loop-control and never reuses
+/// another projection's attachment, so two read-only projections of the same
+/// ESP file (the two letters of one image base, or an image projected twice)
+/// each get their own loop and their own device number and both work.
 fn attach_esp_file(esp_mount: &str, relative: &str, access: Access) -> io::Result<ResolvedBackend> {
     let path = esp_file_path(esp_mount, relative)?;
 

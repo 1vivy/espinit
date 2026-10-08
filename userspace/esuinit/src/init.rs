@@ -13,7 +13,7 @@
 //! hands off before touching managed payload work.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -52,7 +52,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
 
     // Identity must be available even when an unmanaged boot has no ESP payload.
     let bdsvars = load_identity_modules()?;
-    let identity = read_identity(bdsvars.is_some())?;
+    let identity = read_identity(bdsvars.is_some(), &bootconfig)?;
     if state.esp_mount.is_none() {
         state.esp_mount = optional_unmanaged_payload(wait_for_esp(), identity.is_some())?;
     }
@@ -92,7 +92,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
     state.build_id = fs::read_to_string("/esu-build-id")
         .ok()
         .map(|id| id.trim_end().to_owned());
-    let Some((id, rom_number)) = identity else {
+    let Some(identity) = identity else {
         log::info!("No managed efivarfs identity; handing off without projection");
         crate::platform::publish_module_rc(
             &payload_root,
@@ -102,7 +102,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         )?;
         return prepare_handoff(state, &mounts);
     };
-    let rom = read_rom(&payload_root, &manifest, &id, rom_number)?;
+    let rom = read_rom(&payload_root, &manifest, &identity)?;
     config::validate_managed(&manifest, &rom).map_err(Failure::from)?;
 
     if rom.has_writable_esp_file() {
@@ -143,7 +143,7 @@ pub fn run(state: &mut ReceiptState) -> Result<(), Failure> {
         &payload_root,
         &manifest,
         &rom,
-        rom_number,
+        &identity,
         &esp_mount,
         esp_device,
     )?;
@@ -167,7 +167,7 @@ fn load_and_check_payload(
     payload_root: &Path,
     manifest: &Manifest,
     rom: &RomConfig,
-    rom_number: u32,
+    identity: &Identity,
     esp_mount: &str,
     esp_device: (u32, u32),
 ) -> Result<(), Failure> {
@@ -183,8 +183,9 @@ fn load_and_check_payload(
         }
         selfcheck::check_module(&entry.name)?;
     }
+    let esu_stage = identity.esu_stage();
     for id in &manifest.modules_order {
-        scripts::run_module_scripts(payload_root, id, &rom.id, rom_number)?;
+        scripts::run_module_scripts(payload_root, id, &rom.id, identity.number, &esu_stage)?;
     }
     if rom.managed {
         let entry = manifest
@@ -205,12 +206,12 @@ fn load_and_check_payload(
             esp_device,
         )
         .map_err(|detail| Failure::new(Stage::Storage, "EspMountLifecycle", detail))?;
-        resolve_backends(rom, esp_mount)?;
+        resolve_backends(rom, esp_mount, &identity.letters)?;
         let path = loader::resolve_payload_file(payload_root, &entry.path, &entry.name)?;
         if !loader::module_loaded("gpt") {
             loader::load_managed_module(&path, entry)?;
         }
-        apply_projection(rom, rom_number, esp_device)?;
+        apply_projection(rom, identity.number, esp_device)?;
         selfcheck::check_projection_ready("gpt", rom.partition_modes())?;
     }
     Ok(())
@@ -283,7 +284,27 @@ fn optional_unmanaged_payload<T>(
     }
 }
 
-fn read_identity(bdsvars_present: bool) -> Result<Option<(String, u32)>, Failure> {
+/// The managed identity of this boot: the ROM the dispatcher selected, its
+/// runtime number and the letters every OTA rule is derived from.
+#[derive(Debug)]
+pub struct Identity {
+    /// Dispatched ROM id (`BootedRom`).
+    pub id: String,
+    /// Runtime ROM number out of the GBS1 `Slot-<id>` record.
+    pub number: u32,
+    /// Derived letters of the running boot.
+    pub letters: config::Letters,
+}
+
+impl Identity {
+    /// `ESU_STAGE` for the PID-1 module scripts and the helpers they exec.
+    fn esu_stage(&self) -> String {
+        self.letters.esu_stage()
+    }
+}
+
+/// Read efivarfs identity while it is mounted, then unmount it.
+fn read_identity(bdsvars_present: bool, bootconfig: &str) -> Result<Option<Identity>, Failure> {
     if !bdsvars_present {
         return Ok(None);
     }
@@ -299,7 +320,7 @@ fn read_identity(bdsvars_present: bool) -> Result<Option<(String, u32)>, Failure
         "",
     )
     .map_err(|error| Failure::new(Stage::Storage, "EfivarsMountFailed", error.to_string()))?;
-    let result = read_identity_at(Path::new("/efivars"));
+    let result = read_identity_at(Path::new("/efivars"), bootconfig);
     let unmount = rustix::mount::unmount("/efivars", rustix::mount::UnmountFlags::empty())
         .map_err(|error| Failure::new(Stage::Storage, "EfivarsUnmountFailed", error.to_string()));
     let identity = result?;
@@ -307,12 +328,78 @@ fn read_identity(bdsvars_present: bool) -> Result<Option<(String, u32)>, Failure
     Ok(identity)
 }
 
-fn read_identity_at(root: &Path) -> Result<Option<(String, u32)>, Failure> {
+fn read_identity_at(root: &Path, bootconfig: &str) -> Result<Option<Identity>, Failure> {
     let Some(id) = esu_platform::efivars::booted_rom(root).map_err(identity_error)? else {
         return Ok(None);
     };
     let number = esu_platform::efivars::rom_number(root, &id).map_err(identity_error)?;
-    Ok(Some((id, number)))
+    // Every managed ROM derives the letters: `current` is the letter this boot
+    // runs from and the Stage record says whether a staged set exists. A ROM 1
+    // turns neither into a device (`ESU_STAGE` stays empty and no image role is
+    // allowed), and its selected byte is not read because nothing consumes it.
+    let current = booted_letter(bootconfig)?;
+    let state = esu_platform::efivars::stage(root, &id).map_err(stage_error)?;
+    let selected = if number >= 2 {
+        Some(esu_platform::efivars::selected_slot(root, &id).map_err(slot_error)?)
+    } else {
+        None
+    };
+    let letters = config::Letters::derive(current, state, selected, number);
+
+    Ok(Some(Identity {
+        id,
+        number,
+        letters,
+    }))
+}
+
+/// Bootconfig key carrying the letter this boot runs from.
+const SLOT_SUFFIX_KEY: &str = "androidboot.slot_suffix";
+
+/// The letter this boot runs from: exactly one `androidboot.slot_suffix` key in
+/// bootconfig, `_a` for 0 and `_b` for 1. Every letter rule is derived from it,
+/// so a missing, duplicated or unknown suffix is a required-core failure and no
+/// role is ever guessed.
+fn booted_letter(bootconfig: &str) -> Result<u8, Failure> {
+    let mut values = bootconfig.lines().filter_map(|line| {
+        let (name, value) = line.split_once('=').unwrap_or((line, ""));
+        (name.trim() == SLOT_SUFFIX_KEY).then(|| unquote(value.trim()))
+    });
+
+    match (values.next(), values.next()) {
+        (Some("_a"), None) => Ok(0),
+        (Some("_b"), None) => Ok(1),
+        _ => Err(Failure::new(
+            Stage::Configuration,
+            "SlotSuffixMissing",
+            format!("{SLOT_SUFFIX_KEY} must occur exactly once and be _a or _b"),
+        )),
+    }
+}
+
+/// A present but malformed Stage record is a required-core failure: a staged
+/// set, the switch device and `ESU_STAGE` are all derived from it, so it must
+/// never be read as an idle ROM.
+fn stage_error(error: io::Error) -> Failure {
+    let code = if error.kind() == io::ErrorKind::InvalidData {
+        "StageRecordInvalid"
+    } else {
+        "EfivarsUnreadable"
+    };
+
+    Failure::new(Stage::Configuration, code, format!("Stage record: {error}"))
+}
+
+/// A malformed `Slot-<id>` byte 8 is a required-core failure for the ROMs whose
+/// image roles are derived from it.
+fn slot_error(error: io::Error) -> Failure {
+    let code = match error.kind() {
+        io::ErrorKind::NotFound => "RomRecordMissing",
+        io::ErrorKind::InvalidData => "SlotRecordInvalid",
+        _ => "EfivarsUnreadable",
+    };
+
+    Failure::new(Stage::Configuration, code, format!("Slot record: {error}"))
 }
 
 fn identity_error(error: esu_platform::efivars::Error) -> Failure {
@@ -366,13 +453,12 @@ fn read_manifest(payload_root: &Path) -> Result<Manifest, Failure> {
 fn read_rom(
     payload_root: &Path,
     manifest: &Manifest,
-    id: &str,
-    rom_number: u32,
+    identity: &Identity,
 ) -> Result<RomConfig, Failure> {
-    let path = config::rom_path(manifest, id).map_err(Failure::from)?;
+    let path = config::rom_path(manifest, &identity.id).map_err(Failure::from)?;
     let text = read_config_file(payload_root, &path, "RomUnreadable")?;
-    let rom = config::parse_selected_rom(&text, id).map_err(Failure::from)?;
-    config::validate_rom(&rom, rom_number).map_err(Failure::from)?;
+    let rom = config::parse_selected_rom(&text, &identity.id).map_err(Failure::from)?;
+    config::validate_rom(&rom, identity.number).map_err(Failure::from)?;
     Ok(rom)
 }
 
@@ -483,12 +569,16 @@ fn wait_for_esp() -> Result<esp::Mount, Failure> {
 /// writable-ESP-file, and invalid configuration stays immediate fatal, and the
 /// resolved set stays retained on the configuration so every loop guard lives
 /// through APPLY.
-fn resolve_backends(rom: &RomConfig, esp_mount: &str) -> Result<(), Failure> {
+fn resolve_backends(
+    rom: &RomConfig,
+    esp_mount: &str,
+    letters: &config::Letters,
+) -> Result<(), Failure> {
     retry_enumerated(
         "managed backend",
         ENUMERATION_WINDOW,
         ENUMERATION_RETRY,
-        || config::validate_backends(rom, esp_mount).map(|_| ()),
+        || config::validate_backends(rom, esp_mount, *letters).map(|_| ()),
         config::ConfigError::is_pending,
     )
     .map_err(Failure::from)
@@ -900,24 +990,25 @@ mod tests {
         );
         // A successfully discovered varstore may still describe native/direct
         // boot, but a selected managed ROM must never lose its Slot failure.
-        assert!(read_identity_at(&variables).unwrap().is_none());
+        const SLOT_A: &str = "androidboot.slot_suffix=_a\n";
+        assert!(read_identity_at(&variables, SLOT_A).unwrap().is_none());
         efivars::write(&variables, "BootedRom", 7, b"rom2\0").unwrap();
         assert_eq!(
-            read_identity_at(&variables).unwrap_err().error,
+            read_identity_at(&variables, SLOT_A).unwrap_err().error,
             "RomRecordMissing"
         );
         efivars::write(&variables, "Slot-rom2", 7, b"GBS1\0\0\0\0").unwrap();
         assert_eq!(
-            read_identity_at(&variables).unwrap_err().error,
+            read_identity_at(&variables, SLOT_A).unwrap_err().error,
             "RomNumberInvalid"
         );
-        efivars::write(&variables, "Slot-rom2", 7, b"GBS1\x02\0\0\0").unwrap();
-        assert_eq!(
-            read_identity_at(&variables).unwrap(),
-            Some(("rom2".into(), 2))
-        );
+        // GBS1: magic, runtime number and the selected letter.
+        efivars::write(&variables, "Slot-rom2", 7, b"GBS1\x02\0\0\0\0").unwrap();
+        let identity = read_identity_at(&variables, SLOT_A).unwrap().unwrap();
+        assert_eq!((identity.id.as_str(), identity.number), ("rom2", 2));
+        assert_eq!(identity.letters.staged(), None);
         efivars::write(&variables, "BootedRom", 7, b"direct\0").unwrap();
-        assert!(read_identity_at(&variables).unwrap().is_none());
+        assert!(read_identity_at(&variables, SLOT_A).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1064,11 +1155,133 @@ mod tests {
     fn enumeration_retry_succeeds_and_reuses_the_published_set() {
         let rom =
             config::parse_rom("schema_version = 1\nid = \"android-a\"\nmanaged = false\n").unwrap();
+        let letters = config::Letters::derive(0, esu_platform::stage::StageState::None, Some(0), 2);
 
-        resolve_backends(&rom, esp::ESP_MOUNT_POINT).unwrap();
+        resolve_backends(&rom, esp::ESP_MOUNT_POINT, &letters).unwrap();
         // A second resolution reuses the published set instead of re-resolving.
-        config::validate_backends(&rom, esp::ESP_MOUNT_POINT).unwrap();
+        config::validate_backends(&rom, esp::ESP_MOUNT_POINT, letters).unwrap();
         assert!(rom.resolved_backends().is_empty());
+    }
+
+    /// Letter contract: the booted letter is exactly one bootconfig key, and
+    /// every other spelling is a required-core failure — no role may be
+    /// resolved from a guessed slot.
+    #[test]
+    fn booted_letter_is_the_single_exact_slot_suffix() {
+        assert_eq!(booted_letter("androidboot.slot_suffix=_a\n").unwrap(), 0);
+        assert_eq!(
+            booted_letter("androidboot.slot_suffix = \"_b\"\n").unwrap(),
+            1
+        );
+        assert_eq!(
+            booted_letter("androidboot.foo=1\nandroidboot.slot_suffix=_b\n").unwrap(),
+            1
+        );
+
+        for bootconfig in [
+            "",
+            "androidboot.slot_suffix=_c\n",
+            "androidboot.slot_suffix=\n",
+            "androidboot.slot_suffix=_a\nandroidboot.slot_suffix=_a\n",
+            "androidboot.slot_suffix=_a\nandroidboot.slot_suffix=_b\n",
+        ] {
+            let failure = booted_letter(bootconfig).unwrap_err();
+            assert_eq!(failure.stage, Stage::Configuration);
+            assert_eq!(failure.error, "SlotSuffixMissing", "{bootconfig:?}");
+        }
+    }
+
+    /// Identity contract: the Stage record and the booted letter join the ROM
+    /// identity, and neither a malformed record nor a missing suffix is ever
+    /// read as an idle ROM or the other slot.
+    #[test]
+    fn identity_reads_the_stage_record_and_the_booted_letter() {
+        let root = std::env::temp_dir().join(format!("esu-identity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let variable = |name: &str, data: &[u8]| {
+            let mut bytes = 7u32.to_le_bytes().to_vec();
+            bytes.extend_from_slice(data);
+            fs::write(
+                root.join(format!("{name}-{}", esu_platform::efivars::PROJECT_GUID)),
+                bytes,
+            )
+            .unwrap();
+        };
+        variable("BootedRom", b"rom2\0");
+        // GBS1: magic, runtime number, selected letter.
+        variable("Slot-rom2", b"GBS1\x02\x00\x00\x00\x01");
+
+        // An absent Stage record is no transaction at all.
+        let identity = read_identity_at(&root, "androidboot.slot_suffix=_a\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.id, "rom2");
+        assert_eq!(identity.number, 2);
+        assert_eq!(identity.letters.staged(), None);
+        assert_eq!(identity.esu_stage(), "");
+
+        // A staging set of a ROM 2 is exported to the module scripts and their
+        // helpers, addressed to the letter that is not booted.
+        variable(
+            "Stage-rom2",
+            &esu_platform::stage::StageState::Staging.encode(),
+        );
+        let identity = read_identity_at(&root, "androidboot.slot_suffix=_a\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.letters.staged(), Some(1));
+        assert_eq!(identity.esu_stage(), "b:rw");
+
+        // Sealed with the booted letter selected: the same letter is the staged
+        // one and is served read-only.
+        variable(
+            "Stage-rom2",
+            &esu_platform::stage::StageState::Sealed.encode(),
+        );
+        variable("Slot-rom2", b"GBS1\x02\x00\x00\x00\x00");
+        let identity = read_identity_at(&root, "androidboot.slot_suffix=_a\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.letters.staged(), Some(0));
+        assert_eq!(identity.esu_stage(), "a:ro");
+
+        // A malformed Stage record stops the boot.
+        variable("Stage-rom2", b"XXXX\x02\x00\x00\x00");
+        assert_eq!(
+            read_identity_at(&root, "androidboot.slot_suffix=_a\n")
+                .unwrap_err()
+                .error,
+            "StageRecordInvalid"
+        );
+
+        // So does a missing booted letter.
+        variable(
+            "Stage-rom2",
+            &esu_platform::stage::StageState::None.encode(),
+        );
+        assert_eq!(
+            read_identity_at(&root, "").unwrap_err().error,
+            "SlotSuffixMissing"
+        );
+
+        // A ROM 1 identity reads the booted letter and the Stage record, and
+        // never the selected byte: an eight-byte GBS1 record still identifies it.
+        variable("BootedRom", b"rom1\0");
+        variable("Slot-rom1", b"GBS1\x01\x00\x00\x00");
+        fs::remove_file(root.join(format!(
+            "Stage-rom2-{}",
+            esu_platform::efivars::PROJECT_GUID
+        )))
+        .unwrap();
+        let identity = read_identity_at(&root, "androidboot.slot_suffix=_b\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.number, 1);
+        assert_eq!(identity.letters.staged(), None);
+        assert_eq!(identity.esu_stage(), "");
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -98,11 +98,16 @@ pub fn is_recovery() -> bool {
 /// logged and skipped so the remaining modules still run; a critical module's
 /// failure is returned and rejects the handoff. A script that outlives the
 /// deadline is killed and reaped before that decision.
+///
+/// `esu_stage` is the derived `ESU_STAGE` value of this boot, exported next to
+/// `ESU_ROM`/`ESU_ROM_NUMBER` so the module's helpers address the staged letter
+/// exactly as PID 1 resolved it.
 pub fn run_module_scripts(
     payload_root: &Path,
     module: &str,
     rom: &str,
     rom_number: u32,
+    esu_stage: &str,
 ) -> Result<(), Failure> {
     let directory = payload_root.join("modules").join(module);
     let crate::platform::ModulePolicy::Admitted { critical } =
@@ -110,7 +115,7 @@ pub fn run_module_scripts(
     else {
         return Ok(());
     };
-    match run_script(&directory, module, rom, rom_number) {
+    match run_script(&directory, module, rom, rom_number, esu_stage) {
         Ok(()) => Ok(()),
         Err(failure) if critical => Err(failure),
         Err(failure) => {
@@ -125,7 +130,13 @@ pub fn run_module_scripts(
 }
 
 /// Prepare, spawn, and wait for one admitted module's PID1 script.
-fn run_script(directory: &Path, module: &str, rom: &str, rom_number: u32) -> Result<(), Failure> {
+fn run_script(
+    directory: &Path,
+    module: &str,
+    rom: &str,
+    rom_number: u32,
+    esu_stage: &str,
+) -> Result<(), Failure> {
     let script_name = if is_recovery() {
         "pid1-recovery.sh"
     } else {
@@ -194,6 +205,7 @@ fn run_script(directory: &Path, module: &str, rom: &str, rom_number: u32) -> Res
         .env("PATH", bin)
         .env("ESU_ROM", rom)
         .env("ESU_ROM_NUMBER", rom_number.to_string())
+        .env("ESU_STAGE", esu_stage)
         .current_dir(directory)
         .stdin(Stdio::null())
         .spawn()
@@ -349,18 +361,20 @@ mod tests {
         fs::write(directory.join(crate::platform::RECOVERY_OK_MARKER), b"").unwrap();
 
         // An optional module's broken script is skipped.
-        assert!(run_module_scripts(&root, "a", "rom", 1).is_ok());
+        assert!(run_module_scripts(&root, "a", "rom", 1, "").is_ok());
 
         // The same script in a critical module rejects the handoff.
         fs::write(directory.join(crate::platform::CRITICAL_MARKER), b"").unwrap();
         assert_eq!(
-            run_module_scripts(&root, "a", "rom", 1).unwrap_err().error,
+            run_module_scripts(&root, "a", "rom", 1, "")
+                .unwrap_err()
+                .error,
             "ScriptSymlink"
         );
 
         // A deliberate skip wins over the critical marker.
         fs::write(directory.join(crate::platform::DISABLE_MARKER), b"").unwrap();
-        assert!(run_module_scripts(&root, "a", "rom", 1).is_ok());
+        assert!(run_module_scripts(&root, "a", "rom", 1, "").is_ok());
 
         fs::remove_dir_all(&root).unwrap();
     }

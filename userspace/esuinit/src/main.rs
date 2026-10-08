@@ -15,14 +15,15 @@ use esuinit::{handoff, init, receipt};
 /// error. Both fatal paths record the receipt and then reboot and park PID 1;
 /// a classified failure also records the one-shot bootloader request in the
 /// misc BCB, so the next ordinary restart is observable through Surfacer.
-/// On success `/init.esureal` is executed with the original `argv`/`envp`,
-/// preserving PID 1 and `/init` argv[0].
+/// On success the stock `/init` is executed with the original `argv[1..]` and
+/// `envp` and `argv[0] = "/init"`, preserving PID 1 and the init the kernel
+/// would have run.
 ///
 /// # Safety
 /// Called by the kernel as the process entry point.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(_argc: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
+pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
     if !rustix::process::getpid().is_init() {
         // Not the boot init: report the usage error and return instead of
         // rebooting the machine or parking the caller. Kernel logging is not
@@ -40,7 +41,7 @@ pub unsafe extern "C" fn main(_argc: i32, argv: *const *const u8, envp: *const *
         init::fatal_boot_classified(&failure, || receipt::record(&mut state, &failure));
     }
 
-    if let Err(failure) = unsafe { handoff::exec_real_init(argv, envp) } {
+    if let Err(failure) = unsafe { handoff::exec_real_init(argc, argv, envp) } {
         init::fatal_boot_classified(&failure, || receipt::record(&mut state, &failure));
     }
 
