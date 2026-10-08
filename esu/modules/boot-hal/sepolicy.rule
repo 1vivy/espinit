@@ -1,8 +1,19 @@
 type esu_bootctl domain
 typeattribute esu_bootctl hal_bootctl_server
-permissive esu_bootctl
 allow init esu_bootctl process transition
 allow init esu_bootctl process2 nosuid_transition
+allow init esu_bootctl process { rlimitinh siginh }
+dontaudit init esu_bootctl process noatsecure
+allow esu_bootctl esu_bootctl process getsched
+allow esu_bootctl esu_bootctl dir search
+allow esu_bootctl esu_bootctl file { getattr open read }
+allow esu_bootctl esu_bootctl lnk_file read
+allow esu_bootctl esu_bootctl unix_dgram_socket { create connect write }
+allow esu_bootctl binder_device chr_file { open read write ioctl map }
+allowxperm esu_bootctl binder_device chr_file ioctl 0x6200-0x62ff
+allow esu_bootctl servicemanager_prop file { getattr map open read }
+allow esu_bootctl block_device dir search
+allow esu_bootctl misc_block_device blk_file { getattr open read write }
 allow esu_bootctl hal_bootctl_service service_manager { add find }
 allow esu_bootctl hal_bootctl_hwservice hwservice_manager { add find }
 deny hal_bootctl_server hal_bootctl_service service_manager add
@@ -11,3 +22,4 @@ deny hal_bootctl_default hal_bootctl_service service_manager add
 deny hal_bootctl_default hal_bootctl_hwservice hwservice_manager add
 dontaudit hal_bootctl_default hal_bootctl_service service_manager add
 dontaudit hal_bootctl_default hal_bootctl_hwservice hwservice_manager add
+dontaudit mediaserver esu_bootctl dir search

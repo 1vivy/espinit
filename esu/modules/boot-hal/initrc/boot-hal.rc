@@ -6,4 +6,4 @@ service esu.bootctl /debug_ramdisk/esu/bin/esu-bootctl
     critical
 
 on post-fs
-    exec u:r:esu_bootctl:s0 root root -- /debug_ramdisk/esu/bin/esu-bootctl --stop-stock
+    exec u:r:esu:s0 root root -- /debug_ramdisk/esu/bin/esu-bootctl --stop-stock

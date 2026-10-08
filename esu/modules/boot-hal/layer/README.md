@@ -70,20 +70,24 @@ decision and ROM isolation, and the esu AIDL contract has no read-only rollout p
 payload does not use.
 
 **Replacing the stock HAL.** `initrc/boot-hal.rc` runs `esu-bootctl --stop-stock` as an
-`on post-fs` exec: `src/stock.rs` stops every init service whose command carries
-`hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is disabled), so the
-stock HAL never starts at `class_start early_hal`. Init answers control messages while an
+`on post-fs` exec in the platform's `esu` domain: `src/stock.rs` stops every init service
+whose command carries `hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is
+disabled), so the stock HAL never starts at `class_start early_hal`. Reading every
+partition's init scripts and sending `ctl.stop` are platform work; from a confined
+`esu_bootctl` the scan was refused by the device's blanket `dontaudit domain
+file_type:{dir,file}` rules and silently found nothing. Init answers control messages while an
 exec runs, but not while its main thread sits in `mount_all` at `late-fs` with vold waiting
 on IBootControl; a stop issued by the serving process there deadlocked an enforcing boot
 (2026-10-08, 900e dump `20261008T105049Z-900e-2`: servicemanager's `interface_start` for
 IBootControl dropped once a second as "Too many pending control messages"). The service
 itself, `esu.bootctl` (`class early_hal`, `critical`, `seclabel u:r:esu_bootctl:s0`), only
-serves. The
-module's `sepolicy.rule` creates `esu_bootctl` (permissive, in `hal_bootctl_server`, with
-its own `add`/`find`), allows init's nosuid transition from the tmpfs binary, and clears
-`add` on the `hal_bootctl_server` attribute key and the concrete stock domain, because
-kernelesp's `deny` only edits the exact avtab key and AOSP grants `add` through the
-attribute.
+serves. The module's `sepolicy.rule` creates the enforced `esu_bootctl` domain in
+`hal_bootctl_server`: its own `add`/`find`, init's nosuid transition from the tmpfs binary,
+and the per-type grants the compiled policy expanded away from a type created after
+compilation (binder device and binder ioctls, own `/proc` entries, the logd socket,
+`servicemanager.ready`, misc for the VAB mirror). It clears `add` on the
+`hal_bootctl_server` attribute key and the concrete stock domain, because kernelesp's
+`deny` only edits the exact avtab key and AOSP grants `add` through the attribute.
 
 The core additions this consumer needed - `Backend::slot_count`, the default
 `Backend::prepare` hook, `HealthOnSuccess::{ResetToOne, PreserveNonZero}`, slot-index
@@ -179,10 +183,12 @@ partition projection is mandatory before any managed OTA.
 
 Integration must permit project efivarfs reads/writes and existing misc access.
 The HAL uses only an in-process Mutex, not block-device `flock`. On a device the
-service form is proved for a permissive normal ROM1 boot: `esu.bootctl` ran as
-`u:r:esu_bootctl:s0`, registered at 4.01 s, and vold, update_verifier and update_engine
-used it with no client denial (2026-10-08, global permissive boot of payload `076e7e8ee316`). Enforcing, recovery and
-HIDL remain open.
+service form is proved for an enforcing normal ROM1 boot with `esu_bootctl` itself
+enforced (2026-10-08, payload `ef876a4dc2d5`, `20261008T113307Z-phone-loop`): the stop
+exec ran as `u:r:esu:s0` and disabled `vendor.boot-qti` at 2.45 s, `esu.bootctl`
+registered at 2.57 s, vold, update_verifier and update_engine used it, and no denial named
+`esu_bootctl`; AIDL reads and `markBootSuccessful` passed on a kept-up boot
+(`20261008T113504Z-phone-efvs-hal-mark`). Recovery and HIDL remain open.
 
 ## Variable namespace and wire layout
 

@@ -1,12 +1,15 @@
 //! Keep the stock boot HAL from running beside ours.
 //!
-//! The module runs `esu-bootctl --stop-stock` as an `on post-fs` exec, before
-//! `class_start early_hal` (`on late-fs`). It stops every init service whose command carries
-//! the AOSP stock boot-HAL exec label; a not-yet-started service is disabled, so it never
-//! starts. Selection is by SELinux label only: no service names or paths are stored. The
-//! serving process never waits on `ctl.stop`: at `late-fs` init's main thread can sit in
-//! `mount_all` while vold waits on IBootControl, so a stop issued there deadlocks the boot.
-//! The module's `sepolicy.rule` still denies the stock domain the registration as a backstop.
+//! The module runs `esu-bootctl --stop-stock` as an `on post-fs` exec in the `esu` domain,
+//! before `class_start early_hal` (`on late-fs`). It stops every init service whose command
+//! carries the AOSP stock boot-HAL exec label; a not-yet-started service is disabled, so it
+//! never starts. Selection is by SELinux label only: no service names or paths are stored.
+//! Reading every partition's init scripts and sending `ctl.stop` are platform work, so the
+//! confined `esu_bootctl` domain only serves: under an enforcing `esu_bootctl` the scan's
+//! reads were refused by dontaudited rules and found nothing. The serving process never
+//! waits on `ctl.stop`: at `late-fs` init's main thread can sit in `mount_all` while vold
+//! waits on IBootControl, so a stop issued there deadlocks the boot. The module's
+//! `sepolicy.rule` still denies the stock domain the registration as a backstop.
 
 use std::path::Path;
 
@@ -53,7 +56,9 @@ pub fn select(
                 continue;
             };
             for (name, command) in services(&text) {
-                if label_of(Path::new(command)).as_deref() == Some(label) && !names.iter().any(|n| n == name) {
+                if label_of(Path::new(command)).as_deref() == Some(label)
+                    && !names.iter().any(|n| n == name)
+                {
                     names.push(name.to_owned());
                 }
             }
@@ -102,7 +107,8 @@ mod android {
 
     pub fn log(line: &str) {
         if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
-            let _ = writeln!(kmsg, "esu boot-hal: {line}");
+            // One write is one kmsg record; `writeln!` would split prefix and message.
+            let _ = kmsg.write_all(format!("esu boot-hal: {line}\n").as_bytes());
         }
     }
 }
@@ -116,7 +122,10 @@ pub fn stop_stock() {
     }
     for name in names {
         let stopped = android::stop(&name);
-        android::log(&format!("stop stock boot HAL service {name}: {}", if stopped { "ok" } else { "failed" }));
+        android::log(&format!(
+            "stop stock boot HAL service {name}: {}",
+            if stopped { "ok" } else { "failed" }
+        ));
     }
 }
 
@@ -135,7 +144,11 @@ mod tests {
              service other /vendor/bin/other\nservice\nservice lonely\n",
         )
         .unwrap();
-        std::fs::write(root.join("boot.txt"), "service ignored /vendor/bin/hw/boot\n").unwrap();
+        std::fs::write(
+            root.join("boot.txt"),
+            "service ignored /vendor/bin/hw/boot\n",
+        )
+        .unwrap();
         let directory = root.to_str().unwrap();
         let names = select(&[directory, "/nonexistent"], STOCK_LABEL, |path| {
             (path == Path::new("/vendor/bin/hw/boot")).then(|| STOCK_LABEL.to_vec())

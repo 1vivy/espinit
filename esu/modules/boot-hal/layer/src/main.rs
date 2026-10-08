@@ -69,7 +69,10 @@ fn main() {
         return;
     }
     #[cfg(target_os = "android")]
-    if let Err(error) = entry::service().map_err(Into::into).and_then(bootctl_unified::serve) {
+    if let Err(error) = entry::service()
+        .map_err(Into::into)
+        .and_then(bootctl_unified::serve)
+    {
         eprintln!("boot-hal: {error}");
         std::process::exit(1);
     }
