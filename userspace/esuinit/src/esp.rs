@@ -449,6 +449,17 @@ fn create_block_node(name: &str, major: u32, minor: u32) -> Result<String, Strin
     Ok(path)
 }
 
+/// Resolve one physical partition by its kernel `PARTNAME` and create the node
+/// the caller opens. Android's `/dev/block/by-name` links do not exist during
+/// early boot, so sysfs is the only name source; the node is created under the
+/// private device directory exactly like the ESP node.
+pub fn partition_node(name: &str) -> Result<String, String> {
+    let device = esu_platform::block::partition_by_name(name)
+        .map_err(|error| format!("cannot resolve partition {name}: {error}"))?;
+
+    create_block_node(name, rustix::fs::major(device), rustix::fs::minor(device))
+}
+
 /// Mount the discovered ESP read-only at the runtime mount point.
 fn mount_read_only(node: &str) -> Result<(), Failure> {
     fs::create_dir_all(ESP_MOUNT_POINT).map_err(|error| {

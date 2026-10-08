@@ -35,6 +35,10 @@ enum Commands {
         #[command(subcommand)]
         command: Sepolicy,
     },
+    /// Lab-only: restart the device when Android never reports boot completion.
+    Watchdog {
+        seconds: u64,
+    },
     #[command(disable_help_flag = true)]
     Resetprop {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
@@ -91,6 +95,7 @@ pub fn run() -> Result<()> {
             }
             Sepolicy::Check { sepolicy } => crate::sepolicy::check_rule(&sepolicy),
         },
+        Commands::Watchdog { seconds } => crate::watchdog::run(seconds),
         Commands::Resetprop { args } => {
             let mut all = vec!["resetprop".to_owned()];
             all.extend(args);

@@ -34,6 +34,7 @@ mod rom_isolation;
 mod sepolicy;
 #[cfg(target_os = "android")]
 mod utils;
+mod watchdog;
 
 #[allow(nonstandard_style, unused, unsafe_op_in_unsafe_fn)]
 mod ksu_uapi;

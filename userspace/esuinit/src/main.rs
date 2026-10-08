@@ -12,7 +12,9 @@ use esuinit::{handoff, init, receipt};
 /// gets a nonzero exit status immediately, without touching the platform. As
 /// PID 1, any failure stops the handoff, persists a bounded receipt, and enters
 /// the fatal-boot stop path; the real init is never executed after an init
-/// error. Both fatal paths record the receipt and then reboot and park PID 1.
+/// error. Both fatal paths record the receipt and then reboot and park PID 1;
+/// a classified failure also records the one-shot bootloader request in the
+/// misc BCB, so the next ordinary restart is observable through Surfacer.
 /// On success `/init.esureal` is executed with the original `argv`/`envp`,
 /// preserving PID 1 and `/init` argv[0].
 ///
@@ -35,11 +37,11 @@ pub unsafe extern "C" fn main(_argc: i32, argv: *const *const u8, envp: *const *
     let mut state = receipt::ReceiptState::default();
 
     if let Err(failure) = init::run(&mut state) {
-        init::fatal_boot(|| receipt::record(&mut state, &failure));
+        init::fatal_boot_classified(&failure, || receipt::record(&mut state, &failure));
     }
 
     if let Err(failure) = unsafe { handoff::exec_real_init(argv, envp) } {
-        init::fatal_boot(|| receipt::record(&mut state, &failure));
+        init::fatal_boot_classified(&failure, || receipt::record(&mut state, &failure));
     }
 
     init::stop_boot()

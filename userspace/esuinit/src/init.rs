@@ -687,10 +687,76 @@ fn retain_esp(attempt: Result<esp::Mount, Failure>) -> Result<Option<esp::Mount>
     }
 }
 
-/// Persist the classified failure before the generic reboot-and-park stop.
+/// sysfs `PARTNAME` of the partition carrying the AOSP bootloader message.
+const MISC_PARTITION: &str = "misc";
+
+/// Generic fatal stop for a failure that carries no classified [`Failure`]:
+/// the caller persists its evidence, then the device stops. Classified PID-1
+/// failures use [`fatal_boot_classified`] instead, which also records the
+/// one-shot bootloader request.
 pub fn fatal_boot(record: impl FnOnce()) -> ! {
     record();
     stop_boot()
+}
+
+/// Fatal stop of a classified PID-1 failure: request the one-shot bootloader
+/// command through the BCB, persist the receipt, then stop.
+///
+/// The BCB write runs first because it is the only failure mark that survives a
+/// device resetting before or instead of the ESP receipt write, and it routes
+/// the next ordinary restart through Surfacer and GBL, where the failure is
+/// observable without physical access. Both steps are best effort: neither may
+/// block the stop path or panic, and the reboot stays a plain restart, never
+/// `RESTART2 bootloader`, which would skip both.
+pub fn fatal_boot_classified(failure: &Failure, record: impl FnOnce()) -> ! {
+    record_bootloader_request(failure);
+    record();
+    stop_boot()
+}
+
+/// `esu:<stage>:<component>` identifies the failure in the BCB status field.
+fn bootloader_cause(failure: &Failure) -> String {
+    format!(
+        "esu:{}:{}",
+        stage_name(failure.stage),
+        failure.component.as_deref().unwrap_or("init")
+    )
+}
+
+/// Receipt-ABI stage name. Pinned to the `Failure` serialization by
+/// `bootloader_cause_follows_the_receipt_stage_names`.
+const fn stage_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Configuration => "configuration",
+        Stage::Storage => "storage",
+        Stage::ModuleLoad => "module-load",
+        Stage::ModuleCheck => "module-check",
+        Stage::Projection => "projection",
+        Stage::Handoff => "handoff",
+    }
+}
+
+/// Best-effort one-shot bootloader request for a classified failure.
+///
+/// The misc record must be written before Android's `/dev/block/by-name` links
+/// exist, so the partition is resolved through sysfs `PARTNAME` and opened
+/// through a node esu creates. A missing partition, node or device is logged
+/// and never stops the fatal-boot path.
+fn record_bootloader_request(failure: &Failure) {
+    let cause = bootloader_cause(failure);
+
+    let node = match esp::partition_node(MISC_PARTITION) {
+        Ok(node) => node,
+        Err(detail) => {
+            log::error!("cannot record the bootloader request: {detail}");
+            return;
+        }
+    };
+
+    match esu_platform::bcb::request_bootloader(Path::new(&node), &cause) {
+        Ok(()) => log::info!("bootloader request recorded: {cause}"),
+        Err(error) => log::error!("cannot record the bootloader request in {node}: {error}"),
+    }
 }
 
 /// Whether the explicit recovery rescue contract is active.
@@ -1018,5 +1084,50 @@ mod tests {
         );
         assert!(!esp_enumeration_pending(&fatal));
         assert!(retain_esp(Err(fatal)).is_err());
+    }
+
+    /// The BCB cause carries the stage spelling of the failure receipt, so the
+    /// two cannot drift apart silently.
+    #[test]
+    fn bootloader_cause_follows_the_receipt_stage_names() {
+        for (stage, name) in [
+            (Stage::Configuration, "configuration"),
+            (Stage::Storage, "storage"),
+            (Stage::ModuleLoad, "module-load"),
+            (Stage::ModuleCheck, "module-check"),
+            (Stage::Projection, "projection"),
+            (Stage::Handoff, "handoff"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(stage).unwrap(),
+                serde_json::json!(name)
+            );
+            assert_eq!(stage_name(stage), name);
+        }
+
+        let component = Failure::at(Stage::Projection, Some("rom1"), "ProjectionFailed", "boom");
+        assert_eq!(bootloader_cause(&component), "esu:projection:rom1");
+        let bare = Failure::new(Stage::Storage, "EspMount", "boom");
+        assert_eq!(bootloader_cause(&bare), "esu:storage:init");
+    }
+
+    /// The BCB status field is 32 bytes including its NUL, so a realistic
+    /// classified cause must survive the writer intact and leave the rest of
+    /// the record alone.
+    #[test]
+    fn classified_causes_fit_the_bcb_status_field() {
+        let failure = Failure::at(Stage::ModuleCheck, Some("boot-hal"), "ModuleRc", "boom");
+        let cause = bootloader_cause(&failure);
+        assert!(cause.len() < 32, "{cause:?}");
+
+        let temporary = std::env::temp_dir().join(format!("esu-bcb-funnel-{}", std::process::id()));
+        fs::write(&temporary, [0xa5u8; 128]).unwrap();
+        esu_platform::bcb::request_bootloader(&temporary, &cause).unwrap();
+        let mut expected = [0xa5u8; 128];
+        expected[..64].fill(0);
+        expected[..19].copy_from_slice(b"bootonce-bootloader");
+        expected[32..32 + cause.len()].copy_from_slice(cause.as_bytes());
+        assert_eq!(fs::read(&temporary).unwrap(), expected);
+        fs::remove_file(&temporary).unwrap();
     }
 }

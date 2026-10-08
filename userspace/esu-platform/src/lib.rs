@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Shared ESP identity and safe file access.
+pub mod bcb;
 pub mod block;
 pub mod core;
 pub mod efivars;
