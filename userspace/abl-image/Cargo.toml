@@ -1,0 +1,15 @@
+[package]
+name = "abl-image"
+version = "0.1.0"
+edition.workspace = true
+# Ported from the MIT-licensed ablfvextractor crate (same author); see src/lib.rs.
+license = "MIT"
+description = "Bounded ABL partition extraction and AVB signing-fact scanning"
+
+[dependencies]
+lzma-rs = "0.3"
+
+# Host-only anchor-key extractor; not part of any firmware build.
+[[bin]]
+name = "abl-key"
+path = "src/bin/abl-key.rs"

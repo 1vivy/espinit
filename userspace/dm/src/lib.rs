@@ -10,6 +10,13 @@
 //! [`DeviceMapper::message`] adds the `DM_TARGET_MSG` command so a thin-pool
 //! target can be told to `create_thin`/`delete` a device id, which is how
 //! `fw-views` owns the thin ids LVM2 metadata never names.
+//!
+//! [`DeviceMapper::create`] and [`DeviceMapper::reload`] publish one table and
+//! swap one table respectively, which is what the OTA transaction needs: a
+//! per-base switch device is created at PID 1 as an error target and later
+//! reloaded to point at a staging LV, then back at a read-only loop of the ESP
+//! image. Both accept a table that already equals the requested one, so a
+//! re-run of a boot-time helper is idempotent instead of an error.
 
 pub use lvm2_meta::DeviceNumber;
 use std::ffi::CString;
@@ -47,6 +54,7 @@ pub enum MessageError {
 }
 
 const BUFFER_BYTES: usize = 16 * 1024;
+const MAX_TARGETS: usize = 4096;
 const DM_IOCTL_TYPE: u64 = 0xfd;
 const DM_VERSION_CMD: u64 = 0;
 const DM_DEV_CREATE_CMD: u64 = 3;
@@ -55,6 +63,11 @@ const DM_DEV_SUSPEND_CMD: u64 = 6;
 const DM_TABLE_LOAD_CMD: u64 = 9;
 const DM_TABLE_STATUS_CMD: u64 = 12;
 const DM_TARGET_MSG_CMD: u64 = 14;
+/// `DM_TABLE_LOAD` with this flag makes the table read-only.
+const DM_READONLY_FLAG: u32 = 1 << 0;
+/// `DM_DEV_SUSPEND` with this flag suspends; without it, resumes and swaps in
+/// the table loaded since the last resume.
+const DM_SUSPEND_FLAG: u32 = 1 << 1;
 const DM_STATUS_TABLE_FLAG: u32 = 1 << 4;
 const DM_ACTIVE_PRESENT_FLAG: u32 = 1 << 5;
 const DM_BUFFER_FULL_FLAG: u32 = 1 << 8;
@@ -111,6 +124,69 @@ fn align8(value: usize) -> Option<usize> {
 
 fn trim_params(value: &str) -> &str {
     value.trim_end_matches(' ')
+}
+
+/// Whether an existing table already is the requested one. Trailing spaces in
+/// the kernel's params are insignificant, everything else is compared exactly.
+fn same_table(existing: &[Target], requested: &[Target]) -> bool {
+    existing.len() == requested.len()
+        && existing.iter().zip(requested).all(|(left, right)| {
+            left.start == right.start
+                && left.length == right.length
+                && left.kind == right.kind
+                && trim_params(&left.params) == trim_params(&right.params)
+        })
+}
+
+/// Encode a target table into the ioctl buffer after its header and return the
+/// offset one past the last target record.
+///
+/// The layout is the kernel's: one `struct dm_target_spec` per target followed by
+/// its NUL-terminated params, each record padded to eight bytes, with `next`
+/// holding the record's padded size. Nothing else writes into the buffer.
+fn write_table(buffer: &mut [u8], targets: &[Target]) -> Result<usize, String> {
+    let mut offset = size_of::<DmIoctl>();
+    for target in targets {
+        let params = target.params.as_bytes();
+        if target.kind.is_empty()
+            || target.kind.len() >= 16
+            || target.kind.as_bytes().contains(&0)
+            || params.contains(&0)
+        {
+            return Err(format!("invalid table target {:?}", target.kind));
+        }
+        let record_size = align8(
+            size_of::<DmTargetSpec>()
+                .checked_add(params.len() + 1)
+                .ok_or("device-mapper table size overflow")?,
+        )
+        .ok_or("device-mapper table size overflow")?;
+        let end = offset
+            .checked_add(record_size)
+            .filter(|end| *end <= buffer.len())
+            .ok_or("device-mapper table exceeds 16 KiB")?;
+        let mut spec = DmTargetSpec {
+            sector_start: target.start,
+            length: target.length,
+            status: 0,
+            next: record_size as u32,
+            target_type: [0; 16],
+        };
+        spec.target_type[..target.kind.len()].copy_from_slice(target.kind.as_bytes());
+        // SAFETY: `offset` is eight-byte aligned and the checked record fits.
+        unsafe {
+            buffer
+                .as_mut_ptr()
+                .add(offset)
+                .cast::<DmTargetSpec>()
+                .write(spec);
+        }
+        let params_start = offset + size_of::<DmTargetSpec>();
+        buffer[params_start..params_start + params.len()].copy_from_slice(params);
+        buffer[params_start + params.len()] = 0;
+        offset = end;
+    }
+    Ok(offset)
 }
 
 /// Wrap a rejected request as a target-message failure.
@@ -365,58 +441,93 @@ impl DeviceMapper {
         Ok(Some(result))
     }
 
-    fn load(&mut self, name: &str, targets: &[Target]) -> Result<(), String> {
-        if targets.is_empty() || targets.len() > 4096 {
+    /// Encode and load a table without resuming the device: the new table stays
+    /// inactive until the next resume, which is what makes [`Self::reload`] a
+    /// single swap.
+    fn load_table(
+        &mut self,
+        name: &str,
+        targets: &[Target],
+        read_only: bool,
+    ) -> Result<(), String> {
+        if targets.is_empty() || targets.len() > MAX_TARGETS {
             return Err("invalid device-mapper target count".to_owned());
         }
         self.prepare(Some(name))?;
         self.header_mut().target_count = targets.len() as u32;
-        let mut offset = size_of::<DmIoctl>();
-        for target in targets {
-            let params = target.params.as_bytes();
-            if target.kind.is_empty()
-                || target.kind.len() >= 16
-                || target.kind.as_bytes().contains(&0)
-                || params.contains(&0)
-            {
-                return Err(format!("invalid table target for {name}"));
-            }
-            let record_size = align8(
-                size_of::<DmTargetSpec>()
-                    .checked_add(params.len() + 1)
-                    .ok_or("device-mapper table size overflow")?,
-            )
-            .ok_or("device-mapper table size overflow")?;
-            let end = offset
-                .checked_add(record_size)
-                .filter(|end| *end <= BUFFER_BYTES)
-                .ok_or_else(|| format!("device-mapper table for {name} exceeds 16 KiB"))?;
-            let mut spec = DmTargetSpec {
-                sector_start: target.start,
-                length: target.length,
-                status: 0,
-                next: record_size as u32,
-                target_type: [0; 16],
-            };
-            spec.target_type[..target.kind.len()].copy_from_slice(target.kind.as_bytes());
-            // SAFETY: `offset` is eight-byte aligned and the checked record fits.
-            unsafe {
-                self.bytes_mut()
-                    .as_mut_ptr()
-                    .add(offset)
-                    .cast::<DmTargetSpec>()
-                    .write(spec);
-            }
-            let params_start = offset + size_of::<DmTargetSpec>();
-            self.bytes_mut()[params_start..params_start + params.len()].copy_from_slice(params);
-            self.bytes_mut()[params_start + params.len()] = 0;
-            offset = end;
+        if read_only {
+            self.header_mut().flags |= DM_READONLY_FLAG;
         }
+        write_table(self.bytes_mut(), targets).map_err(|error| format!("{name}: {error}"))?;
         self.call(DM_TABLE_LOAD)
-            .map_err(|error| format!("DM_TABLE_LOAD for {name} failed: {error}"))?;
+            .map_err(|error| format!("DM_TABLE_LOAD for {name} failed: {error}"))
+    }
+
+    /// Load a table and resume the device, making it the live one.
+    fn load(&mut self, name: &str, targets: &[Target], read_only: bool) -> Result<(), String> {
+        self.load_table(name, targets, read_only)?;
         self.prepare(Some(name))?;
         self.call(DM_DEV_SUSPEND)
             .map_err(|error| format!("DM resume for {name} failed: {error}"))
+    }
+
+    /// Replace the table of the device `name` and resume it.
+    ///
+    /// The table is loaded first, then the device is suspended and resumed, so
+    /// the swap happens at the resume and the device is never live with a half
+    /// written table. A table that already equals the requested one is left
+    /// alone: reloading it would stall I/O for no change, and the boot-time
+    /// helper is re-run on every boot.
+    pub fn reload(
+        &mut self,
+        name: &str,
+        targets: &[Target],
+        read_only: bool,
+    ) -> Result<(), String> {
+        match self.table_status(name)? {
+            None => return Err(format!("device-mapper device {name} does not exist")),
+            Some(existing) if same_table(&existing, targets) => return Ok(()),
+            Some(_) => {}
+        }
+        self.load_table(name, targets, read_only)?;
+        self.prepare(Some(name))?;
+        self.header_mut().flags = DM_SUSPEND_FLAG;
+        self.call(DM_DEV_SUSPEND)
+            .map_err(|error| format!("DM suspend for {name} failed: {error}"))?;
+        self.prepare(Some(name))?;
+        self.call(DM_DEV_SUSPEND)
+            .map_err(|error| format!("DM resume for {name} failed: {error}"))
+    }
+
+    /// Create the device `name` with the given table.
+    ///
+    /// An existing device whose table is already the requested one is accepted,
+    /// so a re-run of the boot-time helper is idempotent. An existing device with
+    /// a *different* table is an error: changing a live table is [`Self::reload`]'s
+    /// job, and a silent create would hide which of the two happened.
+    pub fn create(
+        &mut self,
+        name: &str,
+        targets: &[Target],
+        read_only: bool,
+    ) -> Result<(), String> {
+        if let Some(existing) = self.table_status(name)? {
+            if same_table(&existing, targets) {
+                return Ok(());
+            }
+            return Err(format!("existing device-mapper table for {name} differs"));
+        }
+        self.prepare(Some(name))?;
+        match self.call(DM_DEV_CREATE) {
+            Ok(()) => self.created.push(name.to_owned()),
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                return Err(format!(
+                    "device-mapper device {name} exists without an active table"
+                ));
+            }
+            Err(error) => return Err(format!("DM_DEV_CREATE for {name} failed: {error}")),
+        }
+        self.load(name, targets, read_only)
     }
 
     /// Resolve one active device-mapper name to its device number through the
@@ -551,14 +662,7 @@ impl Mapper for DeviceMapper {
             })
             .ok_or_else(|| format!("device-mapper size overflow for {name}"))?;
         if let Some(existing) = self.table_status(name)? {
-            if existing.len() != targets.len()
-                || !existing.iter().zip(targets).all(|(left, right)| {
-                    left.start == right.start
-                        && left.length == right.length
-                        && left.kind == right.kind
-                        && trim_params(&left.params) == trim_params(&right.params)
-                })
-            {
+            if !same_table(&existing, targets) {
                 return Err(format!("existing device-mapper table for {name} differs"));
             }
             return Self::lookup(name, expected_sectors);
@@ -574,7 +678,7 @@ impl Mapper for DeviceMapper {
             }
             Err(error) => return Err(format!("DM_DEV_CREATE for {name} failed: {error}")),
         }
-        self.load(name, targets)?;
+        self.load(name, targets, false)?;
         Self::lookup(name, expected_sectors)
     }
 }
@@ -644,5 +748,111 @@ mod tests {
     fn parameter_comparison_ignores_only_trailing_spaces() {
         assert_eq!(trim_params("1:2 128 "), "1:2 128");
         assert_ne!(trim_params("1:2 128"), "1:2  128");
+    }
+
+    #[test]
+    fn flag_bits_match_linux_dm_ioctl_h() {
+        assert_eq!(DM_READONLY_FLAG, 1);
+        assert_eq!(DM_SUSPEND_FLAG, 2);
+        assert_eq!(DM_STATUS_TABLE_FLAG, 1 << 4);
+        assert_eq!(DM_ACTIVE_PRESENT_FLAG, 1 << 5);
+        assert_eq!(DM_BUFFER_FULL_FLAG, 1 << 8);
+    }
+
+    /// A 16 KiB request buffer with the alignment `DeviceMapper` guarantees: the
+    /// kernel writes `struct dm_target_spec` records into it.
+    fn aligned_buffer() -> Vec<u64> {
+        vec![0; BUFFER_BYTES / size_of::<u64>()]
+    }
+
+    /// The byte view of that buffer, exactly as `DeviceMapper::bytes_mut` takes it.
+    fn as_bytes(words: &mut [u64]) -> &mut [u8] {
+        let length = std::mem::size_of_val(words);
+        // SAFETY: `u8` has alignment one and the length is the backing allocation.
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), length) }
+    }
+
+    #[test]
+    fn the_table_is_encoded_as_the_kernel_reads_it() {
+        let targets = [
+            Target {
+                start: 0,
+                length: 2048,
+                kind: "linear".to_owned(),
+                params: "8:1 0".to_owned(),
+            },
+            Target {
+                start: 2048,
+                length: 1,
+                kind: "error".to_owned(),
+                params: String::new(),
+            },
+        ];
+        let mut words = aligned_buffer();
+        let end = write_table(as_bytes(&mut words), &targets).unwrap();
+
+        let start = size_of::<DmIoctl>();
+        let buffer = as_bytes(&mut words);
+        // SAFETY: the records were written at eight-byte aligned offsets of an
+        // eight-byte aligned allocation.
+        let spec = |at: usize| unsafe { &*buffer.as_ptr().add(at).cast::<DmTargetSpec>() };
+        // First record: 40 bytes of spec, 6 bytes of params, padded to 48.
+        let first = spec(start);
+        assert_eq!(first.sector_start, 0);
+        assert_eq!(first.length, 2048);
+        assert_eq!(&first.target_type[..6], b"linear");
+        assert_eq!(first.next, 48);
+        assert_eq!(&buffer[start + 40..start + 47], b"8:1 0\0\0");
+        // Second record: 40 bytes of spec, 1 byte of params, padded to 48.
+        let second = spec(start + 48);
+        assert_eq!(second.sector_start, 2048);
+        assert_eq!(second.length, 1);
+        assert_eq!(&second.target_type[..5], b"error");
+        assert_eq!(second.next, 48);
+        assert_eq!(buffer[start + 88], 0);
+        assert_eq!(end, start + 96);
+        // Nothing beyond the table is touched.
+        assert!(buffer[end..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn unbounded_or_invalid_targets_are_refused() {
+        let mut words = aligned_buffer();
+        let target = |kind: &str, params: &str| Target {
+            start: 0,
+            length: 1,
+            kind: kind.to_owned(),
+            params: params.to_owned(),
+        };
+
+        for target in [
+            target("", "1:0 0"),
+            target("linear", "1\0:0 0"),
+            target(&"k".repeat(16), "1:0 0"),
+            target("linear", &"p".repeat(BUFFER_BYTES)),
+        ] {
+            assert!(write_table(as_bytes(&mut words), &[target]).is_err());
+        }
+
+        // The padded records must fit in the 16 KiB request buffer.
+        let filler = target("linear", &"p".repeat(400));
+        let many = vec![filler; 41];
+        assert!(write_table(as_bytes(&mut words), &many).is_err());
+    }
+
+    #[test]
+    fn an_identical_table_is_recognized_ignoring_trailing_spaces() {
+        let target = |params: &str| Target {
+            start: 0,
+            length: 8,
+            kind: "linear".to_owned(),
+            params: params.to_owned(),
+        };
+        assert!(same_table(&[target("1:0 0 ")], &[target("1:0 0")]));
+        assert!(!same_table(&[target("1:0 0")], &[target("1:0 1")]));
+        assert!(!same_table(
+            &[target("1:0 0")],
+            &[target("1:0 0"), target("1:0 0")]
+        ));
     }
 }

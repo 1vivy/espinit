@@ -2,6 +2,7 @@
 //! Project bdsvars through efivarfs. Files contain four little-endian attribute
 //! bytes followed by the variable payload; writes must be a single operation.
 
+use crate::stage::StageState;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -137,6 +138,67 @@ pub fn booted_rom(root: &Path) -> Result<Option<String>> {
         .filter(|id| safe_component(id, 59))
         .ok_or(Error::BootedRomInvalid)?;
     Ok((id != "direct").then(|| id.to_owned()))
+}
+
+/// Reject a ROM id that cannot name a variable. The bound matches
+/// [`booted_rom`]'s, so every id the dispatcher can produce is accepted here and
+/// nothing else is.
+fn check_id(id: &str) -> io::Result<()> {
+    if !safe_component(id, 59) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid efivar ROM id",
+        ));
+    }
+    Ok(())
+}
+
+/// Read the OTA transaction record of a managed ROM. An absent variable is
+/// [`StageState::None`]; a present record with wrong attributes, length, magic
+/// or reserved bytes is `InvalidData` and never a silent `None`.
+///
+/// Project bdsvars are marked removable by the `efivarfs` project-GUID patch,
+/// which is what makes the shared [`write`] path usable for them: no immutable
+/// flag has to be cleared before a write, exactly as for `Slot-<id>`.
+pub fn stage(root: &Path, id: &str) -> io::Result<StageState> {
+    check_id(id)?;
+    let record = read(root, &format!("Stage-{id}"))?;
+    let Some((attributes, data)) = record else {
+        return Ok(StageState::None);
+    };
+    if attributes != ATTRIBUTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Stage record"));
+    }
+    StageState::decode(&data)
+}
+
+/// Replace the OTA transaction record of a managed ROM. Like every other
+/// project variable this is one write syscall containing the attribute prefix
+/// followed by the 8-byte record.
+pub fn write_stage(root: &Path, id: &str, state: StageState) -> io::Result<()> {
+    check_id(id)?;
+    write(root, &format!("Stage-{id}"), ATTRIBUTES, &state.encode())
+}
+
+/// The selected HLOS slot of a managed ROM: byte 8 of the already-written GBS1
+/// `Slot-<id>` record. The record itself stays the authority for the number and
+/// the per-slot health fields; this reads one byte out of it.
+pub fn selected_slot(root: &Path, id: &str) -> io::Result<u8> {
+    check_id(id)?;
+    let record = read(root, &format!("Slot-{id}"))?;
+    let Some((attributes, data)) = record else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Slot record missing",
+        ));
+    };
+    if attributes != ATTRIBUTES || data.len() < 9 || &data[..4] != b"GBS1" || data[8] > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Slot record invalid",
+        ));
+    }
+    Ok(data[8])
 }
 
 /// Read a managed ROM's GBS1 record. The number is payload bytes 4..8, hence

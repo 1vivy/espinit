@@ -3,6 +3,7 @@
 //! efivarfs mount, four attribute bytes then the variable payload.
 
 use esu_platform::efivars::{self, Error, MAX_ROM_NUMBER, PROJECT_GUID};
+use esu_platform::stage::StageState;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,17 @@ impl Vars {
     fn slot(&self, id: &str, attributes: u32, magic: &[u8], number: u32) {
         let mut payload = magic.to_vec();
         payload.extend_from_slice(&number.to_le_bytes());
+        self.put(&format!("Slot-{id}"), attributes, &payload);
+    }
+
+    /// A complete 24-byte GBS1 record, byte 8 being the selected slot.
+    fn gbs1(&self, id: &str, attributes: u32, selected: u8) {
+        let mut payload = b"GBS1".to_vec();
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.push(selected);
+        payload.push(0xff);
+        payload.extend_from_slice(&[0; 14]);
+        assert_eq!(payload.len(), 24);
         self.put(&format!("Slot-{id}"), attributes, &payload);
     }
 
@@ -261,4 +273,126 @@ fn transient_io_failures_are_not_absent_variables() {
         efivars::booted_rom(vars.root()),
         Err(Error::Io(error)) if error.kind() != io::ErrorKind::NotFound
     ));
+}
+
+#[test]
+fn absent_stage_record_is_none_and_a_write_is_one_record() {
+    let vars = Vars::new();
+    assert_eq!(
+        efivars::stage(vars.root(), "rom2").unwrap(),
+        StageState::None
+    );
+
+    efivars::write_stage(vars.root(), "rom2", StageState::Sealed).unwrap();
+    // On disk: four attribute bytes, then `GBT1`, the state, three zero bytes.
+    assert_eq!(
+        vars.bytes("Stage-rom2"),
+        b"\x07\0\0\0GBT1\x02\0\0\0".as_slice()
+    );
+    assert_eq!(
+        efivars::stage(vars.root(), "rom2").unwrap(),
+        StageState::Sealed
+    );
+
+    for state in [StageState::Staging, StageState::Promote, StageState::None] {
+        efivars::write_stage(vars.root(), "rom2", state).unwrap();
+        assert_eq!(efivars::stage(vars.root(), "rom2").unwrap(), state);
+        assert_eq!(
+            efivars::read(vars.root(), "Stage-rom2").unwrap().unwrap().0,
+            7
+        );
+    }
+}
+
+#[test]
+fn malformed_stage_records_are_invalid_data() {
+    let vars = Vars::new();
+    for (payload, attributes) in [
+        (b"GBT1\x00\x00\x00".as_slice(), 7),
+        (b"GBT1\x00\x00\x00\x00\x00".as_slice(), 7),
+        (b"GBT1\x04\x00\x00\x00".as_slice(), 7),
+        (b"GBT1\x00\x00\x00\x01".as_slice(), 7),
+        (b"GBT0\x00\x00\x00\x00".as_slice(), 7),
+        (b"GBS1\x00\x00\x00\x00".as_slice(), 7),
+        (b"GBT1\x02\x00\x00\x00".as_slice(), 6),
+        (b"GBT1\x02\x00\x00\x00".as_slice(), 0x8000_0007),
+    ] {
+        vars.put("Stage-rom2", attributes, payload);
+        let error = efivars::stage(vars.root(), "rom2").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{payload:?}");
+        assert_eq!(error.to_string(), "Stage record");
+    }
+
+    // A truncated attribute header is a filesystem-shaped failure, not a state.
+    vars.raw("Stage-rom2", &[7, 0, 0]);
+    assert_eq!(
+        efivars::stage(vars.root(), "rom2").unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+
+    for id in ["", ".", "..", "rom2/x", "rom2\0"] {
+        assert_eq!(
+            efivars::stage(vars.root(), id).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "{id:?}"
+        );
+        assert_eq!(
+            efivars::write_stage(vars.root(), id, StageState::Staging)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
+            "{id:?}"
+        );
+        assert_eq!(
+            efivars::selected_slot(vars.root(), id).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "{id:?}"
+        );
+    }
+}
+
+#[test]
+fn selected_slot_is_gbs1_byte_eight() {
+    let vars = Vars::new();
+    for selected in [0, 1] {
+        vars.gbs1("rom2", 7, selected);
+        assert_eq!(
+            efivars::selected_slot(vars.root(), "rom2").unwrap(),
+            selected
+        );
+    }
+
+    // Payload byte 8, hence on-disk byte 12 after the attribute header.
+    vars.gbs1("rom2", 7, 1);
+    let bytes = vars.bytes("Slot-rom2");
+    assert_eq!(bytes.len(), 28);
+    assert_eq!(&bytes[4..8], b"GBS1");
+    assert_eq!(bytes[12], 1);
+
+    // A shorter GBS1 prefix still carries the byte; only the magic and the
+    // value range are required.
+    vars.put("Slot-rom3", 7, b"GBS1\x01\0\0\0\0");
+    assert_eq!(efivars::selected_slot(vars.root(), "rom3").unwrap(), 0);
+}
+
+#[test]
+fn missing_and_invalid_slot_records_are_distinct() {
+    let vars = Vars::new();
+    assert_eq!(
+        efivars::selected_slot(vars.root(), "rom2")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+
+    for (payload, attributes) in [
+        (b"GBS1\x01\0\0\0\x02".as_slice(), 7),
+        (b"GBS0\x01\0\0\0\x01".as_slice(), 7),
+        (b"GBS1".as_slice(), 7),
+        (b"GBS1\x01\0\0\0\x01".as_slice(), 6),
+    ] {
+        vars.put("Slot-rom2", attributes, payload);
+        let error = efivars::selected_slot(vars.root(), "rom2").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{payload:?}");
+    }
 }

@@ -4,6 +4,7 @@ pub mod bcb;
 pub mod block;
 pub mod core;
 pub mod efivars;
+pub mod stage;
 
 use anyhow::{Context, Result, bail, ensure};
 use std::ffi::CString;

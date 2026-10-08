@@ -10,6 +10,8 @@ members = [
     "userspace/avb-graft-cli",
     "userspace/esu-platform",
     "userspace/esu-config",
+    "userspace/ota-core",
+    "userspace/abl-image",
 ]
 default-members = [
     "userspace/esud",
@@ -21,6 +23,8 @@ default-members = [
     "userspace/avb-graft",
     "userspace/avb-graft-cli",
     "userspace/esu-config",
+    "userspace/ota-core",
+    "userspace/abl-image",
 ]
 resolver = "3"
 exclude = ["esu/modules/boot-hal/layer", "esu/modules/boot-hal/generic-bootctl"]
