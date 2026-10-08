@@ -69,11 +69,16 @@ decision and ROM isolation, and the esu AIDL contract has no read-only rollout p
 `persist.generic_bootctl.rw` belongs to the generic standalone module, which this
 payload does not use.
 
-**Replacing the stock HAL.** `initrc/boot-hal.rc` starts `esu.bootctl` (`class
-early_hal`, `critical`, `seclabel u:r:esu_bootctl:s0`) with the stock HAL in the same
-`class_start`. Before registering, `src/stock.rs` stops every init service whose command
-carries `hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is disabled, a
-running one is killed, so a stock registration made in that window dies with it). The
+**Replacing the stock HAL.** `initrc/boot-hal.rc` runs `esu-bootctl --stop-stock` as an
+`on post-fs` exec: `src/stock.rs` stops every init service whose command carries
+`hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is disabled), so the
+stock HAL never starts at `class_start early_hal`. Init answers control messages while an
+exec runs, but not while its main thread sits in `mount_all` at `late-fs` with vold waiting
+on IBootControl; a stop issued by the serving process there deadlocked an enforcing boot
+(2026-10-08, 900e dump `20261008T105049Z-900e-2`: servicemanager's `interface_start` for
+IBootControl dropped once a second as "Too many pending control messages"). The service
+itself, `esu.bootctl` (`class early_hal`, `critical`, `seclabel u:r:esu_bootctl:s0`), only
+serves. The
 module's `sepolicy.rule` creates `esu_bootctl` (permissive, in `hal_bootctl_server`, with
 its own `add`/`find`), allows init's nosuid transition from the tmpfs binary, and clears
 `add` on the `hal_bootctl_server` attribute key and the concrete stock domain, because

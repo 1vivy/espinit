@@ -1,10 +1,12 @@
 //! Keep the stock boot HAL from running beside ours.
 //!
-//! `esu.bootctl` starts in `class early_hal` (`on late-fs`) together with the stock boot
-//! HAL. Before serving, it stops every init service whose command carries the AOSP stock
-//! boot-HAL exec label. Selection is by SELinux label only: no service names or paths are
-//! stored. The module's `sepolicy.rule` already denies the stock domain the registration, so
-//! the stock process cannot take the name in the moment before it is stopped.
+//! The module runs `esu-bootctl --stop-stock` as an `on post-fs` exec, before
+//! `class_start early_hal` (`on late-fs`). It stops every init service whose command carries
+//! the AOSP stock boot-HAL exec label; a not-yet-started service is disabled, so it never
+//! starts. Selection is by SELinux label only: no service names or paths are stored. The
+//! serving process never waits on `ctl.stop`: at `late-fs` init's main thread can sit in
+//! `mount_all` while vold waits on IBootControl, so a stop issued there deadlocks the boot.
+//! The module's `sepolicy.rule` still denies the stock domain the registration as a backstop.
 
 use std::path::Path;
 

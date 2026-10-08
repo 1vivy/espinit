@@ -59,8 +59,15 @@ mod entry {
 }
 
 fn main() {
+    // `--stop-stock` is the module's `on post-fs` exec: it disables the stock boot HAL
+    // before `class_start early_hal`. Init answers control messages while an exec runs,
+    // but not while its main thread sits in `mount_all` at `late-fs` (where vold waits on
+    // IBootControl), so the serving process must never wait on `ctl.stop` itself.
     #[cfg(target_os = "android")]
-    gobbl_boot_hal::stock::stop_stock();
+    if std::env::args().nth(1).as_deref() == Some("--stop-stock") {
+        gobbl_boot_hal::stock::stop_stock();
+        return;
+    }
     #[cfg(target_os = "android")]
     if let Err(error) = entry::service().map_err(Into::into).and_then(bootctl_unified::serve) {
         eprintln!("boot-hal: {error}");
