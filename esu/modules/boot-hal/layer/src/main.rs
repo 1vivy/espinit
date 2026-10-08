@@ -4,10 +4,12 @@
 #[cfg(target_os = "android")]
 mod entry {
     use generic_bootctl_core::Service;
+    use gobbl_boot_hal::android::Android;
     use gobbl_boot_hal::backend::EsuBackend;
     use std::ffi::{CStr, c_char};
     use std::io;
     use std::path::Path;
+    use std::sync::Arc;
 
     unsafe extern "C" {
         fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
@@ -34,10 +36,12 @@ mod entry {
             "_b" => 1,
             _ => return Err(io::Error::other("invalid ro.boot.slot_suffix")),
         };
+        let root = Path::new("/dev/efivars");
         let mut backend = EsuBackend::open(
-            Path::new("/dev/efivars"),
+            root,
             Path::new("/dev/block/by-name/misc"),
             current,
+            Arc::new(Android::new(root)),
         );
         // Best effort: storage failures never gate registration, and the first
         // state-dependent transaction retries the same reconciliation.

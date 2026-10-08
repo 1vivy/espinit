@@ -1,13 +1,133 @@
 //! Host behaviour tests for the esu records, the misc mirror, and the shared
 //! generic-bootctl service that now drives them.
 use esu_platform::efivars::{self, PROJECT_GUID};
+use esu_platform::stage::StageState;
 use generic_bootctl_core::{
     Backend, COMMAND_FAILED, INVALID_SLOT, Merge, MergeStatus, Reply, Service, Slot,
 };
 use gobbl_boot_hal::backend::EsuBackend;
+use gobbl_boot_hal::txn::{Class, Env, Rom};
 use gobbl_boot_hal::wire::{Gbm1, Gbs1, NO_PENDING, VAB_OFFSET};
+use ota_core::Kmi;
+use std::collections::BTreeMap;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
+/// An Android boot image v4 with one uncompressed kernel block carrying a KMI
+/// banner: the transaction reads the target's kernel identity out of it.
+fn boot_image() -> Vec<u8> {
+    let mut kernel = b"plain kernel bytes".to_vec();
+    kernel.extend_from_slice(b"Linux version 6.12.23-android16-6-g1a2b3c4d (x) #1 SMP");
+    kernel.extend_from_slice(&[0u8; 64]);
+
+    let mut image = vec![0u8; 4096];
+    image[..8].copy_from_slice(b"ANDROID!");
+    image[8..12].copy_from_slice(&(kernel.len() as u32).to_le_bytes());
+    image[20..24].copy_from_slice(&1584u32.to_le_bytes());
+    image[40..44].copy_from_slice(&4u32.to_le_bytes());
+    image.extend_from_slice(&kernel);
+    image.resize(4096 + kernel.len().next_multiple_of(4096), 0);
+    image
+}
+
+/// The transaction's platform for these record tests: the payload tree and the
+/// storage classes always succeed and the stage record is kept in memory. The
+/// transaction's own behaviour is covered by `txn.rs`'s tests.
+#[derive(Default)]
+struct TestEnv {
+    stage: AtomicU8,
+}
+
+impl TestEnv {
+    fn state(&self) -> StageState {
+        match self.stage.load(Ordering::Relaxed) {
+            1 => StageState::Staging,
+            2 => StageState::Sealed,
+            3 => StageState::Promote,
+            _ => StageState::None,
+        }
+    }
+}
+
+impl Env for TestEnv {
+    fn stage(&self, _id: &str) -> io::Result<StageState> {
+        Ok(self.state())
+    }
+
+    fn write_stage(&self, _id: &str, state: StageState) -> io::Result<()> {
+        self.stage.store(state as u8, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn selected(&self, _id: &str) -> io::Result<u8> {
+        Ok(0)
+    }
+
+    fn payload_file(&self, relative: &str) -> anyhow::Result<Vec<u8>> {
+        Ok(match relative {
+            "bin/esuinit" => b"\x7fELF esuinit".to_vec(),
+            "build-id" => b"0123456789ab\n".to_vec(),
+            other => anyhow::bail!("unexpected payload file {other}"),
+        })
+    }
+
+    fn modules(&self, _kmi: &Kmi) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+        Ok(BTreeMap::from([(
+            "lib/kernelesp.ko".to_owned(),
+            b"\x7fELF module".to_vec(),
+        )]))
+    }
+
+    fn write_stage_payload(&self, _id: &str, _bytes: &[u8]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn remove_stage_payload(&self, _id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn commit_payload(&self, _id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn deny(&self, _reason: &str) {}
+
+    fn detach(&self, job: Box<dyn FnOnce() + Send + 'static>) {
+        job();
+    }
+
+    fn class(&self, _rom: &Rom) -> anyhow::Result<Box<dyn Class>> {
+        Ok(Box::new(NoopClass))
+    }
+}
+
+/// A class whose images are the synthetic boot image and whose staging,
+/// teardown and promote are no-ops.
+struct NoopClass;
+
+impl Class for NoopClass {
+    fn read_target_image(&self, _base: &str) -> anyhow::Result<Vec<u8>> {
+        Ok(boot_image())
+    }
+
+    fn read_current_image(&self, _base: &str) -> anyhow::Result<Vec<u8>> {
+        Ok(boot_image())
+    }
+
+    fn prepare(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn teardown(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn promote(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
@@ -43,7 +163,12 @@ impl Fixture {
         .unwrap();
     }
     fn backend(&self, current: u8) -> EsuBackend {
-        EsuBackend::open(&self.root, &self.misc, current)
+        EsuBackend::open(
+            &self.root,
+            &self.misc,
+            current,
+            Arc::new(TestEnv::default()),
+        )
     }
     /// Production constructs the same service with an always-writable gate.
     fn service(&self, current: u8) -> Service {
@@ -86,6 +211,7 @@ fn missing_merge_defaults_but_missing_slot_cannot_invent_rom_number() {
         Path::new("/nonexistent/efivars"),
         Path::new("/nonexistent/misc"),
         1,
+        Arc::new(TestEnv::default()),
     );
     assert!(absent.read_state().is_err());
     assert!(absent.prepare().is_err());

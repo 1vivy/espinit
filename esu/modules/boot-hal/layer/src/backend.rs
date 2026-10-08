@@ -5,6 +5,14 @@
 //! 24/8-byte project records, the 64-byte misc mirror at 32 KiB and the
 //! retry-on-next-operation behaviour. Slot health, AIDL semantics and the
 //! AIDL transport belong to the vendored shared crates.
+//!
+//! The same mutations also drive the OTA transaction ([`crate::txn`]): a
+//! `SetUnbootable` of the letter the update writes creates the staging set, a
+//! `SetActive` seals the takeover payload, and a successful boot of the staged
+//! letter promotes it. The transaction runs before the record write, so a
+//! refused update returns `COMMAND_FAILED` with the `Slot-<id>` record still
+//! describing the letter this boot runs.
+use crate::txn::{Env, RomId, Txn};
 use crate::wire::{Gbm1, Gbs1, VAB_OFFSET, invalid};
 use esu_platform::efivars;
 use generic_bootctl_core::{Backend, HealthOnSuccess, Merge, MergeStatus, Operation, Slot, State};
@@ -12,12 +20,15 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const ATTRIBUTES: u32 = 7;
 
 /// Variable names resolved from the booted catalogue id once and reused.
 #[derive(Clone)]
 struct Names {
+    /// Catalogue id, which names every variable and path of this ROM.
+    id: String,
     slot: String,
     merge: String,
 }
@@ -28,6 +39,11 @@ pub struct EsuBackend {
     root: PathBuf,
     misc: PathBuf,
     current: u8,
+    /// The transaction's outside world: the records, the payload tree and the
+    /// storage classes.
+    env: Arc<dyn Env>,
+    /// The OTA transaction state machine of this serving process.
+    txn: Txn,
     names: Option<Names>,
     record: Option<Gbs1>,
     mirrored: bool,
@@ -36,11 +52,13 @@ pub struct EsuBackend {
 impl EsuBackend {
     /// Never opens devices: unavailable storage must not gate Binder registration,
     /// and every storage-dependent operation reports failure on its own.
-    pub fn open(root: &Path, misc: &Path, current: u8) -> Self {
+    pub fn open(root: &Path, misc: &Path, current: u8, env: Arc<dyn Env>) -> Self {
         Self {
             root: root.to_owned(),
             misc: misc.to_owned(),
             current,
+            env,
+            txn: Txn::new(current),
             names: None,
             record: None,
             mirrored: false,
@@ -65,8 +83,17 @@ impl EsuBackend {
     }
 
     fn reconcile_inner(&mut self) -> io::Result<()> {
-        self.read_record()?;
+        let record = self.read_record()?;
         let merge = self.read_merge_raw()?;
+        let id = self.names()?.id;
+        let rom = RomId {
+            id,
+            number: record.rom_number,
+        };
+        // The boot's staging posture and the resume rules, once per process.
+        self.txn
+            .start(&self.env, &rom, &record, status_of(merge)?)
+            .map_err(transaction)?;
         self.mirror(merge)
     }
 
@@ -80,6 +107,7 @@ impl EsuBackend {
             .map_err(|error| invalid(&format!("BootedRom: {error}")))?
             .ok_or_else(|| invalid("unmanaged booted ROM"))?;
         let names = Names {
+            id: id.clone(),
             slot: format!("Slot-{id}"),
             merge: format!("MergeStatus-{id}"),
         };
@@ -151,6 +179,19 @@ impl EsuBackend {
             .try_into()
             .map_err(|_| invalid("slot count changed"))?;
         let next = Gbs1 { slots, ..record }.with_operation(operation)?;
+        let merge = status_of(self.read_merge_raw()?)?;
+
+        // The transaction first: a refused update must leave the record
+        // untouched, so the updater's `COMMAND_FAILED` still describes the
+        // letter this boot runs.
+        let rom = RomId {
+            id: names.id.clone(),
+            number: record.rom_number,
+        };
+        self.txn
+            .commit(&self.env, &rom, &record, merge, operation)
+            .map_err(transaction)?;
+
         self.record = Some(next);
         efivars::write(&self.root, &names.slot, ATTRIBUTES, &next.encode())
     }
@@ -161,9 +202,27 @@ impl EsuBackend {
             source: u8::try_from(merge.source).map_err(|_| invalid("invalid merge source"))?,
         };
         let names = self.names()?;
+        let before = status_of(self.read_merge_raw()?)?;
         // Authority first. A failed mirror returns failure while the durable
         // variable stays committed; the next operation repairs this ROM's mirror.
         efivars::write(&self.root, &names.merge, ATTRIBUTES, &record.encode())?;
+
+        // A finished merge is the last step before the promote: the staged bytes
+        // are what this boot runs, so they are promoted now rather than at the
+        // next start. A failure only logs; the next start resumes the promote.
+        if let Some(slot) = self.record {
+            let rom = RomId {
+                id: names.id.clone(),
+                number: slot.rom_number,
+            };
+            if let Err(error) =
+                self.txn
+                    .merge_completed(&self.env, &rom, &slot, before, merge.status)
+            {
+                eprintln!("boot-hal promote: {error:#}");
+            }
+        }
+
         self.mirror(record)
     }
 
@@ -186,6 +245,17 @@ impl EsuBackend {
             health_on_success: HealthOnSuccess::PreserveNonZero,
         }
     }
+}
+
+/// The merge status of one stored `MergeStatus-<id>` record.
+fn status_of(record: Gbm1) -> io::Result<MergeStatus> {
+    MergeStatus::try_from(i32::from(record.status)).map_err(|_| invalid("invalid merge status"))
+}
+
+/// One transaction failure, as the storage error the service maps to
+/// `COMMAND_FAILED`.
+fn transaction(error: anyhow::Error) -> io::Error {
+    io::Error::other(format!("{error:#}"))
 }
 
 impl Backend for EsuBackend {
@@ -217,13 +287,14 @@ impl Backend for EsuBackend {
     }
 
     fn read_merge(&mut self) -> io::Result<Merge> {
-        match self.read_merge_raw() {
-            Ok(record) => MergeStatus::try_from(i32::from(record.status))
-                .map(|status| Merge {
-                    status,
-                    source: u32::from(record.source),
-                })
-                .map_err(|_| invalid("invalid merge status")),
+        let merge = self.read_merge_raw().and_then(|record| {
+            status_of(record).map(|status| Merge {
+                status,
+                source: u32::from(record.source),
+            })
+        });
+        match merge {
+            Ok(merge) => Ok(merge),
             Err(error) => self.failed(error),
         }
     }

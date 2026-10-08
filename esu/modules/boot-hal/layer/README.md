@@ -5,16 +5,19 @@ submodule (`../generic-bootctl`) is linked only as a serving library, and this
 directory is the esu layer beside it. generic-bootctl serves the service (AIDL V1 first,
 HIDL 1.0-1.2 only if servicemanager refuses AIDL), owns slot health policy and the frozen
 AIDL V1 dispatch; `EsuBackend` adapts the project efivarfs records and the misc VAB mirror
-to its `Backend` trait. Replacing the stock HAL is this module's payload method: its own
+to its `Backend` trait, and drives the ROM OTA transaction (`src/txn.rs`) from the same
+mutations. Replacing the stock HAL is this module's payload method: its own
 init service stops the stock service by exec label, then serves. Registration is never
 gated on efivarfs, BootedRom, managed Slot state or misc. Verified on a phone for AIDL V1
-(normal ROM1 boot); HIDL, recovery and OTA are not claimed.
+(normal ROM1 boot); HIDL, recovery and the OTA transaction on a device are not claimed
+(the transaction's state machine is host-tested, its storage side is not).
 
 ```
 esu/modules/boot-hal/
   module.prop sepolicy.rule initrc/ the ESP module files the packager ships
   generic-bootctl/                  submodule: pinned upstream, never edited here
-  layer/                            this crate: backend, wire records, stock stop, entry point
+  layer/                            this crate: backend, wire records, stock stop,
+                                    OTA transaction, platform, entry point
 ```
 
 ## Architecture
@@ -24,6 +27,12 @@ bootctl-unified (lib)  serve(service): AIDL first, HIDL 1.2/1.1/1.0 if refused
 generic-bootctl-core   Service: slot health policy, -1/-2 mapping, write gate
         |              Backend trait: slot_count / prepare / read_state / commit / read_merge / write_merge
 gobbl-boot-hal         EsuBackend + GBS1/GBM1 wire records + misc mirror + stock stop + the esu Service
+        |
+        +-- txn::Txn   the OTA transaction: prepare / seal / cancel / promote
+        |     txn::Env      records, payload tree, denial receipt, detached promote
+        |     txn::Class    Rom1 (physical partitions) / RomN (staging LVs + switch devices)
+        +-- android::Android  the served Env: efivarfs, ESP payload tree, module sets
+        +-- platform          ESP mount and RW window, loop attach, lvm/esud, log, notify
 ```
 
 `src/backend.rs` implements `generic_bootctl_core::Backend`:
@@ -69,6 +78,120 @@ decision and ROM isolation, and the esu AIDL contract has no read-only rollout p
 `persist.generic_bootctl.rw` belongs to the generic standalone module, which this
 payload does not use.
 
+## OTA transaction
+
+The same AIDL mutations that move slot health also drive the ROM OTA, because the
+updater's own sequence is what the transaction has to hook: it marks the target
+letter unbootable, writes the target, seals it, boots it, marks it successful and
+finally merges. `src/txn.rs` owns that state machine and is host-tested end to end
+against a recorder; `src/android.rs` and `src/platform.rs` are the real records,
+paths and storage behind it.
+
+**Letters and state.** Nothing about the staged set is remembered in this process:
+the booted letter comes from `ro.boot.slot_suffix`, the selected letter from
+`Slot-<id>` byte 8, and the transaction state from the bdsvars `Stage-<id>` record
+(`esu_platform::stage`). The staged letter `L` is `other(current)` while `Staging`,
+`selected` once `Sealed`/`Promote`, and none otherwise. A malformed `Stage-<id>`
+record is `InvalidData`, so the state-dependent transaction fails closed instead of
+guessing. The one thing that *is* snapshotted is `booted_staged` = `Stage` is
+`Sealed`/`Promote` and `selected == current`, taken once at service start: while the
+switch devices serve the letter this boot runs from, removing the staging set they
+point at would turn the running Android's own partitions into I/O errors.
+
+**Per-mutation actions** (`Operation` → side effects, before the `Slot-<id>` write):
+
+| mutation | ROM ≥ 2 | ROM 1 |
+| --- | --- | --- |
+| `SetUnbootable(t)`, `t != current` | `booted_staged` ⇒ log only (also the post-merge mark of the old slot); `None` ⇒ create the staging set and record `Staging`; `Staging` ⇒ resume; `Sealed` ⇒ cancel then stage; `Promote` ⇒ log only | `L == t` ⇒ cancel |
+| `SetActive(t)`, `t != current` | refuse when `booted_staged`; a re-request of the letter already sealed is a retry; otherwise seal the takeover archive and record `Sealed` | same |
+| `SetActive(current)` | `Staging`/`Sealed` and not `booted_staged` ⇒ cancel; while `booted_staged` the staged set is what this boot runs, so the cancel is logged and the promote path owns it | same |
+| `MarkSuccessful` | `Sealed`, `current == L`, merge NONE ⇒ promote | same, and only after Surfacer confirmed the switch (`pending` cleared) |
+| `write_merge(NONE)` after `MERGING` | `Sealed`, slot successful, `current == L` ⇒ promote | same |
+| service start | `Promote` ⇒ resume the promote; `Sealed` + successful + merge NONE + `current == L` ⇒ promote | `Sealed`, no pending, `current != L` ⇒ cancel |
+
+A refusal (no module set for the target KMI, a proven ROM 1 anti-rollback raise, a
+staged set that would be restaged while this boot runs it) returns the error the
+service maps to `COMMAND_FAILED` **before** the record write, so the `Slot-<id>`
+record still describes the letter this boot runs; the reason goes to the receipt,
+the kernel log and a notification.
+
+**Storage (ROM ≥ 2).** Every declared base image of the ROM is staged in its own
+thick logical volume `rom<N>-stage-<base>` inside the `rom` volume group, created
+with the static payload `lvm` (`/debug_ramdisk/esu/bin/lvm`, every invocation passing
+`--config` with the shipped `esu/bin/lvm.conf` text) and pre-filled with the running
+image so the updater's verifier and incremental patches see the bytes they expect.
+The switch device `rom<N>-ota-<base>` — created by `ota-stage` at PID 1 — is reloaded
+to a linear map over the staging LV (writable, because the target letter is the one
+the updater writes), and back to an error target of the image's exact size when the
+set is removed. `esud esd refresh` re-publishes the device-name tree after every
+create/remove, and the nodes are opened as
+`/dev/block/esd/lv/<lv>`, `/dev/block/esd/by-name/<PARTNAME>` and
+`/dev/block/esd/mapper/control`.
+
+**Seal.** The target's kernel identity comes from the *staged* `boot` image
+(`kmi_from_boot`), the module set for that KMI is selected from the payload
+(`<esp>/esu/kmi/<branch>-<generation>/`, verified against `set.json`), the takeover
+overlay is rebuilt from `<esp>/esu/bin/esuinit`, `<esp>/esu/build-id` and those
+modules, and it replaces `<esp>/rom/<id>/esu.stage.cpio` through a temporary file
+and a rename inside one read-write window on the otherwise read-only ESP. A missing
+module set is a denial, never a fallback to the running kernel's set. ROM 1 only
+executes the firmware the update writes, so only ROM 1 refuses a target
+`xbl_config` whose anti-rollback index is higher than the running one; for a managed
+ROM the comparison is logged. An image the port cannot read or recognize is logged
+rather than refused (the refusal is defined as a *proven* raise), except a target
+`xbl_config` that cannot be read at all, which is an incomplete payload.
+
+**Promote.** `Stage` becomes `Promote` first, so a process that dies mid-copy
+resumes the same step at the next start. The staged bytes are copied back over the
+ESP base images inside one read-write window and verified; a mismatch is retried
+once and then leaves `Stage` at `Promote` with the reason logged. While this boot
+runs the staged letter, each switch device is then reloaded to a read-only loop over
+the promoted ESP image, so the running Android keeps reading the bytes it booted
+(`LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR`, released when the switch device stops
+referencing it). The staging LVs are removed afterwards, and the archive is renamed
+`esu.stage.cpio` → `esu.cpio` before `Stage` returns to `None`. Every step is
+idempotent, so a promote interrupted between the removal and the rename converges on
+the next start instead of stalling at `Promote`: a staging volume that is already
+gone means the copy already ran, and a staged archive that is already gone means the
+rename did. A promote copies whole images, so it runs on a detached thread and never
+blocks the Binder thread.
+
+**ROM 1** has no staging set: the projection already routes the target letter to the
+physical partitions the updater writes, and this HAL's `Rom1` class is a no-op for
+prepare/teardown/promote. What ROM 1 does stage is the takeover payload, which
+Surfacer boots for the selected letter once the firmware switch is confirmed.
+
+**Paths.** `/debug_ramdisk/esp` is the runtime ESP mount (the loader's
+`esuinit::esp::ESP_MOUNT_POINT`), `/debug_ramdisk/esp/esu` the payload tree,
+`/debug_ramdisk/esu/bin` the executable tmpfs the payload's `lvm`/`esud` run from.
+`src/platform.rs` pins those against the loader's constants and bakes the shipped
+`lvm.conf` in with `include_str!`, so an invocation cannot depend on a readable
+confdir.
+
+**Denial receipt.** `esu/receipts/ota-denied.txt` under the runtime payload root
+(`/debug_ramdisk/esp/esu/receipts/ota-denied.txt`), written tmp+fsync+rename inside a
+read-write window, followed by `__android_log_print` under the `esu-bootctl` tag and
+a non-blocking `/system/bin/cmd notification post -S bigtext -t "esu OTA" esu.ota`.
+The `ota` module's `boot-completed.sh` posts from the receipt and deletes it when the
+notification command itself was refused.
+
+**Policy.** The transaction's allows in `esu/modules/boot-hal/sepolicy.rule` are
+written against the platform type names the code opens (`esu_blk_device` for the esd
+tree, `vfat` for the ESP, `dm_device`/`loop_control_device`/`loop_device` for the
+block layer, `sysfs_type` for the device-mapper name scan, `esu_file` for the payload
+binaries, `system_file`/`system_server` for the notification) and are **unverified on
+a device**: the real set is harvested from a permissive boot before this module is
+deployed enforcing. The `esu_blk_device` type itself is declared by the `ota`
+module, so the two modules' rules are loaded together.
+
+**Host tests.** `src/txn.rs` drives the whole table above with a recorder: prepare,
+resume, booted-staged, seal, denial (record untouched + receipt), cancel, promote
+from `MarkSuccessful` and from a finished merge, resume from `Promote`, a failed
+promote staying at `Promote`, the ROM 1 cancel, the ROM 1 anti-rollback refusal and
+the per-base verify retry. `tests/efivarfs.rs` keeps the record/mirror/service
+contract with a benign platform behind it. The storage classes' own bodies (lvm, dm,
+loop, copies) need a device and are not covered here.
+
 **Replacing the stock HAL.** `initrc/boot-hal.rc` runs `esu-bootctl --stop-stock` as an
 `on post-fs` exec in the platform's `esu` domain: `src/stock.rs` stops every init service
 whose command carries `hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is
@@ -101,12 +224,15 @@ From the product worktree (the submodule must be checked out:
 
 ```sh
 cargo +nightly-2026-08-08 test --manifest-path esu/modules/boot-hal/layer/Cargo.toml --offline --jobs 3
-ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh
+cargo +nightly-2026-08-08 clippy --manifest-path esu/modules/boot-hal/layer/Cargo.toml --all-targets -- -D warnings
+ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh            # aarch64
+ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh x86_64     # Cuttlefish
 ```
 
 The build uses the explicitly supplied NDK, API 35 and the installed
-`aarch64-linux-android` Rust target. Output:
-`esu/modules/boot-hal/layer/target/aarch64-linux-android/release/gobbl-boot-hal`.
+`aarch64-linux-android`/`x86_64-linux-android` Rust target; it links `-llog` for the
+`__android_log_print` the denial path logs with. Output:
+`esu/modules/boot-hal/layer/target/<triple>/release/gobbl-boot-hal`.
 When supplied, the packager installs it as `/esu/bin/esu-bootctl`, run by the module's
 `esu.bootctl` init service. There is no ELF generation note; `esu/build-id` and cpio
 `/esu-build-id` identify the complete payload, and a mismatch is logged rather than pinned.
@@ -140,7 +266,10 @@ Tests cover record/confirm versus record-only selection, cancellation/retry/succ
 malformed state, source-slot VAB reversion, lazy identity recovery, AIDL storage
 failures, byte-exact efivarfs writes and preservation of other-ROM variables,
 BCB/bootloader-control bytes, valid V2 VAB reserved bytes, storage-independent slot
-queries, invalid-slot precedence and the GBS1 success/unbootable health policy.
+queries, invalid-slot precedence and the GBS1 success/unbootable health policy, plus
+the whole OTA transaction table above (staging, resume, seal, denial, cancel,
+promote, resume-after-promote, verify retry, ROM 1 anti-rollback) and the pinned
+platform layout (ESP paths, remount flags, loop status layout, lvm configuration).
 
 ## Installation and identity
 
@@ -154,11 +283,20 @@ stock HAL untouched.
 
 - Init service: **`esu.bootctl`**, `class early_hal`, root/root, `seclabel
   u:r:esu_bootctl:s0`, binary `/debug_ramdisk/esu/bin/esu-bootctl`.
+- OTA transaction dependencies: the `ota` module (it declares the
+  `esu_blk_device` type these rules use, publishes `/dev/block/esd/` at `early`
+  and creates the `lvm` symlinks) and the payload files `esu/bin/lvm`,
+  `esu/bin/lvm.conf`, `esu/bin/ota-stage`, `esu/bin/esuinit`, `esu/build-id`,
+  `esu/roms/<id>.toml`, `esu/kmi/<branch>-<generation>/` and the ROM's
+  `rom/<id>/<base>.img` images. Without them a managed ROM's transaction fails
+  closed with `COMMAND_FAILED`; ROM 1 boots are unaffected.
 - Binder identity: **`android.hardware.boot.IBootControl/default`**.
 - Version: **1**; hash: **`2400346954240a5de495a1debc81429dd012d7b7`**.
 - The device VINTF manifest is unchanged; the stock service is stopped, never redefined.
-- The HAL opens only project efivarfs variables and `/dev/block/by-name/misc`;
-  never a whole LU, GPT, UFS sysfs node, boot partition or firmware partition.
+- The HAL opens project efivarfs variables, `/dev/block/by-name/misc` and, for the
+  OTA transaction, the nodes esud publishes under `/dev/block/esd/` (staging
+  volumes, projected-away partitions, the device-mapper control node) plus the ESP
+  base images it promotes; never a whole LU, GPT, UFS sysfs node or boot partition.
 
 `BootedRom` in the project EFI namespace selects the managed catalogue ID.
 Missing identity or `direct` means unmanaged. Invalid/unavailable identity is
@@ -178,8 +316,9 @@ Current-slot, slot-count, suffix and frozen version/hash replies remain availabl
 Recovery retains its projection and `pid1-recovery.sh` scripts for modules marked
 `recovery-ok`; this module is not `recovery-ok`, so recovery keeps its stock HAL.
 No native writer is invoked as a fallback. Recovery AIDL/HIDL parity is an unproved
-integration prerequisite. This port does not intercept OTA payload writes; esu's
-partition projection is mandatory before any managed OTA.
+integration prerequisite. The OTA transaction intercepts the updater's writes: the
+target letter of a managed ROM is projected onto the staging switch device, so esu's
+partition projection remains mandatory before any managed OTA.
 
 Integration must permit project efivarfs reads/writes and existing misc access.
 The HAL uses only an in-process Mutex, not block-device `flock`. On a device the
@@ -237,6 +376,20 @@ booted ROM's raw status/source; failure is retried before a state-dependent
 transaction. Setters persist that ROM's variable before flushing/readback of
 the physical mirror. Mirror failure leaves authority committed for reconciliation.
 No other ROM's variable is inferred from or overwritten by misc.
+
+### `Stage-<id>`: 8 bytes
+
+| Byte range | Value |
+| --- | --- |
+| 0–3 | ASCII `GBT1` (schema 1) |
+| 4 | transaction state: NONE=0, STAGING=1, SEALED=2, PROMOTE=3 |
+| 5–7 | zero reserved |
+
+Written and read by this HAL, by `ota-stage`/esuinit through
+`esu_platform::stage` and by Surfacer, which mirrors the decoder. Letters are
+never stored: they are derived from the booted slot and `Slot-<id>` byte 8, so a
+staged set cannot disagree with the boot state about which slot it belongs to.
+An absent variable and `NONE` are indistinguishable on purpose.
 
 ### Initial state
 

@@ -9,11 +9,18 @@ license = "Apache-2.0"
 resolver = "3"
 
 [dependencies]
+anyhow = "1"
+dm = { path = "../../../../userspace/dm" }
+esu-config = { path = "../../../../userspace/esu-config" }
 esu-platform = { path = "../../../../userspace/esu-platform" }
 generic-bootctl-core = { path = "../generic-bootctl/crates/core" }
 libc = "0.2"
+ota-core = { path = "../../../../userspace/ota-core" }
 # No native backends or vendor-library probe: this binary serves only the esu `Service`.
 bootctl-unified = { path = "../generic-bootctl/bin/bootctl-unified", default-features = false }
+
+[dev-dependencies]
+parking_lot = "0.12"
 
 [[bin]]
 name = "gobbl-boot-hal"
