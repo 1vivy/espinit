@@ -500,7 +500,6 @@ dependencies = [
 name = "esud"
 version = "0.1.0"
 dependencies = [
- "android-bootimg",
  "android_logger",
  "anyhow",
  "bindgen",
@@ -516,6 +515,7 @@ dependencies = [
  "log",
  "lz4",
  "nom 8.0.0",
+ "ota-core",
  "prop-rs-android",
  "rustix 1.1.5",
  "serde",
@@ -534,6 +534,7 @@ dependencies = [
  "goblin",
  "kernlog",
  "log",
+ "ota-core",
  "rustix 0.38.34",
  "scroll",
  "serde",
@@ -875,6 +876,16 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+]
+
+[[package]]
+name = "ota-stage"
+version = "0.1.0"
+dependencies = [
+ "dm",
+ "esu-config",
+ "esuinit",
+ "ota-core",
 ]
 
 [[package]]

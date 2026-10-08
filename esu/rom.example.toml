@@ -30,7 +30,7 @@ managed = true
 # Backends are resolved only when the ordered payload reaches the `gpt` entry,
 # after every earlier module and its scripts have run, so a logical volume,
 # mapper device, loop or ESP file those entries activate is visible. Each
-# `backend` is one of four documented forms:
+# `backend` is one of five documented forms:
 #
 #   /dev/block/by-name/<physical-name>  exact, unique sysfs PARTNAME
 #   /dev/mapper/<name>                  exact, unique /sys/class/block/dm-*/dm/name
@@ -44,6 +44,9 @@ managed = true
 #                                       rewrites its own preallocated image
 #                                       (the loader then holds the ESP
 #                                       read-write for that boot)
+#   rom-image:<base>                    one of the ROM's own kernel-image roles
+#                                       on the ESP, base-named (see the ROM >= 2
+#                                       section at the end of this file)
 #
 # What an earlier module may do first, e.g. activate a thick or thin LV with
 # `dmsetup`, is a module/script concern; the projection that follows only ever
@@ -149,4 +152,43 @@ thin_id = 131073
 [[partitions]]
 name = "xbl_a"
 backend = "/dev/mapper/rom2-fw-xbl_a"
+read_only = false
+
+# ---------------------------------------------------------------------------
+# Kernel-image roles (managed ROM >= 2 only)
+#
+# A managed ROM >= 2 does not boot the physical `<base>_a`/`<base>_b` kernel
+# partitions. The operator chooses any non-empty subset of the ordered image
+# bases (boot, init_boot, vendor_boot, vendor_kernel_boot, dtb, dtbo, pvmfw,
+# vbmeta, vbmeta_system, vbmeta_vendor), and the ROM declares both letters of
+# each chosen base with the base-named `rom-image:` backend and
+# `read_only = false`. Both letters of a base are served by the same ESP file,
+# `rom/<id>/<base>.img`, which rom-bootgen preallocates.
+#
+# While no update is staged, the loader resolves a base's non-booted letter to
+# the ROM's per-base switch device `rom<N>-ota-<base>` — which the `ota` module
+# publishes at PID 1 as an error target of the image's exact size — so an
+# updater's writes reach the staging set instead of the running image. While a
+# staged letter runs, that letter's partitions resolve to the staging LV. Both
+# letters of a base must be present, both must carry the matching base, and
+# neither may be read-only.
+
+[[partitions]]
+name = "boot_a"
+backend = "rom-image:boot"
+read_only = false
+
+[[partitions]]
+name = "boot_b"
+backend = "rom-image:boot"
+read_only = false
+
+[[partitions]]
+name = "vendor_boot_a"
+backend = "rom-image:vendor_boot"
+read_only = false
+
+[[partitions]]
+name = "vendor_boot_b"
+backend = "rom-image:vendor_boot"
 read_only = false

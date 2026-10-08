@@ -60,9 +60,9 @@ jobs:
       - name: Package phone storage helpers
         run: |
           mkdir -p storage-helpers/bin storage-helpers/modules
-          cp ./esuinit-aarch64/{fw-views,avb-graft} storage-helpers/bin/
+          cp ./esuinit-aarch64/{fw-views,avb-graft,ota-stage} storage-helpers/bin/
           cp thin-activate/thin-activate-aarch64-linux-android storage-helpers/bin/thin-activate
-          cp -R esu/modules/{thin,fw-views,avb-graft} storage-helpers/modules/
+          cp -R esu/modules/{thin,ota,fw-views,avb-graft} storage-helpers/modules/
           cp esu/manifest.example.toml storage-helpers/
           tar -C storage-helpers -czf esu-storage-helpers-aarch64-linux-android.tar.gz .
 

@@ -6,10 +6,10 @@ Source and host checks are not proof of an enforcing device boot. The Cuttlefish
 
 ## Architecture and identity
 
-- `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the saved `/init.esureal`, preserving any existing init wrapper and its `/init.real`.
+- `esuinit` runs as PID 1, loads the ramdisk kernel modules, prepares the selected ROM view and hands off to the stock `/init` with `argv[0] = "/init"` and the original arguments and environment. The takeover archive is entered through `rdinit=/esuinit` on every managed launcher entry; the stock init is never renamed, copied, inspected or vouched for.
 - `kernelesp.ko` provides the core UAPI, strict module relocation loader, KernelSU SELinux rules and boot-mode-gated init RC injection. Ownership-checked direct wrappers for `execve`, `execveat` and `setresuid` call their saved originals; they do not compete with KernelSU's `sys_enter` redirect for one rewritten syscall number.
 - `thin.ko` and `gpt.ko` provide thin storage and an in-memory projected partition view. Pristine upstream `efivarfs.ko` is the filesystem frontend; separate `efivar_store.ko` (a C module linking the Rust EFVS engine) serves the EFVS checkpoint/log on the bdsvars partition. Firmware initializes a blank partition; Linux never formats or compacts it. `kernelesp.ko` exports `efivar_store_io_enter/leave` (GPL) so backing-device I/O runs under the `esu` credential regardless of the calling domain; `efivar_store` resolves them with `symbol_get` because the relocating loader binds only vmlinux symbols.
-- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before `/init.esureal`; second-stage init reuses a writable `/debug_ramdisk`, or mounts a parent tmpfs only when the read-only directory is empty, then recreates both child mounts and copies the ESP binaries with stock toybox. A populated read-only parent fails closed instead of hiding content. The core relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
+- `esud` runs from `/debug_ramdisk/esu/bin/esud` on executable tmpfs. esuinit detaches its ESP and staging tmpfs before stock init runs; second-stage init reuses a writable `/debug_ramdisk`, or mounts a parent tmpfs only when the read-only directory is empty, then recreates both child mounts and copies the ESP binaries with stock toybox. A populated read-only parent fails closed instead of hiding content. The core relabels the staged tree in the `esu` domain. esud verifies the selected device and stock `vfat` label, then binds the ESP read-only at `/dev/esp`. Only efivarfs uses `context=u:object_r:esu_file:s0`.
 - Runtime ROM identity is `BootedRom` in bdsvars. `Slot-<id>` supplies the authoritative number, 1 through 5. PID 1 temporarily mounts efivarfs at `/efivars`; the daemon and Boot HAL use `/dev/efivars`. Missing identity (or `direct`) is unmanaged; a managed identity with missing or malformed Slot fails closed. No bootconfig selector or default ROM number substitutes for it.
 - The daemon's only writable persistent state is `/data/adb/esu/log`, created at post-fs-data. Modules, binaries and configuration never come from `/data/adb` or `/metadata/esu`.
 
@@ -19,26 +19,29 @@ The SELinux domain/type are `esu`/`esu_file`. The kernel retains upstream Kernel
 
 ```text
 ESP /
-  rom/<id>/esu.cpio
+  rom/<id>/esu.cpio            committed takeover archive
+  rom/<id>/esu.stage.cpio      sealed update payload, booted once by Surfacer
+  rom/<id>/<base>.img          preallocated kernel base images (ROM >= 2)
   esu/
     build-id
     manifest.toml
     roms/<id>.toml
-    bin/{esuinit,esud,busybox,thin-activate,fw-views,avb-graft,esu-bootctl}
+    bin/{esuinit,esud,busybox,thin-activate,ota-stage,fw-views,avb-graft,esu-bootctl,lvm,lvm.conf}
+    kmi/<branch>-<generation>/{set.json, lib/*.ko}
     modules/
       boot-hal/
         module.prop
         sepolicy.rule
         initrc/boot-hal.rc
       thin/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok,critical}
+      ota/{module.prop,pid1.sh,pid1-recovery.sh,early.sh,boot-completed.sh,sepolicy.rule,recovery-ok,critical}
       fw-views/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok,critical}
       avb-graft/{module.prop,pid1.sh,pid1-recovery.sh,recovery-ok}
     receipts/
 
 per-ROM newc takeover archive (legacy-LZ4):
-  init                         static esuinit, 0755
-  init.esureal                 preserved prior init or wrapper, 0755
-  esu-build-id                  12 lowercase hex + LF
+  esuinit                        static esuinit, 0755
+  esu-build-id                   12 lowercase hex + LF
   lib/{kernelesp,thin,gpt,efivarfs,efivar_store}.ko
 ```
 
@@ -50,11 +53,13 @@ See [`esu/manifest.example.toml`](esu/manifest.example.toml) and [`esu/rom.examp
 
 - `schema_version = 1` and `rom = "roms"`;
 - `modules`: the ordered kernel-module list, with `name`, `path = "lib/<name>.ko"` and parameters;
-- `modules_order`: ESP KernelSU module IDs, for example `["boot-hal", "thin", "fw-views", "avb-graft"]`. Earlier IDs have higher overlay precedence.
+- `modules_order`: ESP KernelSU module IDs, for example `["boot-hal", "thin", "ota", "fw-views", "avb-graft"]`. `ota` follows `thin` and is required for a managed ROM `>= 2`; earlier IDs have higher overlay precedence.
 
 The ROM file requires `schema_version`, `id`, and `managed`; `partitions` and `firmware_views` are optional as permitted by managed-mode validation. `generation`, `rom_number`, `[platform]` and `recovery_packages` are not compatibility aliases and are rejected. ROM files are selected by bdsvars identity, not a filename inferred from a number. Number-dependent firmware validation runs against the Slot record, not host packaging guesses.
 
-A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, and preallocated `esp-file:<relative-path>` paths; the latter use the detached-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
+A managed ROM projects complete whole-device backends through `gpt` APPLY and verifies the exact QUERY result. Backend syntax recognizes exact sysfs by-name partitions, `/dev/mapper/<name>`, existing `/dev/loopN`, preallocated `esp-file:<relative-path>` paths, and `rom-image:<base>` kernel-image roles; the first three use the physical device, the ESP-file form the detached-mount lifecycle below. Whole-LU devices, offsets and extent/FIEMAP APIs are not accepted. Firmware views use reserved thin IDs `(rom_number << 16) | index` and matching `/dev/mapper/rom<N>-fw-<name>` backends.
+
+A managed ROM `>= 2` declares any non-empty subset of the ordered image bases (`boot`, `init_boot`, `vendor_boot`, `vendor_kernel_boot`, `dtb`, `dtbo`, `pvmfw`, `vbmeta`, `vbmeta_system`, `vbmeta_vendor`). Both `<base>_a` and `<base>_b` carry `rom-image:<base>` with `read_only = false` and are served by the one base-named ESP file `rom/<id>/<base>.img`; the `ota` module publishes the per-base switch device each non-booted letter resolves to. ROM 1 reads the physical kernel partitions and rejects an image role.
 
 **Host packaging (2026-10-07):** `esud boot-patch` accepts
 `esp-file:rom/<selected-id>/...` references without requiring those image files
@@ -108,7 +113,7 @@ predictable `EBUSY`.
 
 ## Boot stages and modules
 
-PID 1 checks the core UAPI and readiness, obtains bdsvars identity, loads the other kernel modules, runs `pid1.sh` (or `pid1-recovery.sh`), and applies the GPT projection. Script environment includes `ESU_ROM` and `ESU_ROM_NUMBER`. The thin helper validates the physical `userdata` LVM2 metadata and activates the `rom` VG without invoking a shell or mutating LVM metadata. `fw-views` creates external-origin firmware devices for secondary ROMs; see [its module documentation](esu/modules/fw-views/README.md).
+PID 1 checks the core UAPI and readiness, obtains bdsvars identity, loads the other kernel modules, runs `pid1.sh` (or `pid1-recovery.sh`), and applies the GPT projection. The script environment carries `ESU_ROM`, `ESU_ROM_NUMBER` and the derived `ESU_STAGE` (`""`, or `<a|b>:<ro|rw>` when a staged letter runs). The thin helper validates the physical `userdata` LVM2 metadata and activates the `rom` VG without invoking a shell or mutating LVM metadata. The [`ota` helper](esu/modules/ota/README.md) then creates one switch device per declared base image and publishes the `/dev/block/esd` device-name tree; `fw-views` creates external-origin firmware devices for secondary ROMs; see [its module documentation](esu/modules/fw-views/README.md).
 
 The generic [`avb-graft` tool/module](esu/modules/avb-graft/README.md) seeds configured `[[partitions]].metadata` on writable ROM-local views after firmware views and before GPT projection. It never writes physical origins; existing thin/ESP state wins over stale metadata. The module documentation includes host `apply`/`extract` usage, a real avbtool smoke recipe, drop interaction and release package inputs.
 
@@ -127,6 +132,57 @@ The core boot-mode ioctl is root-only and set-once (`1` Android, `2` recovery). 
 Post-fs, post-fs-data, services, boot-completed and recovery run the corresponding KernelSU scripts from the ESP in module order. Stages may be re-run from a root shell and respect boot mode, safe mode and module flags. Service and boot-completed scripts remain detached, not monitored daemons. `esud platform reload` reapplies policies and mounts missing overlays without running scripts.
 
 ROM isolation preserves the shared `/metadata/shared/password_slots` bind, managed vold key-preservation property and numbered GSI password-slot identity. ROMs numbered 2 or higher deny boot HAL writes/ioctls to the UFS BSG node. The Boot HAL persists Slot and MergeStatus using efivarfs and retains the existing misc VAB mirror.
+
+## ROM OTA staging
+
+A managed ROM `>= 2` keeps its own kernel and firmware as writable views over
+shared storage, so an OTA can be written, trial-booted and either committed or
+dropped without touching the running slot. The transaction is one `Stage-<id>`
+record in bdsvars holding only a state (`none`, `staging`, `sealed`, `promote`);
+the letters are derived, never stored: `current` from the booted slot suffix,
+`selected` from the `Slot-<id>` record, and the staged letter `L` from the state
+(`other(current)` while staging, `selected` once sealed). `ESU_STAGE` exports
+that derivation to the PID-1 scripts and helpers next to `ESU_ROM`.
+
+The storage side is LVM on `userdata`. `thin-activate` activates every visible
+LV; the [`ota` module](esu/modules/ota/README.md) then creates one switch device
+per declared base, `rom<N>-ota-<base>`, and publishes the `/dev/block/esd` name
+tree. Each base's two projected letters resolve differently: the non-booted
+letter reads the switch device `rom<N>-ota-<base>` (linear over the staging LV
+`rom-rom<N>--stage--<base>` while a set is staged, an error target otherwise),
+while the booted letter reads the base image on the ESP read-only. While nothing
+is staged the switch is an error target of the image's exact size, so a generated
+`SOURCE_COPY` size check matches and an idle read fails loudly.
+
+The boot HAL drives the transaction through the ordinary boot-control ABI. A
+`SetUnbootable(target)` on a non-current letter and an empty state creates the
+thick staging LVs (`rom<N>-stage-<base>`), reloads the switch devices linear over
+them, prefills each from its ESP image and records `staging`; the updater then
+writes the target through the switch device. `SetActive(target)` seals: the
+target boot image names a KMI, the matching module set under
+`esu/kmi/<branch>-<generation>/` is selected and verified, a takeover archive is
+built and written to `rom/<id>/esu.stage.cpio`, and the record becomes `sealed`.
+Surfacer boots the selected letter from the staging LVs and the staged payload.
+On a successful boot the step is marked successful and, either immediately or
+after the merge completes, the record becomes `promote`: the staged bytes are
+copied over the ESP base images inside one read-write window, verified, the
+switch is reloaded to a read-only loop of the promoted image, the staging LVs are
+removed and the payload is renamed `esu.stage.cpio` → `esu.cpio`. A cancel or a
+failed promotion attempt leaves the record recoverable and the running slot
+untouched.
+
+A denial — no module set for the detected KMI, or on ROM 1 an `xbl_config` whose
+anti-rollback counter would rise — refuses `SetActive` with `COMMAND_FAILED`
+before the record changes, writes `esu/receipts/ota-denied.txt`, logs it and
+posts an Android notification; the `ota` module's `boot-completed.sh` is the
+fallback when the notification command itself is refused under enforcing.
+
+ROM 1 is different only in posture: its kernel and firmware are the physical A/B
+partitions, the Surfacer-confirmed slot switch is the transaction, and there is
+no staging set — Apply carries an `efisp`-bearing ABL over when the target's
+lacks it (`abl_image`) and refuses an update that raises `xbl_config` ARB
+(`ota_core::arb`), while Drop and the offer to switch back to an exhausted slot
+clear the record. ROM 1 and ROM `>= 2` share one HAL transaction module.
 
 ## Boot HAL module
 
@@ -170,7 +226,7 @@ BootedRom. A missing partition is unmanaged; a malformed/blank store fails
 closed without writing it. ESP manifests declare both EFI modules, but their
 images remain cpio-only.
 
-Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](esu/modules/boot-hal/layer/build-android.sh), which builds the layer against the generic-bootctl submodule (`git submodule update --init`, then `ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh`).
+Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, ota-stage, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](esu/modules/boot-hal/layer/build-android.sh), which builds the layer against the generic-bootctl submodule (`git submodule update --init`, then `ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh`).
 
 ## Host packaging and build identity
 
@@ -178,10 +234,10 @@ Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1,
 cargo run --locked -p esud -- boot-patch \
   --esuinit /build/esuinit --payload /build/esu \
   --modules-dir /build/modules --kmi-out "$KMI_OUT" \
-  --rom rom1 --boot /build/stock/init_boot.img --out /build/new-output
+  --rom rom1 --out /build/new-output
 ```
 
-The builder captures explicit regular-file inputs, verifies all four LKMs and receipts, preserves stock init, and publishes `esp/`, byte-identical top-level/per-ROM `esu.cpio`, unsigned `patched.img`, and `receipt.json`. It never discovers or opens a phone. See [the complete contract](userspace/esud/README.md).
+The builder captures explicit regular-file inputs, verifies all four LKMs with their schema-2 receipts, and publishes `esp/` (the payload tree plus the verified `esu/kmi/<branch>-<generation>/` module set), byte-identical top-level/per-ROM `esu.cpio`, and `receipt.json`. It neither reads nor renames the stock init: the takeover archive carries only `esuinit`, `esu-build-id` and the KMI-selected `lib/*.ko`, and every managed launcher entry reaches it through `--cmdline-add rdinit=/esuinit`. `rom-bootgen` preallocates the ROM-owned kernel images on the ESP. The builder never discovers or opens a phone. See [the complete contract](userspace/esud/README.md).
 
 Build identity is the first 12 lowercase hex digits of SHA256 over the lexicographically sorted artifact SHA256 values, each followed by one LF; duplicate hashes remain. `receipt.build_id_inputs` records the complete input set. The ESP `esu/build-id` and cpio `/esu-build-id` contain exactly that ID plus LF; JSON has no LF. PID 1 logs both and warns on disagreement without refusing boot. Identity is diagnostic, not a signature or an ABI gate.
 

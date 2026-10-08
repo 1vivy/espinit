@@ -1,0 +1,13 @@
+# The SELinux type esud labels every node under /dev/block/esd with
+# (u:object_r:esu_blk_device:s0). It is declared here and only referenced by the
+# boot HAL's rules, which are concatenated with these. Statements split on
+# newlines and semicolons, so no comment here may contain one.
+type esu_blk_device dev_type
+
+# esud runs in the `esu` domain and owns the tree: it creates the directories
+# and the block/char nodes, labels them and removes the nodes whose device
+# disappeared on a refresh.
+allow esu esu_blk_device dir { add_name create getattr open read remove_name search setattr write }
+allow esu esu_blk_device blk_file { create getattr open read relabelfrom relabelto setattr unlink write }
+allow esu esu_blk_device chr_file { create getattr open read relabelfrom relabelto setattr unlink write }
+allow esu self capability mknod

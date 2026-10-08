@@ -1,0 +1,11 @@
+[package]
+name = "ota-stage"
+version = "0.1.0"
+edition.workspace = true
+license = "GPL-3.0-only"
+
+[dependencies]
+dm = { path = "../dm" }
+esu-config = { path = "../esu-config" }
+esuinit = { path = "../esuinit" }
+ota-core = { path = "../ota-core" }

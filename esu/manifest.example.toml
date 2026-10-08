@@ -11,10 +11,13 @@ rom = "roms"
 # initrc/*.rc is concatenated in this order, filenames sorted, <=65536 bytes.
 # Modules are optional by default; a regular `critical` marker opts in to
 # fatal PID1/normal-Android errors. Recovery after init reports and continues.
-# Shipped thin/fw-views are critical; boot-hal/avb-graft are optional.
+# Shipped thin/ota/fw-views are critical; boot-hal/avb-graft are optional.
+# `ota` publishes the per-base switch devices every `rom-image:` kernel-image
+# role resolves to (required for a managed ROM >= 2) and must follow `thin`,
+# which activates the staging LVs behind them.
 # disable/remove skip a module; skip_mount skips only its overlays.
 # This example includes boot-hal; omit that id when no HAL module is supplied.
-modules_order = ["boot-hal", "thin", "fw-views", "avb-graft"]
+modules_order = ["boot-hal", "thin", "ota", "fw-views", "avb-graft"]
 
 # Kernel images live ONLY in cpio /lib, never on the ESP. name/path/params are
 # required. Core, efivarfs frontend and EFVS backend load before identity/scripts.
