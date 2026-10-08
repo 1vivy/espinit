@@ -20,6 +20,7 @@ kernelesp-objs += hook/riscv64/syscall_hook.o
 endif
 
 kernelesp-objs += infra/file_wrapper.o
+kernelesp-objs += infra/io_cred.o
 kernelesp-objs += infra/symbol_resolver.o
 
 kernelesp-objs += policy/feature.o
