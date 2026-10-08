@@ -326,12 +326,112 @@ fn replace_module_vermagic(buffer: &mut Vec<u8>, required_vermagic: &str) -> Res
     Ok(())
 }
 
+/// Section a payload module may carry to declare its non-KMI imports, as
+/// NUL-separated symbol names (see `uapi/esu_import.h`).
+const IMPORTS_SECTION: &str = ".esu_imports";
+
+/// Names listed in the module's `.esu_imports` section, or `None` when the
+/// module does not declare its imports (legacy: relocate every undefined).
+fn declared_imports(elf: &Elf, buffer: &[u8]) -> Result<Option<std::collections::HashSet<String>>> {
+    for section in &elf.section_headers {
+        if elf.shdr_strtab.get_at(section.sh_name) != Some(IMPORTS_SECTION) {
+            continue;
+        }
+        let offset = usize::try_from(section.sh_offset).context(".esu_imports offset overflow")?;
+        let size = usize::try_from(section.sh_size).context(".esu_imports size overflow")?;
+        let bytes = buffer
+            .get(offset..offset.checked_add(size).context(".esu_imports range overflow")?)
+            .context(".esu_imports is outside module buffer")?;
+        let mut names = std::collections::HashSet::new();
+        for entry in bytes.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+            let name = std::str::from_utf8(entry).context(".esu_imports entry is not UTF-8")?;
+            names.insert(name.to_owned());
+        }
+        return Ok(Some(names));
+    }
+    Ok(None)
+}
+
+/// Resolve `wanted` names against `(raw_kallsyms_name, addr)` pairs.
+///
+/// An exact name match always wins. Otherwise compiler-suffixed variants
+/// (`name$...`, `name.llvm.*`) are accepted only when they all agree on one
+/// address; several distinct static functions sharing a name are rejected
+/// instead of binding whichever kallsyms lists first.
+fn resolve_names<I>(wanted: &std::collections::HashSet<String>, symbols: I) -> Result<HashMap<String, u64>>
+where
+    I: IntoIterator<Item = (String, u64)>,
+{
+    let mut exact: HashMap<String, u64> = HashMap::new();
+    let mut variants: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
+
+    for (raw, addr) in symbols {
+        let base = raw
+            .find('$')
+            .or_else(|| raw.find(".llvm."))
+            .map(|pos| &raw[..pos])
+            .unwrap_or(&raw);
+        if !wanted.contains(base) {
+            continue;
+        }
+        if base.len() == raw.len() {
+            if let Some(previous) = exact.insert(base.to_owned(), addr)
+                && previous != addr
+            {
+                bail!("Kernel symbol {base} is ambiguous: {previous:#x} and {addr:#x}");
+            }
+        } else {
+            variants.entry(base.to_owned()).or_default().insert(addr);
+        }
+    }
+
+    let mut resolved = exact;
+    for (name, addrs) in variants {
+        if resolved.contains_key(&name) {
+            continue;
+        }
+        if addrs.len() != 1 {
+            let list: Vec<String> = addrs.iter().map(|addr| format!("{addr:#x}")).collect();
+            bail!("Kernel symbol {name} only has ambiguous variants: {}", list.join(", "));
+        }
+        resolved.insert(name, *addrs.iter().next().unwrap());
+    }
+    Ok(resolved)
+}
+
+/// Raw kallsyms vmlinux symbols (no suffix stripping), stopping at the first
+/// module symbol.
+fn raw_kernel_symbols() -> Result<Vec<(String, u64)>> {
+    let _kptr = Kptr::new()?;
+    let mut out = Vec::new();
+    for line in BufReader::new(File::open("/proc/kallsyms")?).lines() {
+        let line = line?;
+        let mut splits = line.split_whitespace();
+        let (Some(addr), Some(_kind), Some(name)) = (splits.next(), splits.next(), splits.next())
+        else {
+            continue;
+        };
+        if splits.next().is_some() {
+            break; // module symbols follow vmlinux symbols
+        }
+        if let Ok(addr) = u64::from_str_radix(addr, 16) {
+            out.push((name.to_owned(), addr));
+        }
+    }
+    Ok(out)
+}
+
 /// Relocate undefined symbols in an ELF kernel module buffer using /proc/kallsyms,
 /// then load it via init_module syscall.
+///
+/// A module with an `.esu_imports` section has only its declared names
+/// relocated; its remaining undefined symbols stay `SHN_UNDEF` so the kernel
+/// resolves them against exports with modversions CRC checks.
 pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
     let mut buffer = data.to_vec();
     let elf = Elf::parse(&buffer)?;
     let ctx = *elf.syms.ctx();
+    let declared = declared_imports(&elf, &buffer)?;
 
     let mut unresolved_symbols: HashMap<String, (Sym, usize)> = HashMap::new();
     for (index, sym) in elf.syms.iter().enumerate() {
@@ -347,21 +447,36 @@ pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
             continue;
         };
 
+        if declared.as_ref().is_some_and(|names| !names.contains(name)) {
+            continue;
+        }
+
         let offset = elf.syms.offset() + index * Sym::size_with(elf.syms.ctx());
         unresolved_symbols.insert(name.to_owned(), (sym, offset));
     }
 
+    if let Some(names) = &declared {
+        let mut stale: Vec<_> = names
+            .iter()
+            .filter(|name| !unresolved_symbols.contains_key(*name))
+            .map(String::as_str)
+            .collect();
+        if !stale.is_empty() {
+            stale.sort_unstable();
+            bail!("Declared imports are not undefined in the module: {}", stale.join(", "));
+        }
+    }
+
     if !unresolved_symbols.is_empty() {
-        for_each_kernel_symbols(|(symbol, addr)| {
-            if let Some((mut sym, offset)) = unresolved_symbols.remove(symbol) {
+        let wanted: std::collections::HashSet<String> = unresolved_symbols.keys().cloned().collect();
+        let resolved = resolve_names(&wanted, raw_kernel_symbols().context("Cannot parse kallsyms")?)?;
+        for (name, addr) in &resolved {
+            if let Some((mut sym, offset)) = unresolved_symbols.remove(name) {
                 sym.st_shndx = section_header::SHN_ABS as usize;
                 sym.st_value = *addr;
                 buffer.pwrite_with(sym, offset, ctx)?;
             }
-
-            Ok(!unresolved_symbols.is_empty())
-        })
-        .context("Cannot parse kallsyms")?;
+        }
     }
 
     if !unresolved_symbols.is_empty() {
@@ -599,4 +714,46 @@ pub fn has_esu() -> bool {
 /// Whether a core module is loaded at all, regardless of readiness.
 pub fn core_loaded() -> bool {
     query_core_info().is_ok()
+}
+
+#[cfg(test)]
+mod relocation_tests {
+    use super::resolve_names;
+    use std::collections::HashSet;
+
+    fn want(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn syms(list: &[(&str, u64)]) -> Vec<(String, u64)> {
+        list.iter().map(|(name, addr)| ((*name).to_owned(), *addr)).collect()
+    }
+
+    #[test]
+    fn exact_match_beats_suffixed_variants() {
+        let resolved = resolve_names(&want(&["foo"]), syms(&[("foo.llvm.1", 1), ("foo", 2)])).unwrap();
+        assert_eq!(resolved["foo"], 2);
+    }
+
+    #[test]
+    fn single_variant_resolves() {
+        let resolved = resolve_names(&want(&["foo"]), syms(&[("foo.llvm.9", 7)])).unwrap();
+        assert_eq!(resolved["foo"], 7);
+    }
+
+    #[test]
+    fn distinct_variants_are_rejected() {
+        assert!(resolve_names(&want(&["foo"]), syms(&[("foo.llvm.1", 1), ("foo$x", 2)])).is_err());
+    }
+
+    #[test]
+    fn duplicate_exact_names_with_different_addresses_are_rejected() {
+        assert!(resolve_names(&want(&["foo"]), syms(&[("foo", 1), ("foo", 2)])).is_err());
+    }
+
+    #[test]
+    fn unrelated_prefixes_do_not_match() {
+        let resolved = resolve_names(&want(&["foo"]), syms(&[("foobar", 1)])).unwrap();
+        assert!(resolved.is_empty());
+    }
 }
