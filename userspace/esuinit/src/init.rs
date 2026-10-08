@@ -724,10 +724,28 @@ fn unquote(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-/// Enter the fatal-boot stop path: sync, reboot, and never continue normal
-/// boot when the reboot itself does not take effect.
+/// AOSP init's own opt-in: `androidboot.init_fatal_panic=true` makes a fatal init
+/// failure kernel-panic instead of reboot, so the failure leaves a crash trail.
+const FATAL_PANIC_KEY: &str = "androidboot.init_fatal_panic";
+const FATAL_PANIC_VALUE: &str = "true";
+
+fn fatal_panic_requested(bootconfig: &str) -> bool {
+    bootconfig_has_exactly(bootconfig, FATAL_PANIC_KEY, FATAL_PANIC_VALUE)
+}
+
+/// Enter the fatal-boot stop path: sync, then panic when AOSP's
+/// `androidboot.init_fatal_panic=true` asks for it (sysrq `c`, as AOSP init does),
+/// otherwise reboot. Never continues normal boot when neither takes effect.
 pub fn stop_boot() -> ! {
     rustix::fs::sync();
+
+    let bootconfig = fs::read_to_string("/proc/bootconfig").unwrap_or_default();
+    if fatal_panic_requested(&bootconfig) {
+        log::error!("fatal early boot: {FATAL_PANIC_KEY}={FATAL_PANIC_VALUE}, panicking");
+        if let Err(error) = fs::write("/proc/sysrq-trigger", b"c") {
+            log::error!("cannot panic through sysrq, falling back to reboot: {error}");
+        }
+    }
 
     if let Err(error) = reboot(RebootCommand::Restart) {
         log::error!("cannot reboot after a failed early boot: {error}");
@@ -896,6 +914,21 @@ mod tests {
         assert!(!recovery_passthrough_requested(&format!(
             "{RECOVERY_MODE_KEY}=recovery\n"
         ),));
+    }
+
+    #[test]
+    fn fatal_panic_follows_aosp_bootconfig_exactly_once() {
+        assert!(fatal_panic_requested("androidboot.init_fatal_panic=true\n"));
+        assert!(fatal_panic_requested("androidboot.init_fatal_panic = \"true\"\n"));
+        for off in [
+            "",
+            "androidboot.init_fatal_panic=false\n",
+            "androidboot.init_fatal_panic=TRUE\n",
+            "androidboot.init_fatal_panic=true\nandroidboot.init_fatal_panic=true\n",
+            "vendor.androidboot.init_fatal_panic=true\n",
+        ] {
+            assert!(!fatal_panic_requested(off), "{off:?}");
+        }
     }
 
     #[test]
