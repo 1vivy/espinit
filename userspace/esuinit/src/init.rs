@@ -795,7 +795,7 @@ fn unquote(value: &str) -> &str {
 const FATAL_PANIC_KEY: &str = "androidboot.init_fatal_panic";
 const FATAL_PANIC_VALUE: &str = "true";
 
-fn fatal_panic_requested(bootconfig: &str) -> bool {
+pub fn fatal_panic_requested(bootconfig: &str) -> bool {
     bootconfig_has_exactly(bootconfig, FATAL_PANIC_KEY, FATAL_PANIC_VALUE)
 }
 

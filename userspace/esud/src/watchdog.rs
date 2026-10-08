@@ -157,8 +157,20 @@ fn request_bootloader() {
 }
 
 /// Restart through the reboot syscall. A successful call does not return.
+///
+/// Under AOSP's `androidboot.init_fatal_panic=true` (the lab crash profile) the watchdog
+/// panics instead, as esuinit's fatal path does, so the minidump keeps the whole printk
+/// ring, including the notes above, even when the ESP receipt could not be written.
 #[cfg(target_os = "android")]
 fn restart() -> anyhow::Result<()> {
+    rustix::fs::sync();
+    let bootconfig = std::fs::read_to_string("/proc/bootconfig").unwrap_or_default();
+    if esuinit::init::fatal_panic_requested(&bootconfig) {
+        note("androidboot.init_fatal_panic=true; panicking through sysrq");
+        if let Err(error) = std::fs::write("/proc/sysrq-trigger", b"c") {
+            note(&format!("cannot panic through sysrq, restarting instead: {error}"));
+        }
+    }
     for attempt in 1..=RESTART_ATTEMPTS {
         note(&format!(
             "restarting through the reboot syscall ({attempt})"
