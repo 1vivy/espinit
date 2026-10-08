@@ -550,7 +550,7 @@ fn rom_rejects_schema_and_duplicate_partition_names() {
     assert_eq!(error.component, "system");
 }
 
-/// C1 backend contract: exactly the four documented backend spellings are
+/// C1 backend contract: exactly the documented backend spellings are
 /// accepted and classified, so a whole logical unit, an arbitrary path, an
 /// offset or a traversal spelling can never be projected.
 #[test]
@@ -560,6 +560,9 @@ fn rom_backends_accept_documented_forms_and_reject_other_devices() {
         "/dev/loop12",
         "/dev/mapper/lv-system",
         "esp-file:esu/backing.img",
+        "rom-image:boot",
+        "rom-image:vendor_kernel_boot",
+        "rom-image:vbmeta_vendor",
     ] {
         let text = fixtures::rom_with("rom1", [("system", backend)]);
         parse_rom(&text).unwrap();
@@ -586,12 +589,57 @@ fn rom_backends_accept_documented_forms_and_reject_other_devices() {
         ("esp-file:esu/backing img", "BackendUnsupportedLocation"),
         ("relative/backend", "BackendNotAbsolute"),
         ("file:esu/backing.img", "BackendNotAbsolute"),
+        ("rom-image-boot", "BackendNotAbsolute"),
     ] {
         let text = fixtures::rom_with("rom1", [("system", backend)]);
         let error = parse_rom(&text).unwrap_err();
         assert_eq!(error.code, code, "{backend}");
         assert_eq!(error.component, "system", "{backend}");
     }
+
+    // An unknown `rom-image:` base is attributed to the base it named, not to
+    // the partition that carried it.
+    for (backend, component) in [
+        ("rom-image:xbl", "xbl"),
+        ("rom-image:boot_a", "boot_a"),
+        ("rom-image:BOOT", "BOOT"),
+        ("rom-image:system", "system"),
+    ] {
+        let text = fixtures::rom_with("rom1", [("system", backend)]);
+        let error = parse_rom(&text).unwrap_err();
+        assert_eq!(error.code, "BackendRomImageBase", "{backend}");
+        assert_eq!(error.component, component, "{backend}");
+    }
+}
+
+/// C1 backend contract: a `rom-image:` value must name one of the image bases,
+/// so a typo can never name a replacement the executor would not accept. The
+/// base is carried in the error component and the empty spelling stays
+/// component-less.
+#[test]
+fn rom_image_backends_name_a_declared_base() {
+    let entry = |backend: &str| esu_config::PartitionEntry {
+        name: "boot_a".to_owned(),
+        backend: backend.to_owned(),
+        read_only: false,
+        metadata: None,
+    };
+
+    for base in esu_config::IMAGE_BASES {
+        assert_eq!(
+            entry(&format!("rom-image:{base}")).backend().unwrap(),
+            Backend::RomImage(base),
+            "{base}"
+        );
+    }
+
+    let error = entry("rom-image:xbl").backend().unwrap_err();
+    assert_eq!(error.code, "BackendRomImageBase");
+    assert_eq!(error.component, "xbl");
+
+    let error = entry("rom-image:").backend().unwrap_err();
+    assert_eq!(error.code, "BackendRomImageBase");
+    assert_eq!(error.component, "");
 }
 
 /// C1 backend contract: the classification carries the parsed name or index, not

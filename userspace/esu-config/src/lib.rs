@@ -39,19 +39,35 @@ pub const MAX_PROJECTIONS: usize = 128;
 /// Projected partition label limit: the `gpt` ABI carries this many label bytes
 /// plus the terminating NUL, so a longer name could never be projected.
 pub const MAX_PARTITION_NAME_BYTES: usize = 36;
-/// Ordered AVB kernel image bases. Every ROM `>= 2` carries both slot suffixes
-/// of each base as managed ESP kernel images; a ROM never shadows a physical
-/// `<base>_a`/`<base>_b` partition, because the running kernel already chose
-/// the slot it booted from.
-pub const KERNEL_SET_BASES: [&str; 7] = [
+/// Ordered image bases a managed ROM `>= 2` may own, exactly the replacement
+/// names the executor accepts ([`crate::Backend::RomImage`]).
+///
+/// A base is declared by the operator per base name; a ROM declares any
+/// non-empty subset. Each declared base owns one `<base>_a` and one `<base>_b`
+/// projection whose backend is `rom-image:<base>`, and exactly one ESP file for
+/// both letters, so a ROM never shadows a physical `<base>_a`/`<base>_b`
+/// partition with a slot-specific file.
+pub const IMAGE_BASES: [&str; 10] = [
     "boot",
     "init_boot",
     "vendor_boot",
+    "vendor_kernel_boot",
+    "dtb",
     "dtbo",
+    "pvmfw",
     "vbmeta",
     "vbmeta_system",
     "vbmeta_vendor",
 ];
+
+/// ESP-root-relative path of the one image file `base` of ROM `id` owns.
+///
+/// The file is base-named, not slot-named: both letters of the base are served
+/// by the same bytes at any instant. Validate `id` with [`rom_id`] and `base`
+/// with [`IMAGE_BASES`] before using it.
+pub fn base_image_path(id: &str, base: &str) -> String {
+    format!("rom/{id}/{base}.img")
+}
 
 /// A configuration rejection: the stable failure identifier and the component
 /// it is attributable to.

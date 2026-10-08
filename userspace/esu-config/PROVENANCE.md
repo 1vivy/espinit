@@ -1,8 +1,8 @@
 # Vendored esu-config provenance
 
 `userspace/esu-config` is a pinned copy of `crates/esu-config` from gobbl,
-commit `344617cc4f6aa36a4c65dfe04eb389dda0b68223` (branch `storage/efvs`,
-"feat: make Surfacer own EFVS initialization and variable access").
+commit `f91f411` (branch `main`, "feat: ROM OTA staging — image roles, stage
+sources, copy-once arena, ROM 1 posture").
 
 The schema code was authored in this repository as
 `userspace/esuinit/src/config.rs`; the owner approved publishing it as
@@ -12,12 +12,12 @@ only the manifest is adapted to espinit's workspace.
 
 | file | sha256 |
 | --- | --- |
-| src/installed.rs | f226efa953a2158a52958e256b0e2dc12ca02f1ca9bdcb14f111d991d5d9cc79 |
-| src/lib.rs | f81e4f8375c89dcbc8b18c71e554e9fc777901b51af312005a866cf669453711 |
-| src/schema.rs | e6bb638a75d65f2a6511e5796b1d1d70c24633edf28e1227a3681da53b5e48e5 |
-| tests/installed.rs | d19a2583b3e81ae723d821b448cf29a2af029d27fa5ee5b4aa9571f596999769 |
-| tests/schema.rs | 6a52c0bdcb5c24f0479267287d2f12449e5e933e1bd13bf2f5fc047148a302bb |
-| tests/fixtures/mod.rs | 48a1038cef913e29d64960cfbb84b0e107fb9f8e3e25cc34411cfaf9bba2a2c8 |
+| src/installed.rs | a6ee019e016ff28370be5bacdb9d12575fb0a260f67c58b5cc99aae295aea2fb |
+| src/lib.rs | 7786d883251e8ede27e0ba9155baa03019b88606251958e050fdf18ad9631929 |
+| src/schema.rs | f47c72062f3c0f1c98ef8a421d58d61c4e560c5b6e30808741181027ad11c93b |
+| tests/installed.rs | 2b4017b221af7ceed63ba80cc6d4a0d643adc94cf8369baf0eb6b164daa380c3 |
+| tests/schema.rs | 5063e209620112c00f84fa20fb80a527ea5c729ed032b9afaf2d220fdac874d8 |
+| tests/fixtures/mod.rs | d3c9f7840e4634aef5c106f6bf0b05955f90556c32bc315707cc6c145539f6b1 |
 
 From the gobbl worktree, check canonical source identity with:
 
@@ -35,13 +35,15 @@ contents win. Direct physical/loop backends and unslotted/raw vbmeta entries are
 rejected. Other slotted images are admitted subject to runtime footer geometry
 and metadata validation by the shared `avb-graft` crate.
 
-This pin adds optional bounded ROM `number` for Surfacer's first-boot Slot
-initialization; an existing Slot record remains authoritative. It also makes
-canonical gobbl retain the three-module bootstrap introduced by kernelesp's
-`3c6cadc9`: `kernelesp` and `efivarfs` with empty parameters, then
-`efivar_store` with `dev=by-name:bdsvars`. The DT PARTUUID is the backend's
-default for loaders that pass no explicit device. No payload declarations or
-EFVS `SOURCE_REVISION` are changed by this schema synchronization.
+This pin replaces the fixed seven-base, fourteen-path ESP kernel set with
+`rom-image:<base>` roles: ROM ≥ 2 declares any subset of `IMAGE_BASES` (GBL's
+ten replacement names), each `<base>_a`/`<base>_b` partition naming
+`rom-image:<base>` with `read_only = false`, served by one base-named ESP file
+`base_image_path(id, base)` = `rom/<id>/<base>.img`. `kernel_images()` takes no
+slot. New codes: `KernelSetEmpty`, `KernelSetReadOnly`, `BackendRomImageBase`;
+`KernelSetDuplicatePath` and `KERNEL_SET_BASES` are gone. Earlier pins added the
+bounded ROM `number` and the three-module bootstrap (`kernelesp`, `efivarfs`,
+`efivar_store` with `dev=by-name:bdsvars`).
 
 ## Deviations from the source manifest
 

@@ -2,8 +2,7 @@
 //!
 //! The manifest text is a valid installed manifest (strict schema plus the
 //! fixed cpio identity bootstrap), and the ROM texts are the installed
-//! configurations of a physical ROM 1 and of a ROM 2 with a complete ESP
-//! kernel image set.
+//! configurations of a physical ROM 1 and of a ROM 2 with a base image set.
 #![allow(dead_code)] // Each test binary uses a subset of these fixtures.
 
 /// A valid installed manifest: strict schema plus the identity bootstrap, with
@@ -77,30 +76,18 @@ backend = "/dev/mapper/rom2-fw-xbl_a"
 read_only = false
 "#;
 
-/// Partition names of a complete ROM `>= 2` kernel set: [`KERNEL_SET_BASES`]
-/// order with slot A before slot B.
+/// The two bases most ROM `>= 2` tests declare, in [`IMAGE_BASES`] order.
 ///
-/// [`KERNEL_SET_BASES`]: esu_config::KERNEL_SET_BASES
-pub const KERNEL_PARTITIONS: [&str; 14] = [
-    "boot_a",
-    "boot_b",
-    "init_boot_a",
-    "init_boot_b",
-    "vendor_boot_a",
-    "vendor_boot_b",
-    "dtbo_a",
-    "dtbo_b",
-    "vbmeta_a",
-    "vbmeta_b",
-    "vbmeta_system_a",
-    "vbmeta_system_b",
-    "vbmeta_vendor_a",
-    "vbmeta_vendor_b",
-];
+/// [`IMAGE_BASES`]: esu_config::IMAGE_BASES
+pub const DECLARED_BASES: [&str; 2] = ["boot", "vbmeta"];
 
-/// ESP-root-relative image path admitted for one kernel partition.
-pub fn kernel_path(partition: &str) -> String {
-    format!("esu/rom2/{partition}.img")
+/// Partition names of a two-base ROM `>= 2` image set: [`DECLARED_BASES`] order
+/// with slot A before slot B.
+pub const IMAGE_PARTITIONS: [&str; 4] = ["boot_a", "boot_b", "vbmeta_a", "vbmeta_b"];
+
+/// ESP-root-relative image path admitted for one base of ROM 2.
+pub fn image_path(base: &str) -> String {
+    format!("rom/rom2/{base}.img")
 }
 
 /// A managed ROM with the given id and exactly the given partitions, all
@@ -117,18 +104,21 @@ pub fn rom_with<'a>(id: &str, partitions: impl IntoIterator<Item = (&'a str, &'a
     text
 }
 
-/// ROM 2 text built from the complete kernel set: `keep` selects the kernel
-/// partitions and `backend` overrides one partition's backend.
+/// ROM 2 text built from the image set: `keep` selects the partitions and
+/// `backend` overrides one partition's backend.
 fn rom2_build(keep: impl Fn(&str) -> bool, backend: impl Fn(&str) -> Option<String>) -> String {
     let mut text = String::from("schema_version = 1\nid = \"rom2\"\nmanaged = true\n");
 
-    for partition in KERNEL_PARTITIONS {
+    for partition in IMAGE_PARTITIONS {
         if !keep(partition) {
             continue;
         }
 
-        let value =
-            backend(partition).unwrap_or_else(|| format!("esp-file:{}", kernel_path(partition)));
+        let base = partition
+            .strip_suffix("_a")
+            .or_else(|| partition.strip_suffix("_b"))
+            .expect("image partitions carry a slot suffix");
+        let value = backend(partition).unwrap_or_else(|| format!("rom-image:{base}"));
         text.push_str(&format!(
             "[[partitions]]\nname = \"{partition}\"\nbackend = \"{value}\"\nread_only = false\n"
         ));
@@ -137,29 +127,21 @@ fn rom2_build(keep: impl Fn(&str) -> bool, backend: impl Fn(&str) -> Option<Stri
     text
 }
 
-/// ROM 2 with the complete fourteen-image ESP kernel set.
+/// ROM 2 with a complete two-base image set.
 pub fn rom2() -> String {
     rom2_build(|_| true, |_| None)
 }
 
-/// ROM 2 without one kernel partition.
+/// ROM 2 without one image partition.
 pub fn rom2_without(missing: &str) -> String {
     rom2_build(|partition| partition != missing, |_| None)
 }
 
-/// ROM 2 with one kernel partition's backend replaced.
+/// ROM 2 with one image partition's backend replaced.
 pub fn rom2_replacing(partition: &str, backend: &str) -> String {
     rom2_build(
         |_| true,
         |name| (name == partition).then(|| backend.to_owned()),
-    )
-}
-
-/// ROM 2 with one kernel partition's image path replaced.
-pub fn rom2_replacing_path(partition: &str, path: &str) -> String {
-    rom2_build(
-        |_| true,
-        |name| (name == partition).then(|| format!("esp-file:{path}")),
     )
 }
 

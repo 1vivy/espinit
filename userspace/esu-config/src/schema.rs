@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 
 use crate::{
-    Error, KERNEL_SET_BASES, MAX_IDENTIFIER_BYTES, MAX_PARAMS_BYTES, MAX_PARTITION_NAME_BYTES,
+    Error, IMAGE_BASES, MAX_IDENTIFIER_BYTES, MAX_PARAMS_BYTES, MAX_PARTITION_NAME_BYTES,
     MAX_PATH_BYTES, MAX_PROJECTIONS, MAX_ROM_NUMBER, SCHEMA_VERSION, identifier, relative_path,
     rom_id,
 };
@@ -96,7 +96,7 @@ pub struct FirmwareView {
 }
 
 /// Backend spelling distinctions preserved: `/dev/block/by-name/<P>`,
-/// `/dev/mapper/<n>`, `/dev/loopN`, `esp-file:<rel>`.
+/// `/dev/mapper/<n>`, `/dev/loopN`, `esp-file:<rel>`, `rom-image:<base>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend<'a> {
     /// A physical partition, addressed by its unique sysfs `PARTNAME`.
@@ -107,6 +107,10 @@ pub enum Backend<'a> {
     Loop(u32),
     /// A preallocated regular file inside the mounted ESP, ESP-root-relative.
     EspFile(&'a str),
+    /// An image base whose bytes are served by the running esu boot from
+    /// `esu_config::base_image_path(rom, base)`: the current ROM's own base file
+    /// for the booted letter, the staging LV of that base for the staged letter.
+    RomImage(&'a str),
 }
 
 /// Documented by-name backend prefix.
@@ -115,6 +119,8 @@ const BY_NAME_PREFIX: &str = "/dev/block/by-name/";
 const MAPPER_PREFIX: &str = "/dev/mapper/";
 /// Documented ESP regular-file backend prefix.
 const ESP_FILE_PREFIX: &str = "esp-file:";
+/// Documented image-base backend prefix.
+const ROM_IMAGE_PREFIX: &str = "rom-image:";
 /// Documented loop backend prefix.
 const LOOP_PREFIX: &str = "/dev/loop";
 
@@ -122,9 +128,14 @@ const LOOP_PREFIX: &str = "/dev/loop";
 ///
 /// Anything else is rejected, including whole logical units, offsets, arbitrary
 /// paths, and symlink or traversal spellings; the device itself is resolved by
-/// the Linux backend resolver immediately before the `gpt` entry.
+/// the Linux backend resolver immediately before the `gpt` entry. An
+/// `rom-image:` value must name one of [`crate::IMAGE_BASES`], because no other
+/// name is a replacement the executor could boot.
 pub fn parse_backend(value: &str) -> Result<Backend<'_>, Error> {
-    if !value.starts_with('/') && !value.starts_with(ESP_FILE_PREFIX) {
+    if !value.starts_with('/')
+        && !value.starts_with(ESP_FILE_PREFIX)
+        && !value.starts_with(ROM_IMAGE_PREFIX)
+    {
         return Err(Error::new("BackendNotAbsolute"));
     }
 
@@ -134,6 +145,16 @@ pub fn parse_backend(value: &str) -> Result<Backend<'_>, Error> {
 
     if value.bytes().any(|byte| byte == 0) {
         return Err(Error::new("BackendInvalidCharacter"));
+    }
+
+    if let Some(base) = value.strip_prefix(ROM_IMAGE_PREFIX) {
+        return if IMAGE_BASES.contains(&base) {
+            Ok(Backend::RomImage(base))
+        } else if base.is_empty() {
+            Err(Error::new("BackendRomImageBase"))
+        } else {
+            Err(Error::at("BackendRomImageBase", base))
+        };
     }
 
     let classified = if let Some(label) = value.strip_prefix(BY_NAME_PREFIX) {
@@ -381,7 +402,7 @@ fn validate_rom_structure(rom: &RomConfig) -> Result<(), Error> {
 ///
 /// Views exist only on a managed ROM `>= 2`: ROM 1 and single-ROM payloads read
 /// the physical firmware partitions directly. Every view names a physical
-/// `<base>_a`/`<base>_b` PARTNAME that is not one of the seven kernel-set bases
+/// `<base>_a`/`<base>_b` PARTNAME that is not one of the image bases
 /// (the running kernel already chose that slot), carries the deterministic
 /// `(rom_number << 16) | index` thin id of its 1-based list position, appears
 /// once, and is projected as the writable `/dev/mapper/rom<N>-fw-<name>`
@@ -420,7 +441,7 @@ fn validate_firmware_views(rom: &RomConfig, rom_number: u32) -> Result<(), Error
             return Err(Error::at("RomFirmwareViewName", view.name.clone()));
         };
 
-        if KERNEL_SET_BASES.contains(&base) {
+        if IMAGE_BASES.contains(&base) {
             return Err(Error::at("RomFirmwareViewName", view.name.clone()));
         }
 

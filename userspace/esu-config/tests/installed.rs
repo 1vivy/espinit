@@ -1,78 +1,105 @@
-//! Installed-boot admission tests for the C1 contract: which kernel images a
-//! ROM boots and where they come from.
+//! Installed-boot admission tests for the C1 contract: which base images a ROM
+//! boots and where they come from.
 //!
 //! Every test names the contract it protects and the wrong behaviour it catches.
 
 mod fixtures;
 
-use esu_config::{
-    InstalledConfig, KERNEL_SET_BASES, KernelImage, KernelImages, Slot, parse_installed,
-};
+use esu_config::{IMAGE_BASES, InstalledConfig, KernelImage, KernelImages, Slot, parse_installed};
 
-/// The seven ESP kernel images admitted for one slot.
-fn esp_images<'a>(installed: &'a InstalledConfig, slot: Slot) -> [KernelImage<'a>; 7] {
-    match installed.kernel_images(slot) {
+/// The ESP base images admitted for ROM 2's declared bases.
+fn esp_images(installed: &InstalledConfig) -> Vec<KernelImage> {
+    match installed.kernel_images() {
         KernelImages::Esp(images) => images,
-        KernelImages::Physical => panic!("expected an ESP kernel set"),
+        KernelImages::Physical => panic!("expected an ESP image set"),
     }
 }
 
 /// C1 installed admission: a ROM 1 boot reads the physical kernel partitions of
-/// the current slot, so no `<base>_a`/`<base>_b` partition may be an ESP file
-/// and the physical set is reported for both slots; a non-kernel ESP file
-/// projection stays allowed.
+/// the booted slot, so no partition may carry an image backend — an
+/// `esp-file:` image partition or a `rom-image:` role — and the physical set is
+/// reported. A non-image read-only ESP-file projection stays allowed.
 #[test]
-fn rom_one_is_physical_and_rejects_esp_file_kernel_partitions() {
+fn rom_one_is_physical_and_rejects_image_roles() {
     let installed = parse_installed(fixtures::MANIFEST, fixtures::ROM1, "rom1", 1).unwrap();
     assert_eq!(installed.rom_number(), 1);
     assert_eq!(installed.rom().id, "rom1");
     assert_eq!(installed.manifest().rom, "roms");
-    assert_eq!(installed.kernel_images(Slot::A), KernelImages::Physical);
-    assert_eq!(installed.kernel_images(Slot::B), KernelImages::Physical);
+    assert_eq!(installed.kernel_images(), KernelImages::Physical);
 
     let text = fixtures::rom_with("rom1", [("system", "esp-file:esu/rom1/system.img")]);
     let installed = parse_installed(fixtures::MANIFEST, &text, "rom1", 1).unwrap();
-    assert_eq!(installed.kernel_images(Slot::A), KernelImages::Physical);
+    assert_eq!(installed.kernel_images(), KernelImages::Physical);
 
-    for partition in ["boot_a", "boot_b", "vbmeta_vendor_a"] {
+    for partition in [
+        "boot_a",
+        "boot_b",
+        "vbmeta_vendor_a",
+        "vendor_kernel_boot_b",
+        "pvmfw_a",
+    ] {
         let backend = format!("esp-file:esu/rom1/{partition}.img");
         let text = fixtures::rom_with("rom1", [(partition, backend.as_str())]);
         let error = parse_installed(fixtures::MANIFEST, &text, "rom1", 1).unwrap_err();
         assert_eq!(error.code, "KernelSetBackend", "{partition}");
         assert_eq!(error.component, partition, "{partition}");
     }
+
+    // A base role is refused wherever it appears, including on a partition
+    // whose name carries no slot suffix.
+    for (partition, backend) in [
+        ("boot_a", "rom-image:boot"),
+        ("vbmeta_b", "rom-image:vbmeta"),
+        ("boot", "rom-image:boot"),
+    ] {
+        let text = fixtures::rom_with("rom1", [(partition, backend)]);
+        let error = parse_installed(fixtures::MANIFEST, &text, "rom1", 1).unwrap_err();
+        assert_eq!(error.code, "KernelSetBackend", "{backend}");
+        assert_eq!(error.component, partition, "{backend}");
+    }
 }
 
-/// C1 installed admission: a ROM `>= 2` boots its own seven AVB kernel images
-/// from the ESP, so all fourteen `<base>_a`/`<base>_b` partitions must be
-/// admitted and `kernel_images` must report each slot in `KERNEL_SET_BASES`
-/// order with the path that follows `esp-file:`.
+/// C1 installed admission: a ROM `>= 2` boots its own base images from the ESP,
+/// so every declared base is admitted as both letters of one `rom-image:` role
+/// and `kernel_images` reports one base-named file per base in [`IMAGE_BASES`]
+/// order.
 #[test]
-fn rom_two_admits_the_complete_esp_kernel_set() {
+fn rom_two_admits_the_declared_base_image_set() {
     let text = fixtures::rom2();
     let installed = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap();
     assert_eq!(installed.rom_number(), 2);
     assert_eq!(installed.rom().id, "rom2");
 
-    for slot in [Slot::A, Slot::B] {
-        let images = esp_images(&installed, slot);
+    let images = esp_images(&installed);
+    assert_eq!(images.len(), fixtures::DECLARED_BASES.len());
 
-        assert_eq!(images.len(), KERNEL_SET_BASES.len());
-
-        for (image, base) in images.iter().zip(KERNEL_SET_BASES) {
-            let partition = format!("{base}{}", slot.suffix());
-            assert_eq!(image.base, base);
-            assert_eq!(image.partition, partition);
-            assert_eq!(image.path, fixtures::kernel_path(&partition));
-        }
+    for (image, base) in images.iter().zip(fixtures::DECLARED_BASES) {
+        assert_eq!(image.base, base);
+        assert_eq!(image.path, fixtures::image_path(base));
     }
 
-    assert_eq!(esp_images(&installed, Slot::A)[0].partition, "boot_a");
+    // The declared subset is expanded in IMAGE_BASES order, never declaration
+    // order: vbmeta follows boot there.
+    let declared: Vec<&str> = IMAGE_BASES
+        .into_iter()
+        .filter(|base| fixtures::DECLARED_BASES.contains(base))
+        .collect();
     assert_eq!(
-        esp_images(&installed, Slot::B)[6].partition,
-        "vbmeta_vendor_b"
+        images.iter().map(|image| image.base).collect::<Vec<_>>(),
+        declared
     );
-    assert_eq!(esp_images(&installed, Slot::B)[6].base, KERNEL_SET_BASES[6]);
+
+    // A base outside the declared subset is absent, and one base file serves
+    // both letters by construction: the same path is reported once.
+    assert!(!images.iter().any(|image| image.base == "dtbo"));
+    assert_eq!(
+        images
+            .iter()
+            .filter(|image| image.base == "boot")
+            .map(|image| image.path.as_str())
+            .collect::<Vec<_>>(),
+        [fixtures::image_path("boot").as_str()]
+    );
 }
 
 /// C1 slot contract: the slot suffix, index and index lookup are the AOSP
@@ -89,12 +116,12 @@ fn slot_suffixes_and_indices_are_the_aosp_convention() {
     assert_eq!(Slot::from_index(2), None);
 }
 
-/// C1 installed admission: every one of the fourteen kernel partitions is
-/// required, and the missing partition is named, so a partial ESP kernel set can
-/// never boot with a stale image.
+/// C1 installed admission: a declared base requires both of its slot
+/// partitions, and the missing one is named, so a half-admitted base can never
+/// boot with a stale letter.
 #[test]
-fn kernel_set_requires_every_partition_of_both_slots() {
-    for missing in fixtures::KERNEL_PARTITIONS {
+fn declared_bases_require_both_letters() {
+    for missing in fixtures::IMAGE_PARTITIONS {
         let text = fixtures::rom2_without(missing);
         let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
         assert_eq!(error.code, "KernelSetIncomplete", "{missing}");
@@ -102,70 +129,66 @@ fn kernel_set_requires_every_partition_of_both_slots() {
     }
 }
 
-/// C1 installed admission: every kernel partition of a ROM `>= 2` must be an
-/// `esp-file:` image, because the executor reads the AVB images from the managed
-/// ESP and never from a physical partition.
+/// C1 installed admission: every declared image partition must carry its base's
+/// `rom-image:` role, because the executor resolves the base file and never
+/// reads an arbitrary physical partition or ESP file for a base.
 #[test]
-fn kernel_set_partitions_must_be_esp_files() {
-    for (partition, backend) in [
-        ("boot_a", "/dev/block/by-name/boot_a"),
-        ("vbmeta_system_b", "/dev/mapper/rom2-fw-vbmeta_system_b"),
+fn image_partitions_must_carry_their_base_role() {
+    for (partition, backend, code) in [
+        ("boot_a", "/dev/block/by-name/boot_a", "KernelSetBackend"),
+        (
+            "vbmeta_b",
+            "/dev/mapper/rom2-fw-vbmeta_b",
+            "KernelSetBackend",
+        ),
+        ("boot_b", "esp-file:rom/rom2/boot.img", "KernelSetBackend"),
+        ("vbmeta_a", "rom-image:dtbo", "KernelSetBackend"),
+        ("vbmeta_b", "rom-image:pvmfw", "KernelSetBackend"),
     ] {
         let text = fixtures::rom2_replacing(partition, backend);
         let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
-        assert_eq!(error.code, "KernelSetBackend", "{partition}");
-        assert_eq!(error.component, partition, "{partition}");
+        assert_eq!(error.code, code, "{partition} = {backend}");
+        assert_eq!(error.component, partition, "{partition} = {backend}");
     }
 }
 
-/// C1 installed admission: the ESP is FAT, which UEFI and vfat resolve ASCII
-/// case-insensitively, so two kernel paths differing only by case alias one
-/// image file and must be rejected as duplicates, naming the later partition.
-/// Case alone never fabricates a duplicate: a case-only variant of a kernel's
-/// own (replaced) path stays admitted when no other kernel path matches it.
+/// C1 installed admission: a declared base is written in place by promote and
+/// stays writable, so a read-only image projection is refused and the partition
+/// is named.
 #[test]
-fn kernel_set_paths_are_compared_case_insensitively() {
-    for (partition, aliased, aliasing) in [
-        ("boot_b", "boot_a", "ESU/ROM2/BOOT_A.IMG"),
-        (
-            "vbmeta_vendor_b",
-            "vbmeta_vendor_a",
-            "Esu/Rom2/Vbmeta_Vendor_A.img",
-        ),
-    ] {
-        let aliased = fixtures::kernel_path(aliased);
-        assert!(
-            aliased.eq_ignore_ascii_case(aliasing),
-            "{aliased} vs {aliasing}"
-        );
-
-        let text = fixtures::rom2_replacing_path(partition, aliasing);
-        let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
-        assert_eq!(error.code, "KernelSetDuplicatePath", "{partition}");
-        assert_eq!(error.component, partition, "{partition}");
-    }
-
-    let text = fixtures::rom2_replacing_path("boot_b", "ESU/ROM2/Boot_B.img");
-    let installed = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap();
-    assert_eq!(installed.rom_number(), 2);
+fn image_partitions_must_be_writable() {
+    let text = fixtures::rom2().replace(
+        "name = \"boot_a\"\nbackend = \"rom-image:boot\"\nread_only = false",
+        "name = \"boot_a\"\nbackend = \"rom-image:boot\"\nread_only = true",
+    );
+    assert_ne!(text, fixtures::rom2());
+    let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
+    assert_eq!(error.code, "KernelSetReadOnly");
+    assert_eq!(error.component, "boot_a");
 }
 
-/// C1 installed admission: the fourteen kernel image paths must be distinct, so
-/// a ROM can never alias two kernel bases (or both slots of one base) to a
-/// single image file. The rejection names the partition that repeats a path an
-/// earlier kernel partition already admitted.
+/// C1 installed admission: a ROM `>= 2` without a single declared base has no
+/// image to boot and is refused as empty, naming no component.
 #[test]
-fn kernel_set_paths_must_be_distinct() {
-    for (partition, aliased) in [
-        ("boot_b", "boot_a"),
-        ("vbmeta_vendor_b", "init_boot_a"),
-        ("dtbo_b", "dtbo_a"),
+fn rom_two_without_a_declared_base_is_refused() {
+    let text = fixtures::rom_with("rom2", [("metadata", "/dev/mapper/rom-metadata_2")]);
+    let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
+    assert_eq!(error.code, "KernelSetEmpty");
+    assert_eq!(error.component, "");
+}
+
+/// C1 installed admission: an unknown image base is a schema error wherever it
+/// appears, so a typo can never name a role the executor cannot serve.
+#[test]
+fn unknown_image_bases_are_refused() {
+    for (partition, backend) in [
+        ("system_a", "rom-image:xbl"),
+        ("boot_a", "rom-image:boot_a"),
+        ("boot_a", "rom-image:"),
     ] {
-        let path = fixtures::kernel_path(aliased);
-        let text = fixtures::rom2_replacing_path(partition, &path);
-        let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
-        assert_eq!(error.code, "KernelSetDuplicatePath", "{partition}");
-        assert_eq!(error.component, partition, "{partition}");
+        let text = fixtures::rom_with("rom1", [(partition, backend)]);
+        let error = parse_installed(fixtures::MANIFEST, &text, "rom1", 1).unwrap_err();
+        assert_eq!(error.code, "BackendRomImageBase", "{backend}");
     }
 }
 
@@ -193,7 +216,7 @@ fn installed_admission_refuses_a_manifest_without_the_identity_pair() {
 
 /// C1 installed admission order: the manifest, its cpio identity pair, the
 /// selected ROM text and id, the ROM number, the managed module rule and only
-/// then the kernel set decide the rejection, so a stale or mismatched
+/// then the image set decide the rejection, so a stale or mismatched
 /// configuration is reported by its real cause.
 #[test]
 fn installed_admission_reports_the_first_failure_in_order() {
@@ -217,8 +240,8 @@ fn installed_admission_reports_the_first_failure_in_order() {
     let error = parse_installed(&no_gpt, &fixtures::rom2(), "rom2", 2).unwrap_err();
     assert_eq!(error.code, "ManifestManagedGptMissing");
 
-    let text = fixtures::rom2_without("dtbo_a");
+    let text = fixtures::rom2_without("vbmeta_b");
     let error = parse_installed(fixtures::MANIFEST, &text, "rom2", 2).unwrap_err();
     assert_eq!(error.code, "KernelSetIncomplete");
-    assert_eq!(error.component, "dtbo_a");
+    assert_eq!(error.component, "vbmeta_b");
 }
