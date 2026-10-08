@@ -985,7 +985,9 @@ mod tests {
     #[test]
     fn fatal_panic_follows_aosp_bootconfig_exactly_once() {
         assert!(fatal_panic_requested("androidboot.init_fatal_panic=true\n"));
-        assert!(fatal_panic_requested("androidboot.init_fatal_panic = \"true\"\n"));
+        assert!(fatal_panic_requested(
+            "androidboot.init_fatal_panic = \"true\"\n"
+        ));
         for off in [
             "",
             "androidboot.init_fatal_panic=false\n",

@@ -222,7 +222,8 @@ pub fn report(message: &str) {
     error!("{message}");
 
     if let Ok(mut kmsg) = OpenOptions::new().write(true).open("/dev/kmsg") {
-        let _ = writeln!(kmsg, "<3>esud: {message}");
+        // One write is one kmsg record; `writeln!` would split level, prefix and message.
+        let _ = kmsg.write_all(format!("<3>esud: {message}\n").as_bytes());
     }
 
     let path = Path::new(crate::defs::LOG_DIR).join(ROM_LOG);

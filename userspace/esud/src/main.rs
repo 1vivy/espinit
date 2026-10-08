@@ -44,7 +44,8 @@ fn report_fatal(error: &anyhow::Error) {
     use std::io::Write;
 
     if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
-        let _ = writeln!(kmsg, "<3>esud fatal: {error:#}");
+        // One write is one kmsg record; `writeln!` would split level, prefix and message.
+        let _ = kmsg.write_all(format!("<3>esud fatal: {error:#}\n").as_bytes());
     }
 }
 

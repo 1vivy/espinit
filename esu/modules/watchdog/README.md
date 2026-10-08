@@ -46,17 +46,22 @@ step, logging every step to kmsg with the `esu watchdog:` prefix:
    command is what routes the next restart into the one-shot fastboot path.
    Under AOSP's `androidboot.init_fatal_panic=true` (the lab crash profile) the
    watchdog writes sysrq `c` first, as esuinit's fatal path does, so a 900e
-   minidump keeps the printk ring.
+   minidump keeps the printk ring (`md_KLOGBUF.BIN`; the console dump
+   `md_KCONSOLE.BIN` drops these info-level notes).
 
 Every step is best effort: a missing ESP mount, a missing misc partition or a
 failed write is logged and never delays the restart. Failure of the restart
 itself is retried twice more, then reported as a nonzero exit.
 
-Device status (2026-10-08): on an enforcing hang the BCB request and the reset
-worked (`bootonce-bootloader` / `esu:watchdog:boot_completed` read back from misc,
-Surfacer logged and consumed it), but `esu/receipts/watchdog.txt` did not reach
-the ESP; the reason is not known because its kmsg notes were lost with the reset.
-The panic branch was added so the next such failure leaves a 900e dump instead.
+Device status (2026-10-08): the first enforcing hangs left the BCB request and the
+reset but no receipt. The printk ring of 900e dump `20261008T105049Z-900e-2` showed
+why: both remounts failed with EINVAL because the request lacked `MS_REMOUNT` (a
+null-source fresh mount), and the read-only/read-write order was inverted. With
+both fixed, a 6 s test deadline on an enforcing boot (payload `ba39ed2f79a4`, dump
+`20261008T111534Z-900e-2`) wrote 65536 bytes to `esu/receipts/watchdog.txt`,
+restored the read-only mount, recorded the cause in misc and panicked; the next
+Surfacer consumed the command, and the ESP read back the receipt
+(`20261008T111832Z-phone-efvs-esp-read`).
 
 ## Scope
 

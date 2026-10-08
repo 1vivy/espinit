@@ -119,8 +119,8 @@ fn capture_receipt() {
         }
     };
 
-    let written = remount(mount, true).and_then(|()| store_receipt(&receipts, &tail));
-    let restored = remount(mount, false);
+    let written = remount(mount, false).and_then(|()| store_receipt(&receipts, &tail));
+    let restored = remount(mount, true);
     rustix::fs::sync();
 
     match written {
@@ -168,7 +168,9 @@ fn restart() -> anyhow::Result<()> {
     if esuinit::init::fatal_panic_requested(&bootconfig) {
         note("androidboot.init_fatal_panic=true; panicking through sysrq");
         if let Err(error) = std::fs::write("/proc/sysrq-trigger", b"c") {
-            note(&format!("cannot panic through sysrq, restarting instead: {error}"));
+            note(&format!(
+                "cannot panic through sysrq, restarting instead: {error}"
+            ));
         }
     }
     for attempt in 1..=RESTART_ATTEMPTS {
@@ -231,17 +233,23 @@ fn note(message: &str) {
     log::info!("esu watchdog: {message}");
 
     if let Ok(mut kmsg) = std::fs::OpenOptions::new().write(true).open(KMSG) {
-        let _ = writeln!(kmsg, "<6>esu watchdog: {message}");
+        // One write is one kmsg record; `writeln!` would split prefix and message.
+        let _ = kmsg.write_all(format!("<6>esu watchdog: {message}\n").as_bytes());
+    }
+}
+
+/// Flags of the remount request that toggles `RDONLY` on the existing ESP mount.
+const fn remount_flags(read_only: bool) -> libc::c_ulong {
+    let flags = libc::MS_REMOUNT | ESP_MOUNT_FLAGS_RW;
+    if read_only {
+        flags | libc::MS_RDONLY
+    } else {
+        flags
     }
 }
 
 /// Toggle `RDONLY` on the ESP mount for the single write window.
 fn remount(mount: &str, read_only: bool) -> io::Result<()> {
-    let mut flags = ESP_MOUNT_FLAGS_RW;
-    if read_only {
-        flags |= libc::MS_RDONLY;
-    }
-
     let target = std::ffi::CString::new(mount).map_err(io::Error::other)?;
 
     // SAFETY: the target is a live NUL-terminated string, a remount ignores the
@@ -251,7 +259,7 @@ fn remount(mount: &str, read_only: bool) -> io::Result<()> {
             std::ptr::null(),
             target.as_ptr(),
             std::ptr::null(),
-            flags,
+            remount_flags(read_only),
             std::ptr::null(),
         )
     };
@@ -334,19 +342,25 @@ mod tests {
         ))
     }
 
-    /// The remount set must stay the ro/nosuid/nodev/noexec ESP contract that
-    /// esuinit's receipt window uses, with only `RDONLY` toggled.
+    /// The receipt window remounts the existing ESP mount with esuinit's flag set and
+    /// only `RDONLY` toggled. Without `MS_REMOUNT` the null-source request is a fresh
+    /// mount that fails with EINVAL, so no receipt was ever written (900e dump
+    /// `20261008T105049Z-900e-2`).
     #[test]
-    fn esp_remount_flags_match_the_esuinit_set() {
+    fn receipt_window_remounts_the_existing_esp_mount() {
         assert_eq!(
             ESP_MOUNT_FLAGS_RW,
             libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RELATIME
         );
-        assert_eq!(ESP_MOUNT_FLAGS_RW & libc::MS_RDONLY, 0);
-
-        let read_only = ESP_MOUNT_FLAGS_RW | libc::MS_RDONLY;
-        assert_ne!(read_only, ESP_MOUNT_FLAGS_RW);
-        assert_eq!(read_only & !libc::MS_RDONLY, ESP_MOUNT_FLAGS_RW);
+        for read_only in [false, true] {
+            let flags = remount_flags(read_only);
+            assert_ne!(flags & libc::MS_REMOUNT, 0);
+            assert_eq!(flags & libc::MS_RDONLY != 0, read_only);
+            assert_eq!(
+                flags & !(libc::MS_REMOUNT | libc::MS_RDONLY),
+                ESP_MOUNT_FLAGS_RW
+            );
+        }
     }
 
     /// Boot completion cancels the deadline without touching the device.
