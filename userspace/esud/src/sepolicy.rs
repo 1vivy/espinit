@@ -765,3 +765,33 @@ pub fn check_rule(policy: &str) -> Result<()> {
     parse_sepolicy(policy.trim(), true)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every shipped module policy must pass the strict parser PID 1 and
+    /// `boot-patch` admit it with: a critical module whose rule does not parse
+    /// stops the boot. SELinux `target:class` notation and semicolons inside
+    /// comments are the known ways to break it.
+    #[test]
+    fn shipped_module_policies_parse_strictly() {
+        let modules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../esu/modules");
+        let mut parsed = 0;
+        for entry in std::fs::read_dir(&modules).unwrap() {
+            let rule = entry.unwrap().path().join("sepolicy.rule");
+            if !rule.is_file() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&rule).unwrap();
+            parse_sepolicy(text.trim(), true)
+                .unwrap_or_else(|error| panic!("{}: {error}", rule.display()));
+            parsed += 1;
+        }
+        assert!(
+            parsed >= 2,
+            "no shipped module policies found under {modules:?}"
+        );
+        assert!(parse_sepolicy("allow esu esu_blk_device:dir search", true).is_err());
+    }
+}

@@ -37,7 +37,7 @@ allow esu_bootctl vfat dir { getattr open read search write add_name remove_name
 allow esu_bootctl vfat file { getattr open read write create rename unlink setattr }
 allow esu_bootctl vfat filesystem remount
 allow esu_bootctl vfat dir mounton
-allow esu_bootctl self global_capability_class_set sys_admin
+allow esu_bootctl esu_bootctl capability sys_admin
 # The switch devices are reloaded through device-mapper, and the promoted image
 # keeps serving the running letter through a read-only loop device.
 allow esu_bootctl dm_device chr_file { getattr open read write ioctl }
