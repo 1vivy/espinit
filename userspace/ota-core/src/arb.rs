@@ -6,6 +6,13 @@
 //! command-line shell, the JSON report and the interactive prompts are gone, and
 //! what remains is the pure byte scan as one function over one image.
 //!
+//! One deliberate deviation: arbscan accepts only hash tables that are a
+//! multiple of 32 bytes (SHA-256 entries). The OnePlus 15 `xbl_config` carries
+//! seven SHA-384 entries (a 336-byte table, header version 7), which arbscan
+//! skips and then reports no metadata for
+//! (`gobbl-lab/records/20261008T223527Z-phone-ota-probe`), so this port also
+//! accepts multiples of 48 bytes.
+//!
 //! An `xbl_config` carries a Qualcomm HASH segment whose OEM metadata block
 //! holds three little-endian `u32`s: major version, minor version and the ARB
 //! index. Refusing an update whose ARB is higher than the running one is what
@@ -15,7 +22,8 @@
 
 /// Largest program segment considered, matching arbscan's safety cap.
 pub const MAX_SEGMENT: u64 = 20 * 1024 * 1024;
-/// The HASH header: five `u32`s.
+/// The HASH header: nine `u32`s (version, the common/QTI/OEM metadata sizes,
+/// the hash table size and four signature/certificate sizes).
 const HASH_HEADER: usize = 36;
 /// Bytes of the segment start scanned for a HASH header.
 const SCAN_BYTES: usize = 0x1000;
@@ -129,7 +137,8 @@ fn find_hash_header(segment: &[u8]) -> Option<usize> {
         if common > 0x1000 || qti > 0x1000 || oem > 0x4000 {
             continue;
         }
-        if hash_table == 0 || !hash_table.is_multiple_of(32) {
+        // SHA-256 (32-byte) or SHA-384 (48-byte) hash table entries.
+        if hash_table == 0 || !(hash_table.is_multiple_of(32) || hash_table.is_multiple_of(48)) {
             continue;
         }
         if offset + HASH_HEADER + common + qti + oem > segment.len() {
@@ -263,6 +272,28 @@ mod tests {
         );
     }
 
+    /// The phone's `xbl_config_b` HASH segment layout: a zero word, then a
+    /// version-7 header with 24 bytes of common metadata, a 336-byte SHA-384
+    /// table (seven entries) and OEM metadata `3, 0, 0`.
+    #[test]
+    fn a_sha384_table_like_the_phone_image_yields_its_metadata() {
+        let words: [u32; 19] = [
+            0, 7, 0x18, 0, 0xe0, 0x150, 0, 0, 0x68, 0xd20, // header at 4
+            0, 0, 0x25, 0, 3, 0, // common metadata
+            3, 0, 0, // OEM metadata: major, minor, ARB
+        ];
+        let mut segment: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        segment.resize(0x130c, 0);
+        assert_eq!(
+            scan(&elf64(&[(0, segment)])),
+            Some(Arb {
+                major: 3,
+                minor: 0,
+                arb: 0
+            })
+        );
+    }
+
     #[test]
     fn structurally_invalid_headers_are_refused() {
         let cases: &[(u32, u32, [u32; 3])] = &[
@@ -278,8 +309,9 @@ mod tests {
             assert_eq!(scan(&image), None, "{version} {oem_size} {metadata:?}");
         }
 
-        // A hash table size of zero or a non-multiple of 32 is refused too.
-        for hash_table in [0u32, 33, 1] {
+        // A hash table size of zero, or one that holds neither whole SHA-256 nor
+        // whole SHA-384 entries, is refused too.
+        for hash_table in [0u32, 33, 1, 40] {
             let mut segment = hash_segment(0, 1, 12, [1, 2, 5]);
             segment[16..20].copy_from_slice(&hash_table.to_le_bytes());
             assert_eq!(scan(&elf64(&[(4, segment)])), None, "{hash_table}");

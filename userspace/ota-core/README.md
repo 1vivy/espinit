@@ -37,6 +37,13 @@ The `Stage-<id>` transaction record itself is **not** here: it lives in
 `efivars::selected_slot`) next to the other efivarfs records, because both the
 Linux side and the UEFI side read those bytes.
 
+`examples/inspect.rs` is the host half of the lab's read-only `phone ota-probe`
+instrument: `cargo run --release -p ota-core --example inspect -- <kmi|arb|efisp>
+<image>` prints one line (`kmi android16-6.12-6`, `arb major=<m> minor=<n> arb=<a>`
+or `arb none`, `efisp true|false`) and exits 1 with the error on failure. It calls
+the same three functions the boot HAL calls, so the record's table cannot drift
+from the code the transaction uses.
+
 ## Signatures chosen where the plan left them open
 
 - `exact_sectors(image: &Path)` takes the **resolved** base-image path, not
