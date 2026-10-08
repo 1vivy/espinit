@@ -340,10 +340,18 @@ fn declared_imports(elf: &Elf, buffer: &[u8]) -> Result<Option<std::collections:
         let offset = usize::try_from(section.sh_offset).context(".esu_imports offset overflow")?;
         let size = usize::try_from(section.sh_size).context(".esu_imports size overflow")?;
         let bytes = buffer
-            .get(offset..offset.checked_add(size).context(".esu_imports range overflow")?)
+            .get(
+                offset
+                    ..offset
+                        .checked_add(size)
+                        .context(".esu_imports range overflow")?,
+            )
             .context(".esu_imports is outside module buffer")?;
         let mut names = std::collections::HashSet::new();
-        for entry in bytes.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+        for entry in bytes
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
             let name = std::str::from_utf8(entry).context(".esu_imports entry is not UTF-8")?;
             names.insert(name.to_owned());
         }
@@ -358,7 +366,10 @@ fn declared_imports(elf: &Elf, buffer: &[u8]) -> Result<Option<std::collections:
 /// (`name$...`, `name.llvm.*`) are accepted only when they all agree on one
 /// address; several distinct static functions sharing a name are rejected
 /// instead of binding whichever kallsyms lists first.
-fn resolve_names<I>(wanted: &std::collections::HashSet<String>, symbols: I) -> Result<HashMap<String, u64>>
+fn resolve_names<I>(
+    wanted: &std::collections::HashSet<String>,
+    symbols: I,
+) -> Result<HashMap<String, u64>>
 where
     I: IntoIterator<Item = (String, u64)>,
 {
@@ -392,7 +403,10 @@ where
         }
         if addrs.len() != 1 {
             let list: Vec<String> = addrs.iter().map(|addr| format!("{addr:#x}")).collect();
-            bail!("Kernel symbol {name} only has ambiguous variants: {}", list.join(", "));
+            bail!(
+                "Kernel symbol {name} only has ambiguous variants: {}",
+                list.join(", ")
+            );
         }
         resolved.insert(name, *addrs.iter().next().unwrap());
     }
@@ -463,13 +477,20 @@ pub fn load_module(data: &[u8], params: &CStr) -> Result<()> {
             .collect();
         if !stale.is_empty() {
             stale.sort_unstable();
-            bail!("Declared imports are not undefined in the module: {}", stale.join(", "));
+            bail!(
+                "Declared imports are not undefined in the module: {}",
+                stale.join(", ")
+            );
         }
     }
 
     if !unresolved_symbols.is_empty() {
-        let wanted: std::collections::HashSet<String> = unresolved_symbols.keys().cloned().collect();
-        let resolved = resolve_names(&wanted, raw_kernel_symbols().context("Cannot parse kallsyms")?)?;
+        let wanted: std::collections::HashSet<String> =
+            unresolved_symbols.keys().cloned().collect();
+        let resolved = resolve_names(
+            &wanted,
+            raw_kernel_symbols().context("Cannot parse kallsyms")?,
+        )?;
         for (name, addr) in &resolved {
             if let Some((mut sym, offset)) = unresolved_symbols.remove(name) {
                 sym.st_shndx = section_header::SHN_ABS as usize;
@@ -726,12 +747,15 @@ mod relocation_tests {
     }
 
     fn syms(list: &[(&str, u64)]) -> Vec<(String, u64)> {
-        list.iter().map(|(name, addr)| ((*name).to_owned(), *addr)).collect()
+        list.iter()
+            .map(|(name, addr)| ((*name).to_owned(), *addr))
+            .collect()
     }
 
     #[test]
     fn exact_match_beats_suffixed_variants() {
-        let resolved = resolve_names(&want(&["foo"]), syms(&[("foo.llvm.1", 1), ("foo", 2)])).unwrap();
+        let resolved =
+            resolve_names(&want(&["foo"]), syms(&[("foo.llvm.1", 1), ("foo", 2)])).unwrap();
         assert_eq!(resolved["foo"], 2);
     }
 
