@@ -134,12 +134,12 @@ impl InstalledConfig {
 }
 
 /// Installed-boot admission: parse and validate the installed manifest, admit
-/// its cpio identity pair, then validate the selected ROM and admit its kernel
+/// its cpio bootstrap modules, then validate the selected ROM and admit its kernel
 /// image set.
 ///
-/// The manifest must agree with the `kernelesp`/`efivarfs` pair the loader
-/// already inserted ([`validate_bootstrap`]), because firmware refuses exactly
-/// what esu PID 1 refuses at boot.
+/// The manifest must agree with the `kernelesp`/`efivarfs`/`efivar_store` modules
+/// the loader already inserted ([`validate_bootstrap`]), because firmware refuses
+/// exactly what esu PID 1 refuses at boot.
 ///
 /// ROM 1 must not shadow a kernel base: no `<base>_a`/`<base>_b` partition may
 /// use an `esp-file:` backend (`KernelSetBackend`), and the boot reads the

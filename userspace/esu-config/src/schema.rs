@@ -41,6 +41,10 @@ pub struct ModuleEntry {
 pub struct RomConfig {
     pub schema_version: u64,
     pub id: String,
+    /// First-boot identity for firmware creating a missing Slot record. Once a
+    /// record exists its number remains authoritative; old configs may omit this.
+    #[serde(default)]
+    pub number: Option<u32>,
     pub managed: bool,
     #[serde(default)]
     pub partitions: Vec<PartitionEntry>,
@@ -171,7 +175,7 @@ fn name_component(value: &str) -> bool {
 /// Parse and validate `manifest.toml` text: strict schema and the ordered
 /// module lists.
 ///
-/// The fixed cpio identity pair is admitted separately by
+/// The fixed cpio bootstrap module set is admitted separately by
 /// [`validate_bootstrap`]: the PID-1 loader owns that step on the device, and
 /// the payload builder validates manifests whose identity modules it does not
 /// select.
@@ -317,6 +321,12 @@ fn validate_rom_structure(rom: &RomConfig) -> Result<(), Error> {
     }
 
     validate_rom_id(&rom.id)?;
+    if rom
+        .number
+        .is_some_and(|number| !(1..=MAX_ROM_NUMBER).contains(&number))
+    {
+        return Err(Error::new("RomNumberInvalid"));
+    }
 
     if rom.managed && rom.partitions.is_empty() {
         return Err(Error::new("RomPartitionsEmpty").with_component("rom.toml"));

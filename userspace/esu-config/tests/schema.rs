@@ -21,6 +21,30 @@ fn numbered(text: &str, number: u32) -> Result<esu_config::RomConfig, Error> {
     Ok(rom)
 }
 
+#[test]
+fn first_boot_number_is_bounded_optional_and_does_not_override_a_record() {
+    assert_eq!(parse_rom(fixtures::ROM1).unwrap().number, None);
+    let text = format!("number = 2\n{}", fixtures::ROM1);
+    let rom = numbered(&text, 1).unwrap();
+    assert_eq!(rom.number, Some(2));
+    for value in [0, 6] {
+        assert_eq!(
+            parse_rom(&format!("number = {value}\n{}", fixtures::ROM1))
+                .unwrap_err()
+                .code,
+            "RomNumberInvalid"
+        );
+    }
+    for field in ["number = \"2\"", "number = -1", "number = 2\nnumber = 2"] {
+        assert_eq!(
+            parse_rom(&format!("{field}\n{}", fixtures::ROM1))
+                .unwrap_err()
+                .code,
+            "RomParse"
+        );
+    }
+}
+
 /// C1 schema contract: `manifest.toml` accepts exactly the schema-1 fields, so a
 /// document still carrying the removed `generation`, `[platform]` or
 /// `recovery_packages` fields - or any unknown field or table - is rejected

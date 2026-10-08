@@ -7,7 +7,7 @@
 #![allow(dead_code)] // Each test binary uses a subset of these fixtures.
 
 /// A valid installed manifest: strict schema plus the identity bootstrap, with
-/// `kernelesp` first and `efivarfs` carrying its by-name `bdsvars` parameter.
+/// `kernelesp` first, the efivarfs frontend and an explicitly targeted EFVS backend.
 pub const MANIFEST: &str = r#"
 schema_version = 1
 rom = "roms"
