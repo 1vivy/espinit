@@ -248,13 +248,8 @@ def build(args: argparse.Namespace) -> ModuleReport:
     receipt_path(module).unlink(missing_ok=True)
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CONFIG_", "KBUILD_")) and key not in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "KCFLAGS", "KCPPFLAGS", "CFLAGS_MODULE", "LDFLAGS_MODULE")}
     build_directory = efvs_source(directory) if name == "efivar_store" else directory
-    if name == "efivar_store":
-        env["RUSTC_BOOTSTRAP"] = "1"
-        env["RUSTC"] = os.environ.get("EFVS_RUSTC", str(Path.home() / ".rustup/toolchains/1.82.0-x86_64-unknown-linux-gnu/bin/rustc"))
     llvm = os.environ.get("EFVS_LLVM", "/usr/bin/") if name == "efivar_store" else "1"
     command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(build_directory), "ARCH=arm64", "LLVM=" + llvm, "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1", "CONFIG_KERNELESP=m"]
-    if name == "efivar_store":
-        command.append("RUSTC=" + env["RUSTC"])
     subprocess.run(command + ["clean"], env=env, check=True)
     subprocess.run(command + ["modules", f"-j{args.jobs}"], env=env, check=True)
     if name == "efivar_store":

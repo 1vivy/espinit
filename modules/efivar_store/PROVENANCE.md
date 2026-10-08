@@ -1,10 +1,9 @@
-# Rust EFVS backend provenance and build
+# EFVS backend provenance and build
 
-Source: https://github.com/1vivy/efivar-store; exact commit is recorded in
-`SOURCE_REVISION` (published `main`, `3a42f653cfc5ae9b13e8247fadd31f6b650f3e30`).
-No source is copied into kernelesp. `scripts/kmi_modules.py build` checks out
-that revision in ignored `.source`, refuses tracked working-tree changes,
-builds its `linux/efivar_store.rs`, admits the final artifact and writes the
+Source: https://github.com/1vivy/efivar-store; the exact commit is recorded in
+`SOURCE_REVISION`. No source is copied into kernelesp. `scripts/kmi_modules.py build`
+checks out that revision in ignored `.source`, refuses tracked working-tree changes,
+builds its `linux/` directory with ACK kbuild, admits the final artifact and writes the
 standard schema-2 module/KMI-hash receipt beside `efivar_store.ko`.
 
 ```sh
@@ -18,36 +17,31 @@ python3 scripts/kmi_modules.py verify --kmi-out "$KMI_OUT" \
   --module modules/efivar_store/efivar_store.ko
 ```
 
-The build defaults to upstream rustc 1.82.0 at its rustup toolchain path and
-LLVM tools in `/usr/bin/`. `EFVS_RUSTC` and `EFVS_LLVM` override these paths.
-The exercised pairing is rustc 1.82.0 (LLVM 19.1.1 bitcode) and LLVM 23.1.1
-linking/codegen, using matching ACK android16-6.12 `925a103d123c` Rust metadata.
-Android LLVM 19.0.1 linked this upstream Rust bitcode into invalid IR (`ptr
-undef`), even though linking and KMI admission passed; QEMU failed at init.
-LLVM 23.1.1 passed the production esu loader round-trip. Do not assume ABI
-admission proves LLVM bitcode pairing. Exact Android rustc1.82.0.p1 metadata
-pairing and physical phone runtime remain unproven.
+## Design
 
-The module is not restricted to exported GKI symbols. It is loaded by esu's
-relocating loader using live kallsyms for trimmed imports, not ordinary insmod.
-Load upstream efivarfs first, then efivar_store with `dev=major:minor`, then mount
-read-write efivarfs. Nonblocking writes are unsupported. PolicyNone refuses
-authenticated enrollment; firmware alone formats blank storage and compacts.
-The VM harness and complete non-KMI inventory are in the pinned source's
-`docs/linux.md`; final source-build logs are `/var/tmp/efvs-geometry-final/`.
+The module is a C kbuild module (`linux/efivar_store.c`) that links the audited
+allocation-free Rust EFVS engine as a freestanding `no_std` object through a small C
+ABI. It imports no Rust-mangled symbol and needs neither `CONFIG_RUST` nor the kernel's
+Rust crates. This is deliberate: the first backend, written against the kernel `rust`
+crates, was refused on the phone because the running GKI exports different `core`/`kernel`
+crate hashes and no `core::fmt::Formatter` methods (`20261008T055846Z-phone-efvs-lkm-test`).
+The Rust object is built offline with `nightly-2026-08-08`, `-Z build-std=core,compiler_builtins`
+for `aarch64-unknown-none-softfloat` and `panic=immediate-abort`; the C object and link use
+`LLVM=/usr/bin/` (clang 23, `EFVS_LLVM` overrides). The C object is compiled by kbuild
+against the ACK headers; the earlier finding that Android LLVM 19.0.1 mislinked upstream
+Rust bitcode does not apply because the Rust object carries no bitcode.
 
-## Final exercised gates
+The module is loaded by esu's relocating loader using live kallsyms for trimmed
+imports, not ordinary insmod. Load upstream efivarfs first, then efivar_store with
+`dev=major:minor`, then mount read-write efivarfs. Nonblocking writes are unsupported.
+PolicyNone refuses authenticated enrollment; firmware alone formats blank storage and
+compacts. The VM harness and symbol inventory are in the pinned source's `docs/linux.md`.
 
-The pinned-source build and schema-2 receipt verification passed against
-`/home/vivy/Projects/efisp-projects/.work/thinpool-proof/.work/gki-out`.
-Final backend admission: 38 versioned imports, 11 kallsyms imports; frontend:
-59 versioned imports, 20 kallsyms imports. No CRC mismatches.
-Backend modinfo reports GPL, no dependencies, `dev` and `partuuid`, vermagic
-`6.12.58-4k-g925a103d123c SMP preempt mod_unload modversions aarch64`.
+## Device evidence
 
-Both final packaged modules passed the actual esu-loader VM harness:
-`/var/tmp/efvs-packaged-geometry/{write,read,compact,torn,blank}.log`.
-The blank image remained byte-for-byte zero. Touched-crate fmt/clippy passed;
-esuinit/esud/esu-config tests: 150 passed, including frontend/backend missing
-payload/receipt rejection; `python3 -m unittest scripts.test_kmi_modules`:
-6 passed. No phone commands, push, merge or PR were performed.
+Loaded by hand on the real phone kernel in passthrough recovery, then exercised through
+efivarfs: firmware-written `Slot-rom1`/`MergeStatus-rom1`/`BootedRom` read back
+byte-identical, a probe variable was set, updated and deleted with the physical store
+parsing cleanly after each step, and the next firmware boot replayed and compacted the
+Linux-written records (`20261008T063318Z-phone-efvs-lkm-test`,
+`20261008T063449Z-phone-efvs-efivarfs-test`, `20261008T063532Z-phone-efvs-store-read`).

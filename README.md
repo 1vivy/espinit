@@ -162,11 +162,10 @@ ignored private clone; `EFIVAR_STORE_REPO` overrides the default public reposito
 for local integration. Its schema-2 receipt binds the final module and matching
 KMI inputs. See [frontend provenance](modules/efivarfs/PROVENANCE.md) and
 [backend build/toolchain provenance](modules/efivar_store/PROVENANCE.md).
-The tested recipe pairs upstream rustc 1.82.0 metadata with LLVM 23.1.1 linking
-tools (`EFVS_RUSTC`, `EFVS_LLVM=/usr/bin/` overrides). Android LLVM 19.0.1
-produced invalid linked IR from upstream Rust LLVM 19.1.1 bitcode despite a
-successful link and admission; only the later toolchain passed the production
-loader QEMU test. Exact Android rustc pairing remains unproven.
+The backend is a C kbuild module that links the freestanding Rust EFVS engine, so it
+needs no kernel Rust crates (the phone's GKI exports different ones). Its toolchain is
+the pinned nightly with `-Z build-std` plus `LLVM=/usr/bin/` (`EFVS_LLVM` overrides);
+see the provenance document.
 
 PID 1 loads `kernelesp`, then the efivarfs frontend, then the EFVS backend with
 the discovered bdsvars `dev=major:minor`, before mounting efivarfs or reading
