@@ -1,0 +1,3 @@
+[submodule "esu/modules/boot-hal/generic-bootctl"]
+	path = esu/modules/boot-hal/generic-bootctl
+	url = https://github.com/1vivy/generic-bootctl.git

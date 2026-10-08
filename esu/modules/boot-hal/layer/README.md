@@ -1,20 +1,29 @@
 # Managed boot-control HAL
 
-**Status (2026-10-07)** - A thin esu backend over the shared `generic-bootctl`
-core: the vendored core owns slot health policy, the frozen AIDL V1 dispatch and
-the Binder transport, while `EsuBackend` adapts the project efivarfs records and
-the misc VAB mirror to it. Registration is never gated on efivarfs, BootedRom,
-managed Slot state or misc. Host verification does not claim phone, Binder guest,
-OTA or recovery execution.
+**Status (2026-10-08)** - One module, `esu/modules/boot-hal/`: the generic-bootctl
+submodule (`../generic-bootctl`) is slotted in whole, and this directory is the esu
+layer beside it. generic-bootctl owns manifest discovery, every declared transport
+(AIDL V1, HIDL 1.0-1.2), `--install-plan`, slot health policy and the frozen AIDL V1
+dispatch; `EsuBackend` adapts the project efivarfs records and the misc VAB mirror to
+its `Backend` trait. Registration is never gated on efivarfs, BootedRom, managed Slot
+state or misc. Verified on a phone only for AIDL V1 (normal enforcing ROM1 boot); HIDL,
+recovery and OTA are not claimed.
+
+```
+esu/modules/boot-hal/
+  module.prop attrs sepolicy.rule   the ESP module files the packager ships
+  generic-bootctl/                  submodule: pinned upstream, never edited here
+  layer/                            this crate: backend, wire records, entry point
+```
 
 ## Architecture
 
 ```
-generic-bootctl-aidl   raw AIBinder NDK class, parcel/status marshalling, registration
-        |              (vendored, unmodified; frozen V1 transaction order + hash)
+bootctl-unified (lib)  argument handling, VINTF discovery, transports, install plan;
+        |              run(factory) is the only consumer hook
 generic-bootctl-core   Service: slot health policy, -1/-2 mapping, write gate
         |              Backend trait: slot_count / prepare / read_state / commit / read_merge / write_merge
-gobbl-boot-hal         EsuBackend + GBS1/GBM1 wire records + misc mirror + Android main
+gobbl-boot-hal         EsuBackend + GBS1/GBM1 wire records + misc mirror + the esu Service
 ```
 
 `src/backend.rs` implements `generic_bootctl_core::Backend`:
@@ -60,33 +69,34 @@ decision, the read-only `/vendor` overlay and ROM isolation, and the esu AIDL
 contract has no read-only rollout phase. `persist.generic_bootctl.rw` belongs to
 the generic same-path substitution, which this payload does not use.
 
-The core additions this consumer needed were requested and landed upstream before
-the vendored pin - `Backend::slot_count`, the default `Backend::prepare` hook,
-`HealthOnSuccess::{ResetToOne, PreserveNonZero}`, and slot-index validation before
-any storage access - so no slot or transport logic is forked here.
+The core additions this consumer needed - `Backend::slot_count`, the default
+`Backend::prepare` hook, `HealthOnSuccess::{ResetToOne, PreserveNonZero}`, slot-index
+validation before any storage access and the `bootctl_unified::run(factory)` entry - live
+upstream, so no slot or transport logic is forked here.
 
 ## Build and Binder choice
 
-From the product worktree:
+From the product worktree (the submodule must be checked out:
+`git submodule update --init esu/modules/boot-hal/generic-bootctl`):
 
 ```sh
-cargo +nightly-2026-08-08 test --manifest-path payloads/boot-hal/Cargo.toml --locked --offline --jobs 3
-ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh
+cargo +nightly-2026-08-08 test --manifest-path esu/modules/boot-hal/layer/Cargo.toml --offline --jobs 3
+ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh
 ```
 
 The build uses the explicitly supplied NDK, API 35 and the installed
 `aarch64-linux-android` Rust target. Output:
-`payloads/boot-hal/target/aarch64-linux-android/release/gobbl-boot-hal`.
+`esu/modules/boot-hal/layer/target/aarch64-linux-android/release/gobbl-boot-hal`.
 When supplied, the packager installs it as an optional read-only ESP module at:
 `/esu/modules/boot-hal/vendor/bin/hw/android.hardware.boot-service.qti`.
 There is no ELF generation note; `esu/build-id` and cpio `/esu-build-id`
 identify the complete payload, and a mismatch is logged rather than pinned.
 
-The shared crates are vendored in-tree at a pinned upstream commit
-([PROVENANCE.md](PROVENANCE.md)) as path dependencies, so nothing is fetched and
-the workspace still builds `--locked --offline`. `[workspace.package]` and
-`[workspace.lints]` supply the fields the vendored manifests inherit, keeping
-those files byte-identical to the pin.
+The upstream crates are path dependencies into the submodule, so nothing is fetched and
+the build stays `--offline`. The layer links `bootctl-unified` with
+`default-features = false`: the native AOSP/QTI backends and the vendor-library probe are
+not part of this binary. The submodule pin is the provenance record; its commit is
+unpublished until the owner pushes generic-bootctl.
 
 Rust, the state machine and shared `esu-platform` are **statically linked**. Binder
 uses the platform `libbinder_ndk.so` C ABI; no AOSP build tree, generated AIDL
@@ -303,8 +313,8 @@ The private vendored parser/encoder was removed in the efivarfs cutover.
 
 The AIDL transport, slot health policy and service dispatch now come from
 [generic-bootctl](https://github.com/1vivy/generic-bootctl) `crates/core` and
-`crates/aidl`, vendored in-tree at a pinned commit
-([PROVENANCE.md](PROVENANCE.md)); upstream in turn adapted that transport from
-`kernelesp/payloads/boot-hal@1d8413b8` (this payload). `src/service.rs`,
+`crates/aidl`, now the whole repository as the `../generic-bootctl` submodule;
+upstream in turn adapted that transport from
+`kernelesp/payloads/boot-hal@1d8413b8` (the earlier location of this payload). `src/service.rs`,
 `src/storage.rs` and `src/android.rs` were deleted in this cutover; the GBS1/GBM1
 layouts and frozen AIDL V1 transactions are unchanged.

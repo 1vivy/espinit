@@ -1,11 +1,13 @@
-//! Android entry: register the frozen AIDL V1 `/default` service for the esu backend.
+//! Android entry: the shared generic-bootctl process (manifest discovery, every declared
+//! transport, `--install-plan`) served over the esu `Service`: efivarfs-backed GBS1/GBM1
+//! records, an always-writable gate and the preserve-nonzero success policy.
 #[cfg(target_os = "android")]
 mod entry {
     use generic_bootctl_core::Service;
     use gobbl_boot_hal::backend::EsuBackend;
     use std::ffi::{CStr, c_char};
+    use std::io;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
 
     unsafe extern "C" {
         fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32;
@@ -23,11 +25,14 @@ mod entry {
             .map_err(|error| error.to_string())
     }
 
-    pub fn run() -> Result<(), String> {
-        let current: u8 = match property(c"ro.boot.slot_suffix")?.as_str() {
+    pub fn service() -> io::Result<Service> {
+        let current: u8 = match property(c"ro.boot.slot_suffix")
+            .map_err(io::Error::other)?
+            .as_str()
+        {
             "_a" => 0,
             "_b" => 1,
-            _ => return Err("invalid ro.boot.slot_suffix".into()),
+            _ => return Err(io::Error::other("invalid ro.boot.slot_suffix")),
         };
         let mut backend = EsuBackend::open(
             Path::new("/dev/efivars"),
@@ -44,15 +49,18 @@ mod entry {
         // The esu HAL is always writable. Its writes are gated by the install
         // decision, the read-only /vendor overlay and the ROM-isolation layer
         // outside this process; `persist.generic_bootctl.rw` belongs to the
-        // generic same-path substitution, which the esu payload does not use.
-        let service = Service::new(Box::new(backend), u32::from(current), Box::new(|| true));
-        generic_bootctl_aidl::run(Arc::new(Mutex::new(service)))
+        // generic same-path substitution, which the esu module does not use.
+        Ok(Service::new(
+            Box::new(backend),
+            u32::from(current),
+            Box::new(|| true),
+        ))
     }
 }
 
 fn main() {
     #[cfg(target_os = "android")]
-    if let Err(error) = entry::run() {
+    if let Err(error) = bootctl_unified::run(entry::service) {
         eprintln!("boot-hal: {error}");
         std::process::exit(1);
     }

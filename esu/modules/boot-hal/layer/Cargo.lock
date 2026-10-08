@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "bootctl-unified"
+version = "0.1.0"
+dependencies = [
+ "generic-bootctl-aidl",
+ "generic-bootctl-core",
+ "generic-bootctl-hidl",
+]
+
+[[package]]
 name = "esu-platform"
 version = "0.1.0"
 dependencies = [
@@ -28,11 +37,18 @@ name = "generic-bootctl-core"
 version = "0.1.0"
 
 [[package]]
+name = "generic-bootctl-hidl"
+version = "0.1.0"
+dependencies = [
+ "generic-bootctl-core",
+]
+
+[[package]]
 name = "gobbl-boot-hal"
 version = "0.1.0"
 dependencies = [
+ "bootctl-unified",
  "esu-platform",
- "generic-bootctl-aidl",
  "generic-bootctl-core",
 ]
 

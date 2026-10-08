@@ -3,4 +3,4 @@ name=ESP Boot HAL
 version=1
 versionCode=1
 author=ESU
-description=Stock boot HAL service backed by bdsvars efivarfs
+description=generic-bootctl boot HAL with the esu bdsvars efivarfs backend

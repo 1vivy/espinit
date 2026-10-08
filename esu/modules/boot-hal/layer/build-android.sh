@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the aarch64 esu boot-control HAL from the vendored generic-bootctl
-# core (payloads/boot-hal/vendor/generic-bootctl, pinned in PROVENANCE.md).
+# Builds the aarch64 esu boot-control HAL: the esu layer in this directory linked
+# against the generic-bootctl submodule (../generic-bootctl, pinned by the gitlink).
 # Path dependencies only: --locked --offline needs no network or extra tree.
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

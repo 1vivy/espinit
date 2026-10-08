@@ -23,7 +23,7 @@ default-members = [
     "userspace/esu-config",
 ]
 resolver = "3"
-exclude = ["payloads/boot-hal"]
+exclude = ["esu/modules/boot-hal/layer", "esu/modules/boot-hal/generic-bootctl"]
 
 [workspace.package]
 edition = "2024"

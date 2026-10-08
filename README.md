@@ -135,7 +135,7 @@ When a Boot HAL executable is supplied, the payload assembler places it at `modu
 
 This fixed QTI target is device-specific. Merely assembling it does not establish another device's service compatibility. If device evidence later proves a tmpfs association denial, evaluate that specific rule then; no speculative fallback is shipped.
 
-The executable is a thin consumer of the shared [generic-bootctl](https://github.com/1vivy/generic-bootctl) core: `payloads/boot-hal/vendor/generic-bootctl` vendors `crates/core` (slot health policy, frozen AIDL V1 dispatch) and `crates/aidl` (raw AIBinder NDK transport) at a pinned commit, and esu keeps only its own `EsuBackend`, GBS1/GBM1 wire records and the misc VAB mirror. The vendored sources are path dependencies, so the NDK build stays `--locked --offline` and the produced ELF keeps exactly `libbinder_ndk.so`, `libc.so` and `libdl.so`; see [`PROVENANCE.md`](payloads/boot-hal/PROVENANCE.md) for the pin, hashes and the workspace adaptation.
+The Boot HAL is one module, `esu/modules/boot-hal/`: the [generic-bootctl](https://github.com/1vivy/generic-bootctl) repository is slotted in whole as the `generic-bootctl` submodule (pinned by its gitlink; it owns manifest discovery, the AIDL V1 and HIDL 1.0-1.2 transports, `--install-plan`, slot health policy and the frozen AIDL V1 dispatch), and the `layer/` crate beside it supplies only the esu `Service`: `EsuBackend`, the GBS1/GBM1 wire records, the misc VAB mirror, an always-writable gate and the preserve-nonzero success policy, through `bootctl_unified::run(factory)`. The upstream crates are path dependencies, so the NDK build stays `--locked --offline`, the layer links `bootctl-unified` without its native backends, and the produced ELF keeps exactly `libbinder_ndk.so`, `libc.so` and `libdl.so`; see [`layer/README.md`](esu/modules/boot-hal/layer/README.md).
 
 ## Kernel compatibility and builds
 
@@ -173,7 +173,7 @@ BootedRom. A missing partition is unmanaged; a malformed/blank store fails
 closed without writing it. ESP manifests declare both EFI modules, but their
 images remain cpio-only.
 
-Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](payloads/boot-hal/build-android.sh), which builds the vendored generic-bootctl core from its in-tree pin (`ESU_NDK=/path/to/android-ndk-r29 bash payloads/boot-hal/build-android.sh`).
+Build Android userspace with a clean NDK r29 and the aarch64 Rust target. PID 1, thin-activate, fw-views and avb-graft must be static; esud and the HAL may use Android's dynamic runtime. `cargo ndk -t arm64-v8a --platform 35 build --release -p esud` builds the daemon. The HAL has its own [`build-android.sh`](esu/modules/boot-hal/layer/build-android.sh), which builds the layer against the generic-bootctl submodule (`git submodule update --init`, then `ESU_NDK=/path/to/android-ndk-r29 bash esu/modules/boot-hal/layer/build-android.sh`).
 
 ## Host packaging and build identity
 

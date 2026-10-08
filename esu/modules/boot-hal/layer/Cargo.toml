@@ -1,0 +1,33 @@
+[package]
+name = "gobbl-boot-hal"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+esu-platform = { path = "../../../../userspace/esu-platform" }
+generic-bootctl-core = { path = "../generic-bootctl/crates/core" }
+# No native backends or vendor-library probe: this binary serves only the esu `Service`.
+bootctl-unified = { path = "../generic-bootctl/bin/bootctl-unified", default-features = false }
+
+[[bin]]
+name = "gobbl-boot-hal"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1
