@@ -165,7 +165,10 @@ is mandatory before any managed OTA.
 Integration must permit project efivarfs reads/writes and existing misc access.
 The HAL uses only an in-process Mutex, not block-device `flock`. Its executable
 on the tmpfs lowerdir must retain the stock `hal_bootctl_default_exec` label;
-device SELinux/overlay proof remains open.
+overlay and domain are proved on a device only for an enforcing normal ROM1 boot: the
+vendor path hashed to this binary, servicemanager saw it as `hal_bootctl_default` and
+`update_verifier` and a binder `markBootSuccessful` reached it with no denial
+(`20261008T071322Z-phone-efvs-hal-mark`). Recovery and HIDL remain open.
 
 ## Variable namespace and wire layout
 

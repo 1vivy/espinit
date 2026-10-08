@@ -37,6 +37,20 @@ imports, not ordinary insmod. Load upstream efivarfs first, then efivar_store wi
 PolicyNone refuses authenticated enrollment; firmware alone formats blank storage and
 compacts. The VM harness and symbol inventory are in the pinned source's `docs/linux.md`.
 
+### Credentials
+
+The backing file is opened by PID 1 (kernel SELinux sid). Any other domain whose write
+reaches `set_variable` (for example `hal_bootctl_default`) would otherwise run
+`kernel_write` under its own credentials and be denied `fd use`, after which the module
+disables its callbacks and every efivarfs read returns EIO. `kernelesp.ko` therefore
+exports `efivar_store_io_enter/leave` (`kernel/infra/io_cred.c`, wrapping its `ksu_cred`,
+which `setup_ksu_cred()` moves into the `esu` domain); the module resolves both with
+`symbol_get` at init and brackets each device I/O section with them. The relocating loader
+binds only vmlinux symbols, so `kernelesp.ko` must be loaded first (manifest core-first
+order). Without the provider the module logs it and uses the caller's credentials.
+Recovery is permissive and the QEMU gate has no enforcing policy, so only an enforcing
+Android boot proves this (`20261008T071322Z-phone-efvs-hal-mark`).
+
 ## Device evidence
 
 Loaded by hand on the real phone kernel in passthrough recovery, then exercised through
