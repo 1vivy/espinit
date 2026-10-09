@@ -35,7 +35,7 @@ NEWC_MAGICS = (b"070701", b"070702")
 LZ4_LEGACY_MAGIC = b"\x02\x21\x4c\x18"
 LZ4_FRAME_MAGICS = (b"\x04\x22\x4d\x18",)
 
-ARTIFACTS = ("init_boot.img", "esp.img", "payload.json")
+ARTIFACTS = ("init_boot.img", "esp.img", "payload.json", "producer", "stock-init_boot.img")
 PATHS = (
     "stock_init_boot",
     "avbtool",
@@ -46,18 +46,27 @@ PATHS = (
     "busybox",
     "thin_activate",
     "fw_views",
+    "lvm",
+    "lvm_conf",
+    "ota_stage",
+    "host_esud",
     "core_module",
     "thin_module",
     "gpt_module",
     "efivarfs_module",
+    "efivar_store_module",
 )
 BINARIES = (
     ("busybox", "bin/busybox"),
     ("thin_activate", "bin/thin-activate"),
     ("fw_views", "bin/fw-views"),
     ("esud", "bin/esud"),
+    ("lvm", "bin/lvm"),
+    ("lvm_conf", "bin/lvm.conf"),
+    ("ota_stage", "bin/ota-stage"),
 )
-MODULES = (("core_module", "kernelesp"), ("thin_module", "thin"), ("gpt_module", "gpt"), ("efivarfs_module", "efivarfs"))
+MODULES = (("core_module", "kernelesp"), ("thin_module", "thin"), ("gpt_module", "gpt"),
+           ("efivarfs_module", "efivarfs"), ("efivar_store_module", "efivar_store"))
 GENERATED_MODULE_FILES = ("pid1.sh", "pid1-recovery.sh")
 ESP_DIRECTORIES = (
     "esu",
@@ -72,8 +81,8 @@ BOOT_HAL_DIRECTORIES = (
     "esu/modules/boot-hal",
     "esu/modules/boot-hal/initrc",
 )
-EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate\n"
-FW_EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec fw-views\n"
+EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec thin-activate > /dev/kmsg 2>&1\n"
+FW_EARLY_SCRIPT = "#!/bin/sh\nset -eu\nexec fw-views > /dev/kmsg 2>&1\n"
 DEFAULT_ESP_MIB = 64
 MIN_ESP_MIB = 8
 
@@ -98,7 +107,7 @@ def configurations(metadata_filesystem: str, rom_id: str, *, boot_hal: bool = Fa
         raise ValueError("ROM ID must be 1..59 ASCII letters/digits plus . _ -, excluding . and ..")
 
     head = 'schema_version = 1\n'
-    order = ["thin", "fw-views"]
+    order = ["thin", "ota", "fw-views"]
     if boot_hal:
         order.insert(0, "boot-hal")
     manifest = head + f'rom = "roms"\nmodules_order = {json.dumps(order)}\n'
@@ -107,8 +116,9 @@ def configurations(metadata_filesystem: str, rom_id: str, *, boot_hal: bool = Fa
         ("thin", "lib/thin.ko"),
         ("gpt", "lib/gpt.ko"),
         ("efivarfs", "lib/efivarfs.ko"),
+        ("efivar_store", "lib/efivar_store.ko"),
     ):
-        params = "dev=by-name:bdsvars" if name == "efivarfs" else ""
+        params = "dev=by-name:bdsvars" if name == "efivar_store" else ""
         manifest += f'\n[[modules]]\nname = "{name}"\npath = "{path}"\nparams = "{params}"\n'
 
     # Valid managed shape with a deliberately impossible backend: the lab lane
@@ -192,46 +202,10 @@ def compress(mode: str, raw: bytes) -> bytes:
     return raw
 
 
-def add_pid1(ramdisk: bytes, pid1: Path, work: Path, modules: dict[str, Path], build_id: str) -> bytes:
-    # Validate every stock archive before preserving it byte-for-byte. Android
-    # initramfs commonly concatenates platform and vendor newc archives; the
-    # kernel applies later members last, so a final archive installs /esuinitinit
-    # without rewriting either stock archive.
-    _ = list(records(ramdisk))
-
-    root = work / "entry"
-    root.mkdir()
-    shutil.copyfile(pid1, root / "esuinit")
-    (root / "esuinit").chmod(0o755)
-    os.utime(root / "esuinit", (0, 0))
-    (root / "esu-build-id").write_text(build_id + "\n")
-    (root / "esu-build-id").chmod(0o644)
-    os.utime(root / "esu-build-id", (0, 0))
-    members = ["esuinit", "esu-build-id"]
-    if modules:
-        (root / "lib").mkdir()
-        members.append("lib")
-        for name, source in sorted(modules.items()):
-            target = root / "lib" / f"{name}.ko"
-            shutil.copyfile(source, target)
-            target.chmod(0o644)
-            os.utime(target, (0, 0))
-            members.append(f"lib/{name}.ko")
-
-    addition = run(
-        ["cpio", "--create", "--format=newc", "--owner=0:0", "--reproducible", "--quiet"],
-        cwd=root,
-        data=("\n".join(members) + "\n").encode(),
-    )
-    _ = list(records(addition))
-
-    rebuilt = ramdisk + b"\0" * (-len(ramdisk) % 4) + addition
-    rebuilt += b"\0" * (-len(rebuilt) % 512)
-    return rebuilt
 
 
 def repack_init_boot(
-    stock: Path, pid1: Path, avbtool: Path, avb_key: Path, work: Path, modules: dict[str, Path], build_id: str
+    stock: Path, avbtool: Path, avb_key: Path, work: Path
 ) -> Path:
     """Install /esuinit and re-sign the fixed-size Cuttlefish init_boot."""
     original = stock.read_bytes()
@@ -262,8 +236,11 @@ def repack_init_boot(
         raise ValueError("the unpacked ramdisk does not match the stock header bounds")
 
     mode, raw = decompress(ramdisk)
+    _ = list(records(raw))
+    if mode != "lz4-legacy":
+        raise ValueError("CF boot-patch overlay requires a legacy-LZ4 stock ramdisk")
     replacement = work / "ramdisk"
-    replacement.write_bytes(compress(mode, add_pid1(raw, pid1, work, modules, build_id)))
+    replacement.write_bytes(ramdisk + (work / "boot-patch/esu.cpio").read_bytes())
 
     arguments[arguments.index("--ramdisk") + 1] = str(replacement)
     image = work / "init_boot.img"
@@ -337,20 +314,46 @@ def platform_files(sources: dict[str, Path], tree: Path) -> list[tuple[Path, str
     `initrc/` that defines its own init service. Nothing is overlaid onto `/vendor`.
     """
     files: list[tuple[Path, str, int]] = []
-    modules = ["thin", "fw-views"]
+    modules = ["thin", "ota", "fw-views"]
     if "boot_hal" in sources:
         (tree / "modules/boot-hal/initrc").mkdir(parents=True)
         modules.insert(0, "boot-hal")
         files.append((sources["boot_hal"], "esu/bin/esu-bootctl", 0o755))
         for path in sorted((REPOSITORY / "esu/modules/boot-hal/initrc").glob("*.rc")):
-            files.append((path, f"esu/modules/boot-hal/initrc/{path.name}", 0o644))
+            staged = tree / "modules/boot-hal/initrc" / path.name
+            staged.write_text(instrument_boot_hal_rc(path.read_text()))
+            files.append((staged, f"esu/modules/boot-hal/initrc/{path.name}", 0o644))
     for module in modules:
         for path in module_metadata(module):
-            files.append((path, f"esu/modules/{module}/{path.name}", 0o644))
+            files.append((path, f"esu/modules/{module}/{path.name}", 0o755 if path.suffix == ".sh" else 0o644))
+        if module == "ota":
+            for name in GENERATED_MODULE_FILES:
+                files.append((REPOSITORY / "esu/modules/ota" / name, f"esu/modules/ota/{name}", 0o755))
     return files
 
+def instrument_boot_hal_rc(rc: str) -> str:
+    service = "service esu.bootctl /debug_ramdisk/esu/bin/esu-bootctl\n"
+    if rc.count(service) != 1:
+        raise ValueError("expected exactly one shipped esu.bootctl service")
+    wrapper = ('service esu.bootctl /system/bin/sh -c '
+               '"exec /debug_ramdisk/esu/bin/esu-bootctl >/dev/esu-bootctl.log 2>&1"\n')
+    return rc.replace(service, wrapper)
 
-def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, requested_mib: int | None, build_id: str) -> Path:
+
+
+def instrument_stage_script(script: str) -> str:
+    """Expose the actual helper environment without changing the helper call."""
+    head, separator, body = script.partition("\n")
+    if head != "#!/bin/sh" or not separator:
+        raise ValueError("OTA PID1 script must have the shipped shell shebang")
+    return (head + "\nexec > /dev/kmsg 2>&1\n"
+            + "printf 'CF-ESU_STAGE=%s\\n' \"$ESU_STAGE\"\n"
+            + 'for p in /sys/class/block/dm-*; do echo "CF-DM=$p"; '
+            + 'cat "$p/dm/name" "$p/dm/uuid"; done\n' + body)
+
+
+def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path,
+              requested_mib: int | None, build_id: str, kmi_out: Path) -> Path:
     tree = work / "esu"
     import tomllib
     rom_relative = f"roms/{tomllib.loads(rom)['id']}.toml"
@@ -376,13 +379,36 @@ def build_esp(sources: dict[str, Path], manifest: str, rom: str, work: Path, req
         for stage in ("pid1.sh", "pid1-recovery.sh"):
             files.append((tree / "modules" / name / stage, f"esu/modules/{name}/{stage}", 0o755))
     for key, target in BINARIES:
-        files.append((sources[key], f"esu/{target}", 0o755))
+        files.append((sources[key], f"esu/{target}", 0o644 if key == "lvm_conf" else 0o755))
     files.extend(platform_files(sources, tree))
+    # The host producer owns overlay framing and verified KMI module sets.
+    # Feed it the exact payload files that will be installed, never synthesize
+    # a second set.json or bypass its compatibility admission.
+    for source, target, mode in files:
+        destination = work / target
+        if source != destination:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        destination.chmod(mode)
+    for name in GENERATED_MODULE_FILES:
+        path = tree / "modules/ota" / name
+        path.write_text(instrument_stage_script(path.read_text()))
+    (tree / "build-id").unlink()
+    captured = work / "captured-modules"
+    captured.mkdir()
+    for key, name in MODULES:
+        source = sources[key]
+        shutil.copyfile(source, captured / f"{name}.ko")
+        shutil.copyfile(Path(str(source) + ".compat.json"), captured / f"{name}.ko.compat.json")
+    produced = work / "boot-patch"
+    run([sources["host_esud"], "boot-patch", "--esuinit", sources["esuinit"],
+         "--payload", tree, "--modules-dir", captured, "--kmi-out", kmi_out,
+         "--rom", tomllib.loads(rom)["id"], "--out", produced])
+    files = [(path, str(path.relative_to(produced / "esp")), 0o644)
+             for path in sorted((produced / "esp").rglob("*")) if path.is_file()]
 
-    directories = ESP_DIRECTORIES + (BOOT_HAL_DIRECTORIES if "boot_hal" in sources else ())
-    missing = [directory for directory in directories if not (work / directory).is_dir()]
-    if missing:
-        raise ValueError(f"internal error: missing ESP directories {missing}")
+    directories = tuple(str(path.relative_to(produced / "esp"))
+                        for path in sorted((produced / "esp").rglob("*")) if path.is_dir())
 
     content = sum(source.stat().st_size for source, _, _ in files)
     image = work / "esp.img"
@@ -407,7 +433,7 @@ def build_identity(sources: dict[str, Path], manifest: str, rom: str) -> tuple[s
     for module, script in (("thin", EARLY_SCRIPT), ("fw-views", FW_EARLY_SCRIPT)):
         for stage in ("pid1.sh", "pid1-recovery.sh"):
             inputs[f"{module}/{stage}"] = hashlib.sha256(script.encode()).hexdigest()
-    modules = ("boot-hal", "thin", "fw-views") if "boot_hal" in sources else ("thin", "fw-views")
+    modules = ("boot-hal", "thin", "ota", "fw-views") if "boot_hal" in sources else ("thin", "ota", "fw-views")
     for module in modules:
         for path in module_metadata(module):
             inputs[f"{module}/{path.name}"] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -453,16 +479,17 @@ def assemble(arguments: argparse.Namespace) -> None:
     ) as directory:
         work = Path(directory)
         build_id, build_id_inputs = build_identity(sources, manifest, rom)
+        esp = build_esp(sources, manifest, rom, work, arguments.esp_size_mib,
+                        build_id, Path(arguments.kmi_out))
+        producer_receipt = json.loads((work / "boot-patch/receipt.json").read_text())
+        build_id = producer_receipt["build_id"]
+        build_id_inputs = producer_receipt["build_id_inputs"]
         init_boot = repack_init_boot(
             sources["stock_init_boot"],
-            sources["esuinit"],
             sources["avbtool"],
             sources["avb_key"],
             work,
-            {name: sources[key] for key, name in MODULES},
-            build_id,
         )
-        esp = build_esp(sources, manifest, rom, work, arguments.esp_size_mib, build_id)
 
         images: dict[str, dict[str, object]] = {}
         for path in (init_boot, esp):
@@ -484,6 +511,11 @@ def assemble(arguments: argparse.Namespace) -> None:
 
         for path in (init_boot, esp, receipt):
             os.replace(path, output / path.name)
+        producer_target = output / "producer"
+        if producer_target.exists():
+            shutil.rmtree(producer_target)
+        os.replace(work / "boot-patch", producer_target)
+        shutil.copyfile(sources["stock_init_boot"], output / "stock-init_boot.img")
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
