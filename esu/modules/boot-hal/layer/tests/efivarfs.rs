@@ -273,6 +273,23 @@ fn persistent_read_and_write_errors_are_aidl_command_failures() {
 }
 
 #[test]
+fn cancelling_to_current_slot_preserves_boot_success() {
+    let f = Fixture::new();
+    f.managed();
+    let mut hal = f.service(1);
+    // update_engine resets/cancels by selecting the running slot. Its cached
+    // UpdateBootFlagsAction will not mark that boot successful a second time.
+    assert_eq!(hal.execute(9, 1), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert!(record.slots[1].successful);
+    // A real new target is explicitly made unbootable before any OTA writes.
+    assert_eq!(hal.execute(10, 0), Ok(Reply::Void));
+    assert_eq!(hal.execute(9, 0), Ok(Reply::Void));
+    let record = Gbs1::decode(&stored(&f, "Slot-stock")).unwrap();
+    assert!(!record.slots[0].successful);
+}
+
+#[test]
 fn writes_are_byte_exact_and_preserve_other_roms_and_misc_regions() {
     let f = Fixture::new();
     f.managed();

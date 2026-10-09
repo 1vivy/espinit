@@ -126,6 +126,30 @@ fn trim_params(value: &str) -> &str {
     value.trim_end_matches(' ')
 }
 
+fn status_record_end(
+    data_start: usize,
+    offset: usize,
+    next: usize,
+    final_target: bool,
+    data_size: usize,
+) -> Result<usize, &'static str> {
+    // fill_target_status() reports unpadded data_size, but an aligned next
+    // measured from the first target, not from the current record.
+    if final_target {
+        return Ok(data_size);
+    }
+    if !next.is_multiple_of(8) {
+        return Err("returned an invalid next offset");
+    }
+    let minimum = offset
+        .checked_add(size_of::<DmTargetSpec>())
+        .ok_or("exceeded its buffer")?;
+    data_start
+        .checked_add(next)
+        .filter(|end| *end > minimum && *end <= data_size)
+        .ok_or("exceeded its buffer")
+}
+
 /// Whether an existing table already is the requested one. Trailing spaces in
 /// the kernel's params are insignificant, everything else is compared exactly.
 fn same_table(existing: &[Target], requested: &[Target]) -> bool {
@@ -397,20 +421,14 @@ impl DeviceMapper {
             let kind = std::str::from_utf8(&spec.target_type[..kind_end])
                 .map_err(|_| format!("DM_TABLE_STATUS for {name} returned a non-ASCII target"))?
                 .to_owned();
-            let record_end = if spec.next == 0 {
-                data_size
-            } else {
-                let next = spec.next as usize;
-                if next < size_of::<DmTargetSpec>() || !next.is_multiple_of(8) {
-                    return Err(format!(
-                        "DM_TABLE_STATUS for {name} returned an invalid next offset"
-                    ));
-                }
-                offset
-                    .checked_add(next)
-                    .filter(|end| *end <= data_size)
-                    .ok_or_else(|| format!("DM_TABLE_STATUS for {name} exceeded its buffer"))?
-            };
+            let record_end = status_record_end(
+                data_start,
+                offset,
+                spec.next as usize,
+                index + 1 == count,
+                data_size,
+            )
+            .map_err(|error| format!("DM_TABLE_STATUS for {name} {error}"))?;
             let params_start = offset + size_of::<DmTargetSpec>();
             let params_bytes = &bytes[params_start..record_end];
             let params_end = params_bytes
@@ -430,11 +448,6 @@ impl DeviceMapper {
                 params,
             });
             if index + 1 < count {
-                if spec.next == 0 {
-                    return Err(format!(
-                        "DM_TABLE_STATUS for {name} ended before target {count}"
-                    ));
-                }
                 offset = record_end;
             }
         }
@@ -703,6 +716,31 @@ mod tests {
         assert_eq!(DM_TABLE_LOAD, 0xc138fd09_u32 as libc::Ioctl);
         assert_eq!(DM_TABLE_STATUS, 0xc138fd0c_u32 as libc::Ioctl);
         assert_eq!(DM_TARGET_MSG, 0xc138fd0e_u32 as libc::Ioctl);
+    }
+
+    #[test]
+    fn status_offsets_are_first_target_relative_and_final_padding_is_not_data() {
+        let start = size_of::<DmIoctl>();
+        let spec = size_of::<DmTargetSpec>();
+        assert_eq!(
+            status_record_end(start, start, 48, true, start + spec + 1),
+            Ok(start + spec + 1)
+        );
+        assert_eq!(
+            status_record_end(start, start, 48, false, start + 145),
+            Ok(start + 48)
+        );
+        assert_eq!(
+            status_record_end(start, start + 48, 96, false, start + 145),
+            Ok(start + 96)
+        );
+        assert_eq!(
+            status_record_end(start, start + 96, 152, true, start + 145),
+            Ok(start + 145)
+        );
+        assert!(status_record_end(start, start + 48, 48, false, start + 145).is_err());
+        assert!(status_record_end(start, start, 47, false, start + 145).is_err());
+        assert!(status_record_end(start, start, 152, false, start + 145).is_err());
     }
 
     #[test]

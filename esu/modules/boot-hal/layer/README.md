@@ -109,6 +109,12 @@ point at would turn the running Android's own partitions into I/O errors.
 | `write_merge(NONE)` after `MERGING` | `Sealed`, slot successful, `current == L` ⇒ promote | same |
 | service start | `Promote` ⇒ resume the promote; `Sealed` + successful + merge NONE + `current == L` ⇒ promote | `Sealed`, no pending, `current != L` ⇒ cancel |
 
+Slot activation preserves the successful bit, matching the stock Android misc
+backend; `SetUnbootable` clears it before a new target is written. In particular,
+selecting the running slot to cancel must not erase its confirmed boot health:
+update_engine caches its boot-flags action and otherwise waits indefinitely for
+a second `markBootSuccessful` before starting the next update.
+
 A refusal (no module set for the target KMI, a proven ROM 1 anti-rollback raise, a
 staged set that would be restaged while this boot runs it) returns the error the
 service maps to `COMMAND_FAILED` **before** the record write, so the `Slot-<id>`
@@ -166,7 +172,9 @@ Surfacer boots for the selected letter once the firmware switch is confirmed.
 `/debug_ramdisk/esu/bin` the executable tmpfs the payload's `lvm`/`esud` run from.
 `src/platform.rs` pins those against the loader's constants and bakes the shipped
 `lvm.conf` in with `include_str!`, so an invocation cannot depend on a readable
-confdir.
+confdir. The command argument drops full-line comments and joins the shipped
+lines once: LVM copies argv into its metadata description without escaping
+newlines, so passing a multiline `--config` would corrupt the next VG read.
 
 **Denial receipt.** `esu/receipts/ota-denied.txt` under the runtime payload root
 (`/debug_ramdisk/esp/esu/receipts/ota-denied.txt`), written tmp+fsync+rename inside a
@@ -195,8 +203,11 @@ loop, copies) need a device and are not covered here.
 **Replacing the stock HAL.** `initrc/boot-hal.rc` runs `esu-bootctl --stop-stock` as an
 `on post-fs` exec in the platform's `esu` domain: `src/stock.rs` stops every init service
 whose command carries `hal_bootctl_default_exec` (`ctl.stop`; a not-yet-started service is
-disabled), so the stock HAL never starts at `class_start early_hal`. Reading every
-partition's init scripts and sending `ctl.stop` are platform work; from a confined
+disabled), so the stock HAL never starts at `class_start early_hal`. Discovery
+includes partition init directories and each mounted APEX's `etc` and `etc/init`
+directories: APEX service definitions are imported before post-fs too. Selection
+still uses the executable's SELinux label, never a service-name heuristic.
+Reading init scripts and sending `ctl.stop` are platform work; from a confined
 `esu_bootctl` the scan was refused by the device's blanket `dontaudit domain
 file_type:{dir,file}` rules and silently found nothing. Init answers control messages while an
 exec runs, but not while its main thread sits in `mount_all` at `late-fs` with vold waiting

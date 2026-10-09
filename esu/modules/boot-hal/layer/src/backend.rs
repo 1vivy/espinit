@@ -240,7 +240,7 @@ impl EsuBackend {
             slots: record.slots.to_vec(),
             max_priority: 15,
             max_tries: 7,
-            clear_successful_on_activate: true,
+            clear_successful_on_activate: false,
             successful_requires_bootable: false,
             health_on_success: HealthOnSuccess::PreserveNonZero,
         }

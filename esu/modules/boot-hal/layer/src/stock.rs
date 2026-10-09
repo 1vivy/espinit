@@ -27,6 +27,26 @@ pub const RC_DIRECTORIES: [&str; 7] = [
     "/product/etc/init",
 ];
 
+/// APEX services are imported before post-fs, alongside partition init scripts.
+#[cfg(any(target_os = "android", test))]
+fn rc_directories(apex: &Path) -> Vec<String> {
+    let mut directories: Vec<String> = RC_DIRECTORIES.iter().map(|path| (*path).into()).collect();
+    if let Ok(entries) = std::fs::read_dir(apex) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            for suffix in ["etc", "etc/init"] {
+                if let Some(directory) = path.join(suffix).to_str() {
+                    directories.push(directory.to_owned());
+                }
+            }
+        }
+    }
+    directories
+}
+
 /// `(name, command)` of every `service <name> <command> ...` line in one rc file.
 pub fn services(rc: &str) -> impl Iterator<Item = (&str, &str)> {
     rc.lines().filter_map(|line| {
@@ -116,7 +136,9 @@ mod android {
 /// Stop every stock boot-HAL service; logs each decision to the kernel log.
 #[cfg(target_os = "android")]
 pub fn stop_stock() {
-    let names = select(&RC_DIRECTORIES, STOCK_LABEL, android::label_of);
+    let directories = rc_directories(Path::new("/apex"));
+    let borrowed: Vec<&str> = directories.iter().map(String::as_str).collect();
+    let names = select(&borrowed, STOCK_LABEL, android::label_of);
     if names.is_empty() {
         android::log("no stock boot HAL service found");
     }
@@ -154,6 +176,28 @@ mod tests {
             (path == Path::new("/vendor/bin/hw/boot")).then(|| STOCK_LABEL.to_vec())
         });
         assert_eq!(names, ["vendor.boot-qti"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discovers_apex_rc_services_without_selecting_by_name() {
+        let root = std::env::temp_dir().join(format!("esu-stock-apex-{}", std::process::id()));
+        let directory = root.join("com.example.boot/etc");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("service.rc"),
+            "service arbitrary.name /apex/com.example.boot/bin/hal\n\
+             service misleading.boot /apex/com.example.boot/bin/other\n",
+        )
+        .unwrap();
+        let directories = rc_directories(&root);
+        let borrowed: Vec<&str> = directories.iter().map(String::as_str).collect();
+        assert_eq!(
+            select(&borrowed, STOCK_LABEL, |path| {
+                (path == Path::new("/apex/com.example.boot/bin/hal")).then(|| STOCK_LABEL.to_vec())
+            }),
+            ["arbitrary.name"]
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

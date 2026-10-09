@@ -22,7 +22,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// Runtime ESP mount point. The loader mounts the payload ESP read-only here and
 /// the platform hands Android modules the same path, so this is the one place
@@ -58,6 +58,25 @@ pub const LVM_CONF: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../../tools/lvm2/lvm.conf"
 ));
+
+/// LVM records its argv in a quoted metadata description without escaping
+/// newlines. Keep the shipped configuration's tokens, but pass one line.
+fn lvm_config() -> &'static str {
+    static CONFIG: LazyLock<String> = LazyLock::new(|| {
+        let mut config = String::with_capacity(LVM_CONF.len());
+        for line in LVM_CONF.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !config.is_empty() {
+                config.push(' ');
+            }
+            config.push_str(line);
+        }
+        config
+    });
+    CONFIG.as_str()
+}
 
 /// Bytes of a physical partition read for a probe.
 ///
@@ -400,7 +419,7 @@ pub fn lvm(arguments: &[&str]) -> Result<()> {
     let mut full = Vec::with_capacity(arguments.len() + 2);
     full.push(arguments[0]);
     full.push("--config");
-    full.push(LVM_CONF);
+    full.push(lvm_config());
     full.extend_from_slice(&arguments[1..]);
     run(&format!("{PAYLOAD_BIN}/lvm"), &full)
 }
@@ -411,7 +430,7 @@ pub fn lvm_sizes() -> Result<std::collections::BTreeMap<String, u64>> {
         .args([
             "lvs",
             "--config",
-            LVM_CONF,
+            lvm_config(),
             "--noheadings",
             "--units",
             "b",
@@ -591,6 +610,22 @@ mod tests {
         assert!(LVM_CONF.contains("udev_sync = 0"));
         assert!(LVM_CONF.contains("use_lvmlockd = 0"));
         assert!(LVM_CONF.ends_with("}\n"));
+    }
+
+    #[test]
+    fn the_lvm_argument_cannot_inject_multiline_metadata_descriptions() {
+        let config = lvm_config();
+        assert!(!config.contains(['\n', '\r', '#']));
+        assert_eq!(
+            config,
+            "devices { use_devicesfile = 0 dir = \"/dev/block/esd\" \
+             scan = [\"/dev/block/esd/pv\"] \
+             filter = [\"a|^/dev/block/esd/pv/a$|\",\"r|.*|\"] } \
+             activation { udev_rules = 0 udev_sync = 0 \
+             verify_udev_operations = 0 monitoring = 0 } \
+             global { use_lvmlockd = 0 }"
+        );
+        assert!(std::ptr::eq(config.as_ptr(), lvm_config().as_ptr()));
     }
 
     #[test]
