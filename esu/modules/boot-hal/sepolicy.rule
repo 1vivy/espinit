@@ -51,6 +51,11 @@ allow esu_bootctl sysfs_type file { getattr open read }
 # The static `lvm` and `esud` the staging set is created and removed with run
 # from the payload tmpfs label.
 allow esu_bootctl esu_file file { getattr open read execute execute_no_trans }
+# Spawning them (and `cmd` below) forks in this domain and reads the child's
+# output and exec-status pipes. Observed denied enforcing on the phone and
+# logged on every spawn by the permissive Cuttlefish proof.
+allow esu_bootctl esu_bootctl process fork
+allow esu_bootctl esu_bootctl fifo_file { getattr read write }
 # The denial notification: `/system/bin/cmd notification post` talks to
 # system_server.
 allow esu_bootctl system_file file { getattr open read execute execute_no_trans }
