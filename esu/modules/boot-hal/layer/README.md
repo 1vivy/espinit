@@ -153,6 +153,12 @@ ROM the comparison is logged. An image the port cannot read or recognize is logg
 rather than refused (the refusal is defined as a *proven* raise), except a target
 `xbl_config` that cannot be read at all, which is an incomplete payload.
 
+For ROM 1, sealing reads the physical `boot_<letter>` through the esd tree,
+bounded by that partition's `BLKGETSIZE64` size (regular-file length in host
+tests). It must not use the separate 20 MiB `xbl_config`/ARB probe limit:
+the OnePlus 15 boot kernels exceed it, and a capped boot image fails KMI parsing
+as truncated before any slot or Stage record is written.
+
 **Promote.** `Stage` becomes `Promote` first, so a process that dies mid-copy
 resumes the same step at the next start. The staged bytes are copied back over the
 ESP base images inside one read-write window and verified; a mismatch is retried

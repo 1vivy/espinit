@@ -571,7 +571,15 @@ fn copy_back(
 /// Read one physical partition of a letter through the esd tree.
 fn read_partition(base: &str, letter: u8) -> Result<Vec<u8>> {
     let node = esd_by_name(&format!("{base}{}", suffix(letter)));
-    platform::read_node(Path::new(&node), platform::physical_limit())
+    read_partition_node(base, Path::new(&node))
+}
+
+fn read_partition_node(base: &str, node: &Path) -> Result<Vec<u8>> {
+    if base == "boot" {
+        platform::read_boot_node(node)
+    } else {
+        platform::read_node(node, platform::physical_limit())
+    }
 }
 
 /// ROM 1: the update writes the physical partitions of the target letter, so
@@ -1218,6 +1226,50 @@ mod tests {
 
         assert!(fake.calls().is_empty(), "{:?}", fake.calls());
         assert_eq!(fake.stage(), StageState::Sealed);
+    }
+
+    #[test]
+    fn a_rom_one_boot_larger_than_the_firmware_probe_limit_seals() {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+
+        let mut image = boot_image(b"Linux version 6.12.23-android16-6-g1a2b3c4d (x) #1 SMP");
+        let kernel_size = 25 * 1024 * 1024u32;
+        image[8..12].copy_from_slice(&kernel_size.to_le_bytes());
+        image.resize(4096 + kernel_size as usize, 0);
+        // SAFETY: memfd_create takes a live NUL-terminated name and no pointers it retains.
+        let fd = unsafe { libc::memfd_create(c"large-boot-fixture".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: the successful call returned a new descriptor; this File owns it once.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(&image).unwrap();
+        let path = std::path::PathBuf::from(format!("/proc/self/fd/{fd}"));
+        let boot = read_partition_node("boot", &path).unwrap();
+        assert_eq!(boot, image);
+        let firmware_probe = read_partition_node("xbl_config", &path).unwrap();
+        assert_eq!(firmware_probe.len() as u64, platform::physical_limit());
+        assert_eq!(
+            kmi_from_boot(&firmware_probe).unwrap_err().to_string(),
+            "truncated boot image"
+        );
+
+        let fake = Fake::new(0, StageState::None, 0, vec!["boot"]).with(|inner| inner.boot = boot);
+        let env = fake.env();
+        let mut txn = Txn::new(0);
+        let record = slot_record(1, 0, 0, NO_PENDING, true);
+        txn.start(&env, &rom(1), &record, MergeStatus::None)
+            .unwrap();
+        txn.commit(
+            &env,
+            &rom(1),
+            &record,
+            MergeStatus::None,
+            Operation::SetActive(1),
+        )
+        .unwrap();
+        assert_eq!(fake.stage(), StageState::Sealed);
+        assert!(fake.payload());
+        assert!(fake.receipts().is_empty());
     }
 
     #[test]

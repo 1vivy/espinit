@@ -335,6 +335,46 @@ pub fn rename(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the whole ROM1 boot partition, bounded by its own device size.
+///
+/// Boot kernels can exceed the independent 20 MiB firmware/ARB probe limit.
+/// Regular files use their length so the same path is exercised by host tests.
+pub fn read_boot_node(path: &Path) -> Result<Vec<u8>> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let metadata = file.metadata().context("stat boot image")?;
+    let size = if metadata.file_type().is_block_device() {
+        let mut size = 0u64;
+        // SAFETY: BLKGETSIZE64 writes one u64 to a valid pointer on this live fd.
+        let result = unsafe { libc::ioctl(file.as_raw_fd(), 0x8008_1272u32 as _, &mut size) };
+        if result != 0 {
+            return Err(io::Error::last_os_error()).context("boot partition BLKGETSIZE64");
+        }
+        size
+    } else {
+        ensure!(
+            metadata.is_file(),
+            "{} is not a boot image node",
+            path.display()
+        );
+        metadata.len()
+    };
+    ensure!(size != 0, "{} is empty", path.display());
+    let capacity = usize::try_from(size).context("boot partition size does not fit memory")?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .context("allocate boot image")?;
+    file.take(size)
+        .read_to_end(&mut bytes)
+        .context("read boot image")?;
+    ensure!(
+        bytes.len() == capacity,
+        "{} boot image read is short",
+        path.display()
+    );
+    Ok(bytes)
+}
+
 /// Read a block device or file from its start, up to `limit` bytes.
 ///
 /// A block device reports a zero length to `stat`, so the read runs until the
