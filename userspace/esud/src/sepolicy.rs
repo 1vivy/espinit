@@ -793,5 +793,21 @@ mod tests {
             "no shipped module policies found under {modules:?}"
         );
         assert!(parse_sepolicy("allow esu esu_blk_device:dir search", true).is_err());
+        for module in ["boot-hal", "ota"] {
+            let text = std::fs::read_to_string(modules.join(module).join("sepolicy.rule")).unwrap();
+            let statements = parse_sepolicy(text.trim(), true).unwrap();
+            let atoms = flatten_atomic_statements(&statements).unwrap();
+            let payload = serialize_atomic_statements(&atoms).unwrap();
+            assert!(
+                !payload.windows(5).any(|bytes| bytes == b"self\0"),
+                "{module} sends literal self"
+            );
+            let declaration = text.find("type esu_blk_device dev_type").unwrap();
+            let access = text.find("allow ").unwrap();
+            assert!(
+                declaration < access,
+                "{module} references an undeclared type"
+            );
+        }
     }
 }

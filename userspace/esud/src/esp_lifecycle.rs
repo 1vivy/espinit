@@ -20,11 +20,30 @@ fn check_label(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+fn admitted_lvm_link(path: &Path, bin: &Path) -> Result<bool> {
+    if path.parent() != Some(bin)
+        || !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("lvcreate" | "lvremove" | "lvchange" | "lvs" | "vgs" | "pvs")
+        )
+    {
+        return Ok(false);
+    }
+    Ok(
+        fs::read_link(path)? == Path::new("lvm")
+            && fs::symlink_metadata(bin.join("lvm"))?.is_file(),
+    )
+}
+
 fn check_staging(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
-        metadata.is_dir() || metadata.is_file(),
-        "invalid staging inode"
+        metadata.is_dir()
+            || metadata.is_file()
+            || (metadata.file_type().is_symlink()
+                && admitted_lvm_link(path, Path::new(EXECUTABLE_BIN))?),
+        "invalid staging inode: {}",
+        path.display()
     );
     check_label(path, EXECUTABLE_LABEL)?;
     if metadata.is_dir() {
@@ -183,6 +202,41 @@ pub fn prepare() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_stage_sets_stock_directory_encryption_before_esud_exec() {
+        let header = include_str!("../../../kernel/runtime/platform_boot.h");
+        let action = header.split("\"on post-fs-data\\n\"").nth(1).unwrap();
+        let action = action.split("\"on nonencrypted\\n\"").next().unwrap();
+        let mkdir = action.find("mkdir /data/adb 0700 root root encryption=Require").unwrap();
+        let exec = action.find("ksud_path \" post-fs-data\\n\"").unwrap();
+        assert!(mkdir < exec);
+        assert!(!action.contains("trigger esu-post-fs-data"));
+    }
+
+    #[test]
+    fn only_shipped_relative_lvm_links_are_admitted() {
+        use std::os::unix::fs::symlink;
+        let bin = std::env::temp_dir().join(format!("esu-staging-links-{}", std::process::id()));
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("lvm"), b"binary").unwrap();
+        for name in ["lvcreate", "lvremove", "lvchange", "lvs", "vgs", "pvs"] {
+            let path = bin.join(name);
+            symlink("lvm", &path).unwrap();
+            assert!(admitted_lvm_link(&path, &bin).unwrap());
+            fs::remove_file(&path).unwrap();
+            symlink("/system/bin/sh", &path).unwrap();
+            assert!(!admitted_lvm_link(&path, &bin).unwrap());
+            fs::remove_file(&path).unwrap();
+        }
+        symlink("lvm", bin.join("other")).unwrap();
+        assert!(!admitted_lvm_link(&bin.join("other"), &bin).unwrap());
+        fs::remove_file(bin.join("lvm")).unwrap();
+        symlink("/system/bin/sh", bin.join("lvm")).unwrap();
+        symlink("lvm", bin.join("lvs")).unwrap();
+        assert!(!admitted_lvm_link(&bin.join("lvs"), &bin).unwrap());
+        fs::remove_dir_all(bin).unwrap();
+    }
 
     /// Data-only module views must not change the superblock or inherit its RW
     /// state: reject another device, duplicates and missing per-mount RO/noexec.

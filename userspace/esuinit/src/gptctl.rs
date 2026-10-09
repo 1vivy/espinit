@@ -19,7 +19,7 @@ use rustix::fs::{CWD, FileType, major, makedev, minor, mknodat};
 use syscalls::{Sysno, syscall};
 
 use crate::block::ResolvedBackend;
-use crate::config::PartitionEntry;
+use crate::config::{ImageBackend, Letters, PartitionEntry};
 use crate::gpt_uapi::{GptApply, GptDevice, GptQuery};
 use crate::receipt::{Failure, Stage};
 
@@ -246,6 +246,30 @@ fn query_ioctl(control: &File, query: &mut GptQuery) -> Result<(), Failure> {
     }
 }
 
+/// Image-role admission stores writable roles, not this boot's projection
+/// access. Apply the same letter derivation as backend resolution so read-only
+/// ESP loops and the booted staging switch are never opened for writing.
+fn image_projection_access(
+    payload: &mut GptApply,
+    partitions: &[PartitionEntry],
+    rom_id: &str,
+    letters: Letters,
+) -> Result<(), Failure> {
+    for (partition, projection) in partitions.iter().zip(&mut payload.projections) {
+        if let Ok(esu_config::Backend::RomImage(base)) = partition.backend() {
+            let read_only = match letters
+                .image_backend(rom_id, &partition.name, base)
+                .map_err(Failure::from)?
+            {
+                ImageBackend::Esp { .. } => true,
+                ImageBackend::Switch { read_only, .. } => read_only,
+            };
+            projection.read_only = u8::from(read_only);
+        }
+    }
+    Ok(())
+}
+
 /// Build, apply and verify the complete projection as one atomic step. Any
 /// failure leaves the boot stopped: there is no fallback projection and no
 /// retry with a reduced payload.
@@ -254,8 +278,10 @@ pub fn project(
     backends: &[ResolvedBackend],
     hide: &[GptDevice],
     seal: bool,
+    rom_id: &str,
+    letters: Letters,
 ) -> Result<(), Failure> {
-    let payload = match build_apply(partitions, backends, hide, seal) {
+    let mut payload = match build_apply(partitions, backends, hide, seal) {
         Ok(payload) => payload,
         Err(detail) => {
             return Err(Failure::new(
@@ -265,6 +291,7 @@ pub fn project(
             ));
         }
     };
+    image_projection_access(&mut payload, partitions, rom_id, letters)?;
 
     let query = apply_payload(&payload)?;
 
@@ -303,6 +330,41 @@ mod tests {
             path: path.to_owned(),
             rdev,
             guard: None,
+        }
+    }
+
+    #[test]
+    fn image_projection_access_matches_idle_and_staged_backends() {
+        use esu_platform::stage::StageState;
+        let mut partitions = [partition("boot_a", false), partition("boot_b", false)];
+        for partition in &mut partitions {
+            partition.backend = "rom-image:boot".to_owned();
+        }
+        let backends = [
+            backend("/dev/loop0", 0x0700),
+            backend("/dev/mapper/rom2-ota-boot", 0xfd00),
+        ];
+        for (current, state, expected) in [
+            (0, StageState::None, [1, 0]),
+            (0, StageState::Sealed, [1, 0]),
+            (1, StageState::Sealed, [1, 1]),
+            (1, StageState::None, [0, 1]),
+        ] {
+            let mut payload = build_apply(&partitions, &backends, &[], true).unwrap();
+            image_projection_access(
+                &mut payload,
+                &partitions,
+                "rom2",
+                Letters::derive(current, state, Some(1), 2),
+            )
+            .unwrap();
+            assert_eq!(
+                [
+                    payload.projections[0].read_only,
+                    payload.projections[1].read_only
+                ],
+                expected
+            );
         }
     }
 

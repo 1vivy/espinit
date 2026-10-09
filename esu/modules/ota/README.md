@@ -56,6 +56,13 @@ The type itself is declared here, not in the boot HAL's rules: the two modules'
 rules are concatenated, and a `type` declared twice fails the whole policy
 update.
 
+The file uses the KernelSU statement grammar the loader parses
+(`userspace/esud/src/sepolicy.rs`): space-separated
+`allow <source> <target> <class> <permission|{ permissions }>`, `type <name>
+<attribute>`, statements split on newlines and semicolons. There is no
+`target:class` colon form, and because a `;` also splits a line, no comment may
+contain one.
+
 ## `boot-completed.sh`
 
 When the boot HAL denies a transaction it writes

@@ -465,11 +465,46 @@ fn attach_esp_file(esp_mount: &str, relative: &str, access: Access) -> io::Resul
 /// Open a loop device or the loop-control node with `O_CLOEXEC`; the guards
 /// must not leak into the real init.
 fn loop_open(path: &str) -> io::Result<File> {
+    // CF and Android GKI may have no devtmpfs: PID 1's /dev is then an
+    // empty tmpfs. Derive both loop nodes from sysfs, including dynamically
+    // allocated loops, instead of assuming ueventd has already run.
+    let (kind, directory) = if path == LOOP_CONTROL {
+        (
+            FileType::CharacterDevice,
+            PathBuf::from("/sys/class/misc/loop-control"),
+        )
+    } else {
+        let name = Path::new(path)
+            .file_name()
+            .ok_or_else(|| invalid("loop node has no device name"))?;
+        (FileType::BlockDevice, Path::new(SYS_CLASS_BLOCK).join(name))
+    };
+    ensure_loop_node(Path::new(path), kind, read_device(&directory)?)?;
     File::options()
         .read(true)
         .write(true)
         .custom_flags(OFlags::CLOEXEC.bits() as i32)
         .open(path)
+}
+
+fn ensure_loop_node(path: &Path, kind: FileType, rdev: u64) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            mknodat(CWD, path, kind, Mode::from_raw_mode(0o600), rdev)?;
+        }
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    let correct_type = match kind {
+        FileType::CharacterDevice => metadata.file_type().is_char_device(),
+        FileType::BlockDevice => metadata.file_type().is_block_device(),
+        _ => false,
+    };
+    if !correct_type || metadata.rdev() != rdev || metadata.uid() != 0 {
+        return Err(invalid("loop node has the wrong identity"));
+    }
+    Ok(())
 }
 
 /// Resolve an `esp-file:` path below the ESP mount, rejecting any symlink
@@ -764,6 +799,17 @@ mod tests {
     use super::*;
 
     const ESP: &str = "/debug_ramdisk/esp";
+
+    #[test]
+    fn loop_nodes_reject_wrong_identity_without_replacing_it() {
+        let path = std::env::temp_dir().join(format!("esu-loop-node-{}", std::process::id()));
+        fs::write(&path, b"not a device").unwrap();
+        for kind in [FileType::BlockDevice, FileType::CharacterDevice] {
+            assert!(ensure_loop_node(&path, kind, makedev(7, 0)).is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"not a device");
+        }
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn only_absence_is_pending() {

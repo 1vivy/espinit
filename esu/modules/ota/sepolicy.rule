@@ -1,7 +1,7 @@
 # The SELinux type esud labels every node under /dev/block/esd with
-# (u:object_r:esu_blk_device:s0). It is declared here and only referenced by the
-# boot HAL's rules, which are concatenated with these. Statements split on
-# newlines and semicolons, so no comment here may contain one.
+# (u:object_r:esu_blk_device:s0). Each consumer declares it before its own rules
+# because module policies are applied individually in modules_order.
+# Type creation is idempotent. Comments must not contain semicolons.
 type esu_blk_device dev_type
 
 # esud runs in the `esu` domain and owns the tree: it creates the directories
@@ -10,4 +10,4 @@ type esu_blk_device dev_type
 allow esu esu_blk_device dir { add_name create getattr open read remove_name search setattr write }
 allow esu esu_blk_device blk_file { create getattr open read relabelfrom relabelto setattr unlink write }
 allow esu esu_blk_device chr_file { create getattr open read relabelfrom relabelto setattr unlink write }
-allow esu self capability mknod
+allow esu esu capability mknod

@@ -16,6 +16,8 @@ int esu_get_platform_boot_mode(void);
  * Core init RC appended to Android's init.rc by the read/fstat proxies.
  * Plain synchronous execs retain upstream KernelSU failure handling in both
  * Android and recovery. The daemon owns explicitly critical module failures.
+ * Match stock /data/adb creation before esud populates it: imported init.usb.rc
+ * can apply its encryption policy later than this appended post-fs-data action.
  * `ksud_path` and `kernel_su_domain` are KSUD_PATH and KERNEL_SU_DOMAIN.
  */
 // clang-format off
@@ -30,6 +32,7 @@ int esu_get_platform_boot_mode(void);
     "on post-fs\n" \
     "    exec u:r:" kernel_su_domain ":s0 root -- " ksud_path " post-fs\n" \
     "on post-fs-data\n" \
+    "    mkdir /data/adb 0700 root root encryption=Require\n" \
     "    start logd\n" \
     "    exec u:r:" kernel_su_domain ":s0 root -- " ksud_path " post-fs-data\n" \
     "on nonencrypted\n" \

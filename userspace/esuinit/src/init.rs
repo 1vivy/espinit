@@ -211,7 +211,7 @@ fn load_and_check_payload(
         if !loader::module_loaded("gpt") {
             loader::load_managed_module(&path, entry)?;
         }
-        apply_projection(rom, identity.number, esp_device)?;
+        apply_projection(rom, identity.number, esp_device, identity.letters)?;
         selfcheck::check_projection_ready("gpt", rom.partition_modes())?;
     }
     Ok(())
@@ -593,6 +593,7 @@ fn apply_projection(
     rom: &RomConfig,
     rom_number: u32,
     esp_device: (u32, u32),
+    letters: config::Letters,
 ) -> Result<(), Failure> {
     let hide = retry_enumerated(
         "shadowed physical partitions",
@@ -626,6 +627,8 @@ fn apply_projection(
         rom.resolved_backends(),
         &hide,
         rom_number >= 2,
+        &rom.id,
+        letters,
     )
 }
 

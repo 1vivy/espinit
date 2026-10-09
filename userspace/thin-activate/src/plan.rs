@@ -116,16 +116,6 @@ pub fn activate_visible(
     if vg.physical_volumes().len() != 1 {
         return Err("VG rom must contain exactly one physical volume".to_owned());
     }
-    for required in ["metadata_1", "userdata_1"] {
-        let lv = vg.lv(required).map_err(|error| error.to_string())?;
-        if !lv
-            .segments
-            .iter()
-            .all(|segment| matches!(segment.kind, SegmentType::Thin { .. }))
-        {
-            return Err(format!("required LV {required} is not thin"));
-        }
-    }
 
     let mut devices = Devices::default();
     for pv in vg.physical_volumes().values() {
@@ -205,6 +195,28 @@ mod tests {
             pool_table[0]
                 .params
                 .ends_with("skip_block_zeroing no_discard_passdown")
+        );
+    }
+
+    #[test]
+    fn activates_rom_two_without_rom_one_volumes() {
+        let source = include_str!("../tests/fixtures/rom-vg.txt")
+            .replace("metadata_1", "metadata_2")
+            .replace("userdata_1", "userdata_2");
+        let vg = VolumeGroup::parse(&source).unwrap();
+        let mut mapper = Recording::default();
+        activate_visible(&vg, DeviceNumber { major: 7, minor: 0 }, &mut mapper).unwrap();
+        assert!(
+            mapper
+                .calls
+                .iter()
+                .any(|(name, _)| name == "rom-metadata_2")
+        );
+        assert!(
+            mapper
+                .calls
+                .iter()
+                .any(|(name, _)| name == "rom-userdata_2")
         );
     }
 

@@ -1,3 +1,4 @@
+type esu_blk_device dev_type
 type esu_bootctl domain
 typeattribute esu_bootctl hal_bootctl_server
 allow init esu_bootctl process transition
@@ -25,9 +26,9 @@ allow esu_bootctl hal_bootctl_hwservice hwservice_manager { add find }
 #
 # The esd device-name tree: the staging logical volumes, the physical partitions
 # the projection hides and the device-mapper control node esud publishes there.
-# `esu_blk_device` is declared by the `ota` module's sepolicy.rule, and this
-# module depends on that declaration. (Statements split on semicolons, so
-# comments here must not contain one.)
+# Each consumer declares `esu_blk_device` before its own rules because module
+# policies are applied individually in modules_order. Type creation is
+# idempotent. Comments must not contain semicolons.
 allow esu_bootctl esu_blk_device dir search
 allow esu_bootctl esu_blk_device blk_file { getattr open read write }
 allow esu_bootctl esu_blk_device chr_file { getattr open read write ioctl }
