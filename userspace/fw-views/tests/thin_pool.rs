@@ -199,6 +199,7 @@ fn external_origin_view_reads_through_isolates_writes_and_forgets_on_delete() {
     let pool = mapper
         .activate(
             POOL,
+            None,
             &[Target {
                 start: 0,
                 length: META_SECTORS,
@@ -218,6 +219,7 @@ fn external_origin_view_reads_through_isolates_writes_and_forgets_on_delete() {
     mapper
         .activate(
             VIEW,
+            None,
             &[Target {
                 start: 0,
                 length: ORIGIN_SECTORS,
@@ -273,6 +275,7 @@ fn external_origin_view_reads_through_isolates_writes_and_forgets_on_delete() {
     mapper
         .activate(
             VIEW,
+            None,
             &[Target {
                 start: 0,
                 length: ORIGIN_SECTORS,

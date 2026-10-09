@@ -40,7 +40,19 @@ pub struct Target {
 /// system and by recorders in tests, so the table derivation stays testable
 /// without a kernel.
 pub trait Mapper {
-    fn activate(&mut self, name: &str, targets: &[Target]) -> Result<DeviceNumber, String>;
+    fn activate(
+        &mut self,
+        name: &str,
+        uuid: Option<&str>,
+        targets: &[Target],
+    ) -> Result<DeviceNumber, String>;
+}
+
+fn uuid_bytes(uuid: &str) -> Result<&[u8], String> {
+    if uuid.is_empty() || uuid.len() > 128 || uuid.as_bytes().contains(&0) {
+        return Err("invalid device-mapper UUID".to_owned());
+    }
+    Ok(uuid.as_bytes())
 }
 
 /// A target message that the kernel refused.
@@ -664,7 +676,13 @@ impl DeviceMapper {
 }
 
 impl Mapper for DeviceMapper {
-    fn activate(&mut self, name: &str, targets: &[Target]) -> Result<DeviceNumber, String> {
+    fn activate(
+        &mut self,
+        name: &str,
+        uuid: Option<&str>,
+        targets: &[Target],
+    ) -> Result<DeviceNumber, String> {
+        let uuid = uuid.map(uuid_bytes).transpose()?;
         let expected_sectors = targets
             .iter()
             .try_fold(0_u64, |end, target| {
@@ -678,10 +696,19 @@ impl Mapper for DeviceMapper {
             if !same_table(&existing, targets) {
                 return Err(format!("existing device-mapper table for {name} differs"));
             }
+            if let Some(uuid) = uuid {
+                let actual = &self.header().uuid;
+                if actual[..uuid.len()] != *uuid || actual[uuid.len()] != 0 {
+                    return Err(format!("existing device-mapper UUID for {name} differs"));
+                }
+            }
             return Self::lookup(name, expected_sectors);
         }
 
         self.prepare(Some(name))?;
+        if let Some(uuid) = uuid {
+            self.header_mut().uuid[..uuid.len()].copy_from_slice(uuid);
+        }
         match self.call(DM_DEV_CREATE) {
             Ok(()) => self.created.push(name.to_owned()),
             Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
@@ -716,6 +743,15 @@ mod tests {
         assert_eq!(DM_TABLE_LOAD, 0xc138fd09_u32 as libc::Ioctl);
         assert_eq!(DM_TABLE_STATUS, 0xc138fd0c_u32 as libc::Ioctl);
         assert_eq!(DM_TARGET_MSG, 0xc138fd0e_u32 as libc::Ioctl);
+    }
+
+    #[test]
+    fn mapper_uuid_is_bounded_and_nul_terminated_by_the_zeroed_header() {
+        assert_eq!(uuid_bytes("LVM-abc-tpool").unwrap(), b"LVM-abc-tpool");
+        assert!(uuid_bytes("").is_err());
+        assert!(uuid_bytes("bad\0uuid").is_err());
+        assert!(uuid_bytes(&"x".repeat(129)).is_err());
+        assert!(uuid_bytes(&"x".repeat(128)).is_ok());
     }
 
     #[test]

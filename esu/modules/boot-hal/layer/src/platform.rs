@@ -19,7 +19,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, LazyLock};
@@ -93,9 +93,6 @@ const ESP_MOUNT_FLAGS: libc::c_ulong =
 
 /// Loop-control node used to allocate a free loop device.
 const LOOP_CONTROL: &str = "/dev/loop-control";
-
-/// Loop device node prefix.
-const LOOP_PREFIX: &str = "/dev/loop";
 
 /// Loop ioctls and status-buffer layout from `linux/loop.h`, pinned by the
 /// tests below. `libc` is deliberately not asked: the values are the kernel's
@@ -463,7 +460,62 @@ pub fn esd_refresh() -> Result<()> {
     run(&format!("{PAYLOAD_BIN}/esud"), &["esd", "refresh"])
 }
 
-/// Attach a read-only loop device to `path` and return its device number.
+/// An autoclear loop kept open until the switch acquires its own reference.
+pub struct LoopAttachment {
+    _device: File,
+    /// Kernel block device to use in the switch's linear target.
+    pub number: DeviceNumber,
+}
+
+fn loop_number(sysfs: &str) -> Result<DeviceNumber> {
+    let (major, minor) = sysfs
+        .trim()
+        .split_once(':')
+        .context("loop sysfs device number")?;
+    let number = DeviceNumber {
+        major: major.parse()?,
+        minor: minor.parse()?,
+    };
+    ensure!(number.major == 7, "allocated loop device number mismatch");
+    Ok(number)
+}
+
+fn loop_node(node: &Path, number: DeviceNumber) -> Result<File> {
+    if !node.exists() {
+        let name = CString::new(node.as_os_str().as_encoded_bytes())?;
+        // SAFETY: name is terminated; the mode and device number are the
+        // allocated block device checked against the kernel's sysfs identity.
+        let result = unsafe {
+            libc::mknod(
+                name.as_ptr(),
+                libc::S_IFBLK | 0o600,
+                libc::makedev(number.major, number.minor),
+            )
+        };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error).with_context(|| format!("create {}", node.display()));
+            }
+        }
+    }
+    let device = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(node)?;
+    let metadata = device.metadata()?;
+    ensure!(
+        metadata.file_type().is_block_device()
+            && libc::major(metadata.rdev()) as u32 == number.major
+            && libc::minor(metadata.rdev()) as u32 == number.minor,
+        "invalid loop node {}",
+        node.display()
+    );
+    Ok(device)
+}
+
+/// Attach a read-only loop device to `path` and retain its open descriptor.
 ///
 /// The promoted base image has to keep serving the letter that is already
 /// running from the staging LV, and a device-mapper linear target can only
@@ -471,7 +523,7 @@ pub fn esd_refresh() -> Result<()> {
 /// loop-control ioctls. The loop is read-only and `LO_FLAGS_AUTOCLEAR`: it
 /// detaches when the switch device that references it stops opening it, so no
 /// loop is leaked across boots.
-pub fn attach_read_only(path: &Path) -> Result<DeviceNumber> {
+pub fn attach_read_only(path: &Path) -> Result<LoopAttachment> {
     let backing = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let control = OpenOptions::new()
         .read(true)
@@ -484,12 +536,11 @@ pub fn attach_read_only(path: &Path) -> Result<DeviceNumber> {
         "loop-control returned an unusable device number"
     );
 
-    let node = format!("{LOOP_PREFIX}{number}");
-    let device = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&node)
-        .with_context(|| format!("open {node}"))?;
+    let index = u32::try_from(number)?;
+    let identity = fs::read_to_string(format!("/sys/block/loop{index}/dev"))?;
+    let number = loop_number(&identity)?;
+    let node = format!("/dev/block/loop{index}");
+    let device = loop_node(Path::new(&node), number).with_context(|| format!("open {node}"))?;
 
     ioctl(
         device.as_raw_fd(),
@@ -526,13 +577,9 @@ pub fn attach_read_only(path: &Path) -> Result<DeviceNumber> {
         bail!("{node} is not the read-only, whole-file loop this ROM needs");
     }
 
-    let device = fs::metadata(&node).with_context(|| format!("stat {node}"))?;
-    // `libc::major`/`minor` are signed on bionic and unsigned on glibc; a device
-    // number is never negative, so the cast is the portable form of both.
-    let number = device.rdev();
-    Ok(DeviceNumber {
-        major: libc::major(number) as u32,
-        minor: libc::minor(number) as u32,
+    Ok(LoopAttachment {
+        _device: device,
+        number,
     })
 }
 
@@ -570,6 +617,31 @@ mod tests {
         assert_eq!(PAYLOAD, format!("{ESP_MOUNT}/esu"));
         assert_eq!(PAYLOAD_BIN, "/debug_ramdisk/esu/bin");
         assert_eq!(esd_tree(), "/dev/block/esd");
+    }
+
+    #[test]
+    fn loop_identity_and_attachment_lifetime_are_checked() {
+        let number = loop_number("7:89\n").unwrap();
+        assert_eq!((number.major, number.minor), (7, 89));
+        for identity in ["8:89", "7", "7:89:1", "-1:89"] {
+            assert!(loop_number(identity).is_err());
+        }
+        let partitioned = loop_number("7:712\n").unwrap();
+        assert_eq!(partitioned.minor, 712);
+        assert!(loop_node(Path::new("/dev/null"), number).is_err());
+        let file = File::open("/dev/null").unwrap();
+        let fd = file.as_raw_fd();
+        let attachment = LoopAttachment {
+            _device: file,
+            number,
+        };
+        assert_eq!(attachment.number.minor, 89);
+        // SAFETY: F_GETFD has no pointer argument and observes this owned fd.
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        drop(attachment);
+        // SAFETY: F_GETFD takes no pointer and safely rejects the closed fd.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]

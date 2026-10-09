@@ -734,10 +734,12 @@ impl RomN {
             mapper
                 .reload(
                     &ota_dm_name(self.number, base),
-                    &[linear(device, self.sectors(base)?)],
+                    &[linear(device.number, self.sectors(base)?)],
                     true,
                 )
                 .map_err(anyhow::Error::msg)?;
+            // Autoclear must not detach until reload has opened the loop.
+            drop(device);
         }
         Ok(())
     }

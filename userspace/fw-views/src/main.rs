@@ -110,6 +110,7 @@ fn run() -> Result<(), String> {
 
         mapper.activate(
             &view.device,
+            None,
             &[plan::table(origin, sectors, view.thin_id, pool)],
         )?;
     }

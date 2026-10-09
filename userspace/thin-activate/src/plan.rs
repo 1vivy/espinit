@@ -33,15 +33,28 @@ fn targets(lines: Vec<String>) -> Result<Vec<Target>, String> {
         .collect()
 }
 
+fn lvm_uuid(vg_id: &str, lv_id: &str, suffix: &str) -> String {
+    let mut uuid = String::with_capacity(5 + vg_id.len() + lv_id.len() + suffix.len());
+    uuid.push_str("LVM-");
+    uuid.extend(vg_id.chars().filter(|character| *character != '-'));
+    uuid.extend(lv_id.chars().filter(|character| *character != '-'));
+    if !suffix.is_empty() {
+        uuid.push('-');
+        uuid.push_str(suffix);
+    }
+    uuid
+}
+
 fn activate_one(
     vg: &VolumeGroup,
     name: &str,
-    layer: Layer,
+    layer: (Layer, &'static str),
     devices: &mut Devices,
     active: &mut BTreeSet<(String, Layer)>,
     visiting: &mut BTreeSet<(String, Layer)>,
     mapper: &mut impl Mapper,
 ) -> Result<(), String> {
+    let (layer, mut uuid_suffix) = layer;
     let key = (name.to_owned(), layer);
     if active.contains(&key) {
         return Ok(());
@@ -57,12 +70,21 @@ fn activate_one(
                 match &segment.kind {
                     SegmentType::Linear { .. } => {}
                     SegmentType::ThinPool { .. } => {
-                        activate_one(vg, name, Layer::ThinPool, devices, active, visiting, mapper)?
+                        uuid_suffix = "pool";
+                        activate_one(
+                            vg,
+                            name,
+                            (Layer::ThinPool, "tpool"),
+                            devices,
+                            active,
+                            visiting,
+                            mapper,
+                        )?
                     }
                     SegmentType::Thin { thin_pool, .. } => activate_one(
                         vg,
                         thin_pool,
-                        Layer::ThinPool,
+                        (Layer::ThinPool, "tpool"),
                         devices,
                         active,
                         visiting,
@@ -79,13 +101,21 @@ fn activate_one(
                 activate_one(
                     vg,
                     metadata,
-                    Layer::Volume,
+                    (Layer::Volume, "tmeta"),
                     devices,
                     active,
                     visiting,
                     mapper,
                 )?;
-                activate_one(vg, data, Layer::Volume, devices, active, visiting, mapper)?;
+                activate_one(
+                    vg,
+                    data,
+                    (Layer::Volume, "tdata"),
+                    devices,
+                    active,
+                    visiting,
+                    mapper,
+                )?;
             }
         }
     }
@@ -94,7 +124,8 @@ fn activate_one(
         .dm_table(name, layer, devices, Default::default())
         .map_err(|error| error.to_string())?;
     let dm_name = vg.dm_name(name, layer).map_err(|error| error.to_string())?;
-    let number = mapper.activate(&dm_name, &targets(table)?)?;
+    let uuid = lvm_uuid(vg.id(), &lv.id, uuid_suffix);
+    let number = mapper.activate(&dm_name, Some(&uuid), &targets(table)?)?;
     devices
         .logical_volumes
         .entry(name.to_owned())
@@ -130,7 +161,7 @@ pub fn activate_visible(
             activate_one(
                 vg,
                 name,
-                Layer::Volume,
+                (Layer::Volume, ""),
                 &mut devices,
                 &mut active,
                 &mut visiting,
@@ -149,11 +180,19 @@ mod tests {
     struct Recording {
         next_minor: u32,
         calls: Vec<(String, Vec<Target>)>,
+        uuids: Vec<(String, String)>,
     }
 
     impl Mapper for Recording {
-        fn activate(&mut self, name: &str, targets: &[Target]) -> Result<DeviceNumber, String> {
+        fn activate(
+            &mut self,
+            name: &str,
+            uuid: Option<&str>,
+            targets: &[Target],
+        ) -> Result<DeviceNumber, String> {
             self.calls.push((name.to_owned(), targets.to_vec()));
+            self.uuids
+                .push((name.to_owned(), uuid.expect("LVM identity").to_owned()));
             let result = DeviceNumber {
                 major: 252,
                 minor: self.next_minor,
@@ -218,6 +257,63 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name == "rom-userdata_2")
         );
+    }
+
+    #[test]
+    fn uuid_layers_match_host_lvm_replica() {
+        let vg = VolumeGroup::parse(include_str!("../tests/fixtures/uuid-replica.vg")).unwrap();
+        let captured = [
+            (
+                "pool",
+                "pool",
+                "LVM-ofNh6PV0KBmUBwk5SGoaDsaIVzuNkaTsGBC92cxXLtL7LFMFbDIDq8a45fYVpvYU-pool",
+            ),
+            (
+                "pool",
+                "tpool",
+                "LVM-ofNh6PV0KBmUBwk5SGoaDsaIVzuNkaTsGBC92cxXLtL7LFMFbDIDq8a45fYVpvYU-tpool",
+            ),
+            (
+                "pool_tdata",
+                "tdata",
+                "LVM-ofNh6PV0KBmUBwk5SGoaDsaIVzuNkaTsONcbrBES6WYswJcDqLf4WOdJPspnaGlb-tdata",
+            ),
+            (
+                "pool_tmeta",
+                "tmeta",
+                "LVM-ofNh6PV0KBmUBwk5SGoaDsaIVzuNkaTsc2Sh9ZZV0ImpGXajiwc14tmLRJpJXwEy-tmeta",
+            ),
+            (
+                "stage",
+                "",
+                "LVM-ofNh6PV0KBmUBwk5SGoaDsaIVzuNkaTsrUkmsZJBqC1UDyftx4kRIfwl721kE8O8",
+            ),
+            (
+                "thin",
+                "",
+                "LVM-ofNh6PV0KBmUBwk5SGoaDsaIVzuNkaTsMfIDrlGx75EMyEcdaQqrsyaWzWKsQeJo",
+            ),
+        ];
+        for (name, suffix, expected) in captured {
+            assert_eq!(
+                lvm_uuid(vg.id(), &vg.lv(name).unwrap().id, suffix),
+                expected
+            );
+        }
+        let source =
+            include_str!("../tests/fixtures/uuid-replica.vg").replacen("cfota_uuid {", "rom {", 1);
+        let vg = VolumeGroup::parse(&source).unwrap();
+        let mut mapper = Recording::default();
+        activate_visible(&vg, DeviceNumber { major: 7, minor: 0 }, &mut mapper).unwrap();
+        for (name, suffix, expected) in captured {
+            let layer = if suffix == "tpool" {
+                Layer::ThinPool
+            } else {
+                Layer::Volume
+            };
+            let dm_name = vg.dm_name(name, layer).unwrap();
+            assert!(mapper.uuids.contains(&(dm_name, expected.to_owned())));
+        }
     }
 
     #[test]

@@ -133,6 +133,12 @@ set is removed. `esud esd refresh` re-publishes the device-name tree after every
 create/remove, and the nodes are opened as
 `/dev/block/esd/lv/<lv>`, `/dev/block/esd/by-name/<PARTNAME>` and
 `/dev/block/esd/mapper/control`.
+Promotion resolves each allocated loop using `/sys/block/loop<N>/dev`,
+requires major 7, and opens or creates Android's `/dev/block/loop<N>` with the
+kernel-published minor (including `loop.max_part` partition geometry)
+without following symlinks. An attachment guard holds its autoclear descriptor
+until the switch reload acquires a reference; dropping it before reload would
+detach the image while the running letter still needs it.
 
 **Seal.** The target's kernel identity comes from the *staged* `boot` image
 (`kmi_from_boot`), the module set for that KMI is selected from the payload

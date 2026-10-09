@@ -208,7 +208,9 @@ mod tests {
         let header = include_str!("../../../kernel/runtime/platform_boot.h");
         let action = header.split("\"on post-fs-data\\n\"").nth(1).unwrap();
         let action = action.split("\"on nonencrypted\\n\"").next().unwrap();
-        let mkdir = action.find("mkdir /data/adb 0700 root root encryption=Require").unwrap();
+        let mkdir = action
+            .find("mkdir /data/adb 0700 root root encryption=Require")
+            .unwrap();
         let exec = action.find("ksud_path \" post-fs-data\\n\"").unwrap();
         assert!(mkdir < exec);
         assert!(!action.contains("trigger esu-post-fs-data"));
