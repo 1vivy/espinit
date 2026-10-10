@@ -1,121 +1,72 @@
-#ifndef __KSU_UAPI_SUPERCALL_H
-#define __KSU_UAPI_SUPERCALL_H
+#ifndef __ESP_UAPI_SUPERCALL_H
+#define __ESP_UAPI_SUPERCALL_H
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-// 3: PID1 boot-mode selection and readback
-static const __u32 ESU_UAPI_VERSION = 3;
-
-/* Magic numbers for the reboot hook to install the driver fd */
-static const __u32 ESU_INSTALL_MAGIC1 = 0x45535049; /* 'ESPI' */
-static const __u32 ESU_INSTALL_MAGIC2 = 0x4e495446; /* 'NITF' */
-
-static const __u32 EVENT_POST_FS_DATA = 1;
-static const __u32 EVENT_BOOT_COMPLETED = 2;
-static const __u32 EVENT_MODULE_MOUNTED = 3;
-static const __u32 EVENT_SERVICES = 4;
-
-static const __u32 KSU_GET_INFO_FLAG_LKM = (1U << 0);
+static const __u32 ESU_UAPI_VERSION = 4;
+/* reboot(magic1, magic2, 0, &fd) installs an owned anonymous control FD. */
+static const __u32 ESU_INSTALL_MAGIC1 = 0x45535049; /* ESPI */
+static const __u32 ESU_INSTALL_MAGIC2 = 0x4e495446; /* NITF */
+#define ESU_CONTROL_NAME "[kernelsu-esp]"
+static const __u32 ESU_GET_INFO_FLAG_LKM = (1U << 0);
 static const __u32 ESU_STATE_READY = (1U << 0);
 
-struct ksu_get_info_cmd {
-    __u32 version; /* Output: kernel module version */
-    __u32 flags; /* Output: KSU_GET_INFO_FLAG_* bits */
-    __u32 features; /* Output: max feature ID supported */
-    __u32 uapi_version; /* Output: ESU_UAPI_VERSION */
-    __u32 state; /* Output: ESU_STATE_* bits */
-    __u8 generation[64]; /* Output: NUL-terminated ASCII build generation */
-    __u32 boot_mode; /* Output: enum esu_platform_boot_mode */
+struct esu_get_info_cmd {
+    __u32 version;
+    __u32 flags;
+    __u32 uapi_version;
+    __u32 state;
 };
 
-struct ksu_get_info_legacy_cmd {
-    __u32 version; /* Output: kernel module version */
-    __u32 flags; /* Output: KSU_GET_INFO_FLAG_* bits */
-    __u32 features; /* Output: max feature ID supported */
-};
-
-struct ksu_report_event_cmd {
-    __u32 event; /* Input: EVENT_POST_FS_DATA, EVENT_BOOT_COMPLETED, etc. */
+/* Root-only, immutable one-pass supplement; bootstrap rc precedes module rc.
+ * reserved must be zero; ptr must be nonzero when len is nonzero.
+ * EALREADY on a second supply, EBUSY if init consumed before supply.
+ * norc suppresses delivery without changing the one-supply contract.
+ */
+struct esu_module_rc_cmd {
+    __aligned_u64 ptr;
+    __u32 len; /* 0..65536 */
+    __u32 reserved;
 };
 
 struct ksu_set_sepolicy_cmd {
-    __u64 data_len; /* Input: bytes of serialized command payload */
-    __aligned_u64 data; /* Input: pointer to serialized payload */
+    __u64 data_len;
+    __aligned_u64 data;
 };
 
-/* Root-only, set once before Android init reads its rc. */
-struct esu_module_rc_cmd {
-    __aligned_u64 ptr; /* Input: pointer to len bytes of init rc */
-    __u32 len; /* Input: 0..65536 bytes */
-    __u32 reserved; /* Input: must be zero */
+#define ESU_POLICY_MAX_SIZE (64U * 1024U * 1024U)
+/* Root-only coherent live snapshot, never the original boot policy.
+ * ptr=0,len=0 queries a bounded allocation capacity (not a snapshot).
+ * Otherwise ptr must be nonzero and len is the buffer capacity, <= MAX_SIZE.
+ * Success replaces len with the serialized byte count. Policy growth between
+ * query and export can return ENOSPC; callers must fail rather than retry.
+ * Serialization preserves live Android netlink configuration.
+ */
+struct esu_get_sepolicy_cmd {
+    __aligned_u64 ptr;
+    __u64 len;
 };
-
 struct ksu_sepolicy_cmd_hdr {
-    __u32 cmd; /* Input: command type, CMD_* */
-    __u32 subcmd; /* Input: command subtype */
+    __u32 cmd;
+    __u32 subcmd;
 };
-/*
- * After each ksu_sepolicy_cmd_hdr, command arguments are encoded sequentially as:
- * [u32 len][len bytes][\0], where len excludes the trailing '\0'.
- * len == 0 represents ALL.
- * Argument count is derived from cmd:
- * KSU_SEPOLICY_CMD_NORMAL_PERM=4, KSU_SEPOLICY_CMD_XPERM=5,
- * KSU_SEPOLICY_CMD_TYPE_STATE=1, KSU_SEPOLICY_CMD_TYPE=2,
- * KSU_SEPOLICY_CMD_TYPE_ATTR=2, KSU_SEPOLICY_CMD_ATTR=1,
- * KSU_SEPOLICY_CMD_TYPE_TRANSITION=5, KSU_SEPOLICY_CMD_TYPE_CHANGE=4,
- * KSU_SEPOLICY_CMD_GENFSCON=3.
+/* Arguments following each header: [u32 len][len bytes][NUL].
+ * len excludes NUL; zero means ALL. Arity by KSU_SEPOLICY_CMD_*:
+ * NORMAL_PERM=4, XPERM=5, TYPE_STATE=1, TYPE=2, TYPE_ATTR=2, ATTR=1,
+ * TYPE_TRANSITION=5, TYPE_CHANGE=4, GENFSCON=3 (selinux.h command IDs).
+ */
+/* arm64/x86_64 encodings: GET_INFO=0x80104502,
+ * SET_MODULE_RC=0x40104515, SET_SEPOLICY=0xc0004504,
+ * GET_SEPOLICY=0xc0104516.
+ * SET_SEPOLICY intentionally retains its size-zero serialized-batch encoding;
+ * the argument still points to the 16-byte ksu_set_sepolicy_cmd.
  */
 
-struct ksu_check_safemode_cmd {
-    __u8 in_safe_mode; /* Output: true if in safe mode, false otherwise */
-};
-
-struct ksu_get_feature_cmd {
-    __u32 feature_id; /* Input: feature ID (enum ksu_feature_id) */
-    __u64 value; /* Output: feature value/state */
-    __u8 supported; /* Output: true if feature is supported, false otherwise */
-};
-
-struct ksu_set_feature_cmd {
-    __u32 feature_id; /* Input: feature ID (enum ksu_feature_id) */
-    __u64 value; /* Input: feature value/state to set */
-};
-
-struct ksu_get_wrapper_fd_cmd {
-    __u32 fd; /* Input: userspace fd */
-    __u32 flags; /* Input: flags of userspace fd */
-};
-
-struct ksu_nuke_ext4_sysfs_cmd {
-    __aligned_u64 arg; /* Input: mnt pointer */
-};
-
-struct ksu_add_try_umount_cmd {
-    __aligned_u64 arg; /* char ptr, this is the mountpoint */
-    __u32 flags; /* this is the flag we use for it */
-    __u8 mode; /* denotes what to do with it 0:wipe_list 1:add_to_list 2:delete_entry */
-};
-
-static const __u8 KSU_UMOUNT_WIPE = 0; /* ignore everything and wipe list */
-static const __u8 KSU_UMOUNT_ADD = 1; /* add entry (path + flags) */
-static const __u8 KSU_UMOUNT_DEL = 2; /* delete entry, strcmp */
-
-/* IOCTL command definitions. The 'E' type keeps esu distinct from
- * any existing KernelSU installation using type 'K'. */
-static const __u32 KSU_IOCTL_GET_INFO = _IOR('E', 2, struct ksu_get_info_cmd);
-static const __u32 ESU_IOCTL_SET_BOOT_MODE = _IOW('E', 20, __u32);
+/* All commands are root-only. Type E is distinct from KernelSU's type K. */
+static const __u32 ESU_IOCTL_GET_INFO = _IOR('E', 2, struct esu_get_info_cmd);
 static const __u32 ESU_IOCTL_SET_MODULE_RC = _IOW('E', 21, struct esu_module_rc_cmd);
-/* deprecated */
-static const __u32 KSU_IOCTL_GET_INFO_LEGACY = _IOC(_IOC_READ, 'E', 2, 0);
-static const __u32 KSU_IOCTL_REPORT_EVENT = _IOC(_IOC_WRITE, 'E', 3, 0);
-static const __u32 KSU_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'E', 4, 0);
-static const __u32 KSU_IOCTL_CHECK_SAFEMODE = _IOC(_IOC_READ, 'E', 5, 0);
-static const __u32 KSU_IOCTL_GET_FEATURE = _IOC(_IOC_READ | _IOC_WRITE, 'E', 13, 0);
-static const __u32 KSU_IOCTL_SET_FEATURE = _IOC(_IOC_WRITE, 'E', 14, 0);
-static const __u32 KSU_IOCTL_GET_WRAPPER_FD = _IOC(_IOC_WRITE, 'E', 15, 0);
-static const __u32 KSU_IOCTL_NUKE_EXT4_SYSFS = _IOC(_IOC_WRITE, 'E', 17, 0);
-static const __u32 KSU_IOCTL_ADD_TRY_UMOUNT = _IOC(_IOC_WRITE, 'E', 18, 0);
-static const __u32 KSU_IOCTL_SET_INIT_PGRP = _IO('E', 19);
+static const __u32 ESU_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'E', 4, 0);
+static const __u32 ESU_IOCTL_GET_SEPOLICY = _IOWR('E', 22, struct esu_get_sepolicy_cmd);
 
 #endif

@@ -1,0 +1,259 @@
+diff --git a/build.py b/build.py
+index 7ecce253c..7c4dc6153 100755
+--- a/build.py
++++ b/build.py
+@@ -37,8 +37,8 @@ abi32_map = {
+     "x86_64": "x86",
+ }
+ default_abis = support_abis.keys() - {"riscv64"}
+-support_targets = {"magisk", "magiskinit", "magiskboot", "magiskpolicy", "resetprop"}
+-default_targets = support_targets - {"resetprop"}
++support_targets = {"magisk", "magiskpolicy", "resetprop"}
++default_targets = {"magisk", "magiskpolicy"}
+ rust_targets = default_targets.copy()
+ clean_targets = {"native", "cpp", "rust", "app"}
+ 
+@@ -146,7 +146,7 @@ def clean_elf():
+     elif args.verbose > 1:
+         cmds.append("--verbose")
+     cmds.append("--")
+-    cmds.extend(glob.glob("native/out/*/magisk"))
++    cmds.extend(glob.glob("native/out/*/ksud"))
+     cmds.extend(glob.glob("native/out/*/magiskpolicy"))
+     proc = execv(cmds)
+     if proc.returncode != 0:
+@@ -283,6 +283,10 @@ def dump_flags_native():
+     write_if_diff(native_gen_path / "flags.rs", rust_flag_txt)
+ 
+ 
++def unsupported_product_action():
++    error("KernelSU ESP builds native ksud and policy tools, not APKs or boot installers")
++
++
+ def build_native():
+     ensure_toolchain()
+ 
+@@ -880,17 +884,17 @@ def parse_args():
+     gen_parser.add_argument("--abi", help="target ABI to generate")
+ 
+     # Set callbacks
+-    all_parser.set_defaults(func=build_all)
++    all_parser.set_defaults(func=build_native)
+     native_parser.set_defaults(func=build_native)
+     cargo_parser.set_defaults(func=cargo_cli)
+     clippy_parser.set_defaults(func=clippy_cli)
+     rustup_parser.set_defaults(func=setup_rustup)
+     gen_parser.set_defaults(func=gen_ide)
+-    app_parser.set_defaults(func=build_app)
+-    stub_parser.set_defaults(func=build_stub)
+-    test_parser.set_defaults(func=build_test)
+-    emu_parser.set_defaults(func=setup_avd)
+-    patch_parser.set_defaults(func=patch)
++    app_parser.set_defaults(func=unsupported_product_action)
++    stub_parser.set_defaults(func=unsupported_product_action)
++    test_parser.set_defaults(func=unsupported_product_action)
++    emu_parser.set_defaults(func=unsupported_product_action)
++    patch_parser.set_defaults(func=unsupported_product_action)
+     clean_parser.set_defaults(func=cleanup)
+     ndk_parser.set_defaults(func=setup_ndk)
+ 
+diff --git a/native/src/Android.mk b/native/src/Android.mk
+index 37e2fce53..b41565527 100644
+--- a/native/src/Android.mk
++++ b/native/src/Android.mk
+@@ -7,7 +7,7 @@ LOCAL_PATH := $(call my-dir)
+ ifdef B_MAGISK
+ 
+ include $(CLEAR_VARS)
+-LOCAL_MODULE := magisk
++LOCAL_MODULE := ksud
+ LOCAL_STATIC_LIBRARIES := \
+     libbase \
+     libsystemproperties \
+diff --git a/native/src/core/applets.cpp b/native/src/core/applets.cpp
+index 38d6322e5..921e264f7 100644
+--- a/native/src/core/applets.cpp
++++ b/native/src/core/applets.cpp
+@@ -45,9 +45,9 @@ int main(int argc, char *argv[]) {
+         return 1;
+     }
+ 
+-    if (argv0 == "magisk" || argv0 == "magisk32" || argv0 == "magisk64") {
++    if (argv0 == "ksud" || argv0 == "ksud32") {
+         if (argc > 1 && argv[1][0] != '-') {
+-            // Calling applet with "magisk [applet] args..."
++            // Calling an internal applet with "ksud [applet] args...".
+             --argc;
+             ++argv;
+             argv0 = argv[0];
+diff --git a/native/src/core/logging.rs b/native/src/core/logging.rs
+index 554cdb941..a3fd0dc23 100644
+--- a/native/src/core/logging.rs
++++ b/native/src/core/logging.rs
+@@ -4,7 +4,7 @@ use crate::logging::LogFile::{Actual, Buffer};
+ use crate::new_daemon_thread;
+ use base::const_format::concatcp;
+ use base::{
+-    FsPathBuilder, LogLevel, LoggedResult, ReadExt, ResultExt, Utf8CStr, Utf8CStrBuf, WriteExt,
++    FsPathBuilder, LogLevel, LoggedResult, ReadExt, Utf8CStr, Utf8CStrBuf, WriteExt,
+     cstr, libc, raw_cstr, update_logger,
+ };
+ use bytemuck::{Pod, Zeroable, bytes_of, write_zeroes};
+@@ -58,7 +58,7 @@ fn level_to_prio(level: LogLevel) -> i32 {
+ 
+ fn android_log_write(level: LogLevel, msg: &Utf8CStr) {
+     unsafe {
+-        __android_log_write(level_to_prio(level), raw_cstr!("Magisk"), msg.as_ptr());
++        __android_log_write(level_to_prio(level), raw_cstr!("KernelSU-ESP"), msg.as_ptr());
+     }
+ }
+ 
+@@ -331,7 +331,7 @@ pub fn start_log_daemon() {
+     }
+ 
+     let _ = || -> LoggedResult<()> {
+-        path.mkfifo(0o666).log_ok();
++        // Native startup already created and labeled the private pipe.
+         chown(path.as_utf8_cstr(), Some(Uid::from(0)), Some(Gid::from(0)))?;
+         let read = path.open(OFlag::O_RDWR | OFlag::O_CLOEXEC)?;
+         let write = path.open(OFlag::O_WRONLY | OFlag::O_CLOEXEC)?;
+diff --git a/native/src/core/utils.cpp b/native/src/core/utils.cpp
+index 2fc3bfbc4..5e3c42614 100644
+--- a/native/src/core/utils.cpp
++++ b/native/src/core/utils.cpp
+@@ -35,17 +35,7 @@ void write_string(int fd, string_view str) {
+ }
+ 
+ const char *get_magisk_tmp() {
+-    static const char *path = nullptr;
+-    if (path == nullptr) {
+-        if (access("/debug_ramdisk/" INTLROOT, F_OK) == 0) {
+-            path = "/debug_ramdisk";
+-        } else if (access("/sbin/" INTLROOT, F_OK) == 0) {
+-            path = "/sbin";
+-        } else {
+-            path = "";
+-        }
+-    }
+-    return path;
++    return "/dev/kernelsu-esp";
+ }
+ 
+ void unlock_blocks() {
+diff --git a/native/src/core/zygisk/daemon.rs b/native/src/core/zygisk/daemon.rs
+index 23af05341..96189ba79 100644
+--- a/native/src/core/zygisk/daemon.rs
++++ b/native/src/core/zygisk/daemon.rs
+@@ -36,13 +36,14 @@ fn exec_zygiskd(is_64_bit: bool, remote: UnixStream) {
+     // Start building the exec arguments
+ 
+     #[cfg(target_pointer_width = "64")]
+-    let magisk = if is_64_bit { "magisk" } else { "magisk32" };
++    let magisk = if is_64_bit { "ksud" } else { "ksud32" };
+ 
+     #[cfg(target_pointer_width = "32")]
+-    let magisk = "magisk";
++    let magisk = "ksud";
+ 
+     let exe = cstr::buf::new::<64>()
+         .join_path(get_magisk_tmp())
++        .join_path("bin")
+         .join_path(magisk);
+ 
+     let mut fd_str = cstr::buf::new::<16>();
+diff --git a/native/src/include/consts.hpp b/native/src/include/consts.hpp
+index ce5e3c76b..5082263bf 100644
+--- a/native/src/include/consts.hpp
++++ b/native/src/include/consts.hpp
+@@ -1,13 +1,13 @@
+ #pragma once
+ 
+ #define JAVA_PACKAGE_NAME "com.topjohnwu.magisk"
+-#define SECURE_DIR      "/data/adb"
+-#define MODULEROOT      SECURE_DIR "/modules"
+-#define DATABIN         SECURE_DIR "/magisk"
+-#define MAGISKDB        SECURE_DIR "/magisk.db"
++#define SECURE_DIR      "/dev/kernelsu-esp/store"
++#define MODULEROOT      "/dev/kernelsu-esp/modules"
++#define DATABIN         "/dev/kernelsu-esp/bin"
++#define MAGISKDB        SECURE_DIR "/state.db"
+ 
+ // tmpfs paths
+-#define INTLROOT      ".magisk"
++#define INTLROOT      ".esp"
+ #define MIRRDIR       INTLROOT "/mirror"
+ #define PREINITMIRR   INTLROOT "/preinit"
+ #define DEVICEDIR     INTLROOT "/device"
+@@ -24,9 +24,9 @@ constexpr const char *applet_names[] = { "su", "resetprop", nullptr };
+ #define POST_FS_DATA_WAIT_TIME       40
+ #define POST_FS_DATA_SCRIPT_MAX_TIME 35
+ 
+-// Unconstrained domain the daemon and root processes run in
+-#define SEPOL_PROC_DOMAIN   "magisk"
++// Product daemon domain
++#define SEPOL_PROC_DOMAIN   "esp"
+ #define MAGISK_PROC_CON     "u:r:" SEPOL_PROC_DOMAIN ":s0"
+-// Unconstrained file type that anyone can access
+-#define SEPOL_FILE_TYPE     "magisk_file"
++// Product-owned runtime files
++#define SEPOL_FILE_TYPE     "esp_file"
+ #define MAGISK_FILE_CON     "u:object_r:" SEPOL_FILE_TYPE ":s0"
+diff --git a/native/src/include/consts.rs b/native/src/include/consts.rs
+index 41eb12a66..1181fc441 100644
+--- a/native/src/include/consts.rs
++++ b/native/src/include/consts.rs
+@@ -13,17 +13,17 @@ pub const MAGISK_FULL_VER: &str = concatcp!(MAGISK_VERSION, "(", MAGISK_VER_CODE
+ 
+ pub const APP_PACKAGE_NAME: &str = "com.topjohnwu.magisk";
+ 
+-pub const LOGFILE: &str = "/cache/magisk.log";
++pub const LOGFILE: &str = "/dev/kernelsu-esp/store/esp.log";
+ 
+ // data paths
+-pub const SECURE_DIR: &str = "/data/adb";
+-pub const MODULEROOT: &str = concatcp!(SECURE_DIR, "/modules");
++pub const SECURE_DIR: &str = "/dev/kernelsu-esp/store";
++pub const MODULEROOT: &str = "/dev/kernelsu-esp/modules";
+ pub const MODULEUPGRADE: &str = concatcp!(SECURE_DIR, "/modules_update");
+-pub const DATABIN: &str = concatcp!(SECURE_DIR, "/magisk");
+-pub const MAGISKDB: &str = concatcp!(SECURE_DIR, "/magisk.db");
++pub const DATABIN: &str = "/dev/kernelsu-esp/bin";
++pub const MAGISKDB: &str = concatcp!(SECURE_DIR, "/state.db");
+ 
+ // tmpfs paths
+-pub const INTERNAL_DIR: &str = ".magisk";
++pub const INTERNAL_DIR: &str = ".esp";
+ pub const MAIN_CONFIG: &str = concatcp!(INTERNAL_DIR, "/config");
+ pub const PREINITMIRR: &str = concatcp!(INTERNAL_DIR, "/preinit");
+ pub const MODULEMNT: &str = concatcp!(INTERNAL_DIR, "/modules");
+@@ -37,12 +37,12 @@ pub const ROOTOVL: &str = concatcp!(INTERNAL_DIR, "/rootdir");
+ pub const ROOTMNT: &str = concatcp!(ROOTOVL, "/.mount_list");
+ pub const SELINUXMOCK: &str = concatcp!(INTERNAL_DIR, "/selinux");
+ 
+-// Unconstrained domain the daemon and root processes run in
+-pub const SEPOL_PROC_DOMAIN: &str = "magisk";
++// Product daemon domain; authorization remains enforced at request dispatch.
++pub const SEPOL_PROC_DOMAIN: &str = "esp";
+ pub const MAGISK_PROC_CON: &str = concatcp!("u:r:", SEPOL_PROC_DOMAIN, ":s0");
+-// Unconstrained file type that anyone can access
+-pub const SEPOL_FILE_TYPE: &str = "magisk_file";
++// Product-owned runtime files.
++pub const SEPOL_FILE_TYPE: &str = "esp_file";
+ pub const MAGISK_FILE_CON: &str = concatcp!("u:object_r:", SEPOL_FILE_TYPE, ":s0");
+ // Log pipe that only root and zygote can open
+-pub const SEPOL_LOG_TYPE: &str = "magisk_log_file";
++pub const SEPOL_LOG_TYPE: &str = "esp_log_file";
+ pub const MAGISK_LOG_CON: &str = concatcp!("u:object_r:", SEPOL_LOG_TYPE, ":s0");
+diff --git a/scripts/env.py b/scripts/env.py
+index 73809ac96..6db6c55b0 100755
+--- a/scripts/env.py
++++ b/scripts/env.py
+@@ -60,7 +60,7 @@ class Paths:
+                     "Please set Android SDK path to environment variable ANDROID_HOME"
+                 )
+ 
+-        self.ndk = self.sdk / "ndk" / "magisk"
++        self.ndk = Path(os.environ.get("MAGISK_ONDK", self.sdk / "ndk" / "magisk"))
+         self.ndk_build = self.ndk / "ndk-build"
+         self.rust_sysroot = self.ndk / "toolchains" / "rust"
+         self.adb = self.sdk / "platform-tools" / "adb"

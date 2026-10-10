@@ -1,0 +1,13 @@
+diff --git a/native/src/sepolicy/policydb.cpp b/native/src/sepolicy/policydb.cpp
+--- a/native/src/sepolicy/policydb.cpp
++++ b/native/src/sepolicy/policydb.cpp
+@@ -104,6 +104,9 @@ SePolicy SePolicy::from_file(::Utf8CStr file) noexcept {
+     policy_file_t pf;
+     policy_file_init(&pf);
+     auto fp = xopen_file(file.data(), "re");
++    if (!fp) {
++        return {};
++    }
+     pf.fp = fp.get();
+     pf.type = PF_USE_STDIO;
+ 

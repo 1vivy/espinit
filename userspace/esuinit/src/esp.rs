@@ -1,236 +1,86 @@
-//! ESP discovery and read-only mounting.
-//!
-//! There is no device-name allowlist: whole block disks are enumerated from
-//! sysfs, their dev_t is read from sysfs, and EFI System Partitions are found
-//! by parsing the GPT and matching the ESP type GUID. Devices may carry other
-//! ESPs (for example, the firmware's own loader partition), so candidates are
-//! mounted read-only and exactly one must contain a regular
-//! `/esu/manifest.toml`. The selected block node is created from the
-//! major/minor pair discovered through sysfs. PID 1 detaches its contextless
-//! mount before Android handoff; loop backing files keep their own references.
-//! Executables run from a separate tmpfs, also detached at handoff. Only a ROM
-//! projecting writable `esp-file:` backends remounts the ESP read-write.
-
-use std::fs::{self, File};
-use std::os::unix::fs::FileExt;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-
-use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
-use rustix::mount::{UnmountFlags, mount, mount_remount, unmount};
-
+//! GPT ESP discovery, explicit selection and one owned RW/noexec raw mount.
 use crate::gpt;
-use crate::receipt::{ESP_MOUNT_FLAGS_RO, ESP_MOUNT_FLAGS_RW, Failure, Stage};
-
-/// Runtime ESP mount point from the layout contract.
-pub const ESP_MOUNT_POINT: &str = "/debug_ramdisk/esp";
-
-/// Directory holding block device nodes created by the loader.
-const DEVICE_DIR: &str = "/dev/esu";
-
-/// sysfs whole-disk directory.
+use crate::receipt::{Failure, Stage};
+use anyhow::{Context, Result, ensure};
+use esp_runtime::{context::ESP, fsutil as fsu};
+use rustix::fs::{CWD, FileType, Mode, makedev, mknodat};
+use std::fs::{self, File};
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
+use std::path::Path;
+const DEVICE_DIR: &str = "/dev/kernelsu-esp/devices";
 const SYS_BLOCK: &str = "/sys/block";
-
-/// Marker that identifies the managed payload among other firmware ESPs.
-const PAYLOAD_MANIFEST: &str = "esu/manifest.toml";
-
-/// Sectors are always 512 bytes for sysfs `start`/`size` units.
 const SYSFS_SECTOR: u64 = 512;
-
-/// Bound for a single GPT partition table read.
 const MAX_TABLE_BYTES: usize = 1 << 20;
-
-/// A discovered ESP block device.
 struct EspDevice {
     major: u32,
     minor: u32,
     disk: String,
 }
 
-/// The ESP mount owned by PID 1 until real-init handoff.
-pub struct Mount {
-    // The node may disappear when Android replaces /dev; dev_t remains stable.
-    major: u32,
-    minor: u32,
-    path: String,
-    detached: bool,
-    writable: bool,
-}
-
-impl Mount {
-    /// Runtime mount point of the ESP payload tree.
-    pub fn path(&self) -> &str {
-        &self.path
+pub fn mount_esp(explicit: Option<&str>) -> Result<(u32, u32)> {
+    ensure!(
+        !fsu::mounted(Path::new(ESP))?,
+        "ESP already mounted by another owner"
+    );
+    if let Some(source) = explicit {
+        esp_runtime::context::absolute(source)?;
+        let metadata = fs::metadata(source)?;
+        ensure!(
+            metadata.file_type().is_block_device(),
+            "explicit ESP is not a block device"
+        );
+        mount_selected(source)?;
+        ensure!(
+            Path::new(ESP).join("kernelsu-esp/config.toml").is_file(),
+            "explicit ESP lacks product config"
+        );
+        let major = u32::try_from(i64::from(libc::major(metadata.rdev())))
+            .context("invalid explicit ESP major")?;
+        let minor = u32::try_from(i64::from(libc::minor(metadata.rdev())))
+            .context("invalid explicit ESP minor")?;
+        return Ok((major, minor));
     }
-
-    /// Physical device number. The projection hide set excludes this mounted
-    /// ESP so a post-APPLY failure can still remount it for its receipt.
-    pub fn device(&self) -> (u32, u32) {
-        (self.major, self.minor)
-    }
-
-    pub fn detach(&mut self) -> Result<(), Failure> {
-        detach_owned(&self.path)?;
-        self.detached = true;
-        Ok(())
-    }
-
-    /// Recreate access only on failed exec, after the early /dev may be gone.
-    pub fn reattach_for_receipt(&mut self) -> Result<(), Failure> {
-        if self.detached {
-            let node = create_block_node("esp", self.major, self.minor)
-                .map_err(|detail| Failure::new(Stage::Storage, "EspDeviceNodeCreate", detail))?;
-            let flags = if self.writable {
-                ESP_MOUNT_FLAGS_RW
-            } else {
-                ESP_MOUNT_FLAGS_RO
-            };
-            mount(&node, &self.path, "vfat", flags, "")
-                .map_err(|error| Failure::new(Stage::Storage, "EspMount", error.to_string()))?;
-            self.detached = false;
-        }
-        Ok(())
-    }
-}
-
-/// Discover the payload ESP and mount it read-only at [`ESP_MOUNT_POINT`].
-pub fn mount_esp() -> Result<Mount, Failure> {
     let devices = discover_esps()?;
     let mut selected = None;
-
-    for (index, device) in devices.iter().enumerate() {
+    for device in devices {
         let node = create_block_node(
-            &format!("esp-{}-{}", device.major, device.minor),
+            &format!("{}-{}", device.major, device.minor),
             device.major,
             device.minor,
         )
-        .map_err(|detail| Failure::new(Stage::Storage, "EspDeviceNodeCreate", detail))?;
-
-        if let Err(error) = mount_read_only(&node) {
-            log::warn!(
-                "Skipping ESP candidate {}({}:{}): {}",
-                device.disk,
-                device.major,
-                device.minor,
-                error.detail
-            );
+        .map_err(anyhow::Error::msg)?;
+        // Probe candidates read-only; the selected final mount is always RW.
+        if let Err(error) = fsu::mount(
+            &node,
+            Path::new(ESP),
+            "vfat",
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "uid=0,gid=0,fmask=0022,dmask=0022",
+        ) {
+            log::warn!("ESP probe {}: {error:#}", device.disk);
             continue;
         }
-
-        let marker = Path::new(ESP_MOUNT_POINT).join(PAYLOAD_MANIFEST);
-        let payload = match fs::symlink_metadata(&marker) {
-            Ok(metadata) => Ok(metadata.file_type().is_file()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(Failure::new(
-                Stage::Storage,
-                "EspPayloadProbe",
-                format!("cannot examine {}: {error}", marker.display()),
-            )),
-        };
-        let detached = unmount(ESP_MOUNT_POINT, UnmountFlags::empty()).map_err(|error| {
-            Failure::new(
-                Stage::Storage,
-                "EspProbeUnmount",
-                format!("cannot unmount ESP candidate {node}: {error}"),
-            )
-        });
-        detached?;
-
-        if payload? && selected.replace(index).is_some() {
-            return Err(Failure::new(
-                Stage::Storage,
-                "EspAmbiguous",
-                "multiple EFI System Partitions contain esu/manifest.toml",
-            ));
+        let found = fsu::optional_text(&Path::new(ESP).join("kernelsu-esp/config.toml"), 65536);
+        fsu::unmount(Path::new(ESP))?;
+        if found?.is_some() {
+            ensure!(selected.is_none(), "ambiguous product ESP");
+            selected = Some(device);
         }
     }
-
-    let Some(index) = selected else {
-        return Err(Failure::new(
-            Stage::Storage,
-            "EspPayloadNotFound",
-            format!(
-                "{} EFI System Partition candidate(s), none containing a regular {PAYLOAD_MANIFEST}",
-                devices.len()
-            ),
-        ));
-    };
-    let device = &devices[index];
-    let node = create_block_node("esp", device.major, device.minor)
-        .map_err(|detail| Failure::new(Stage::Storage, "EspDeviceNodeCreate", detail))?;
-    mount_read_only(&node)?;
-
-    log::info!(
-        "Mounted payload ESP partition {}({}:{}) at {}",
-        device.disk,
-        device.major,
-        device.minor,
-        ESP_MOUNT_POINT
-    );
-
-    Ok(Mount {
-        major: device.major,
-        minor: device.minor,
-        path: ESP_MOUNT_POINT.to_owned(),
-        detached: false,
-        writable: false,
-    })
+    let selected = selected.context("no GPT ESP contains kernelsu-esp/config.toml")?;
+    let node = create_block_node("selected", selected.major, selected.minor)
+        .map_err(anyhow::Error::msg)?;
+    mount_selected(&node)?;
+    Ok((selected.major, selected.minor))
 }
-
-/// Remount the selected payload ESP read-write for a ROM that projects writable
-/// `esp-file:` backends.
-///
-/// Loop files retain this mount even after detach; Android modules get a new
-/// read-only bind view. The remount only toggles `RDONLY`.
-pub fn make_payload_writable(mount: &mut Mount) -> Result<(), Failure> {
-    mount_remount(&mount.path, ESP_MOUNT_FLAGS_RW, "").map_err(|error| {
-        Failure::new(
-            Stage::Storage,
-            "EspMountWritable",
-            format!(
-                "cannot remount the ESP at {} read-write for writable ESP-file backends: {error}",
-                mount.path
-            ),
-        )
-    })?;
-    mount.writable = true;
-    Ok(())
-}
-
-/// Detach an early mount that esu created itself, in preparation for the
-/// real init. Only mounts created by esu may be passed here.
-pub fn detach_owned(mountpoint: &str) -> Result<(), Failure> {
-    unmount(mountpoint, UnmountFlags::DETACH).map_err(|error| {
-        Failure::at(
-            Stage::Handoff,
-            Some(mountpoint),
-            "HandoffUnmountFailed",
-            format!("cannot detach {mountpoint}: {error}"),
-        )
-    })
-}
-
-/// Whether `mountpoint` already carries a mount rather than being an ordinary
-/// directory of the filesystem below it. The device id of the directory is
-/// compared with its parent, which needs no `/proc` and therefore also works
-/// for the `/proc` mountpoint itself.
-pub fn is_mounted(mountpoint: &str) -> Result<bool, String> {
-    use std::os::unix::fs::MetadataExt;
-
-    let path = Path::new(mountpoint);
-
-    let Ok(target) = fs::metadata(path) else {
-        return Ok(false);
-    };
-
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("/"),
-    };
-    let parent = fs::metadata(parent)
-        .map_err(|error| format!("cannot examine {}: {error}", parent.display()))?;
-
-    Ok(target.dev() != parent.dev())
+fn mount_selected(source: &str) -> Result<()> {
+    fsu::mount(
+        source,
+        Path::new(ESP),
+        "vfat",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "uid=0,gid=0,fmask=0022,dmask=0022",
+    )
 }
 
 /// Walk every whole disk and return all enumerated ESP partition devices.
@@ -448,82 +298,6 @@ fn create_block_node(name: &str, major: u32, minor: u32) -> Result<String, Strin
 
     Ok(path)
 }
-
-/// Resolve one physical partition by its kernel `PARTNAME` and create the node
-/// the caller opens. Android's `/dev/block/by-name` links do not exist during
-/// early boot, so sysfs is the only name source; the node is created under the
-/// private device directory exactly like the ESP node.
-pub fn partition_node(name: &str) -> Result<String, String> {
-    let device = esu_platform::block::partition_by_name(name)
-        .map_err(|error| format!("cannot resolve partition {name}: {error}"))?;
-
-    create_block_node(name, rustix::fs::major(device), rustix::fs::minor(device))
-}
-
-/// Mount the discovered ESP read-only at the runtime mount point.
-fn mount_read_only(node: &str) -> Result<(), Failure> {
-    fs::create_dir_all(ESP_MOUNT_POINT).map_err(|error| {
-        Failure::new(
-            Stage::Storage,
-            "EspMountPointCreate",
-            format!("cannot create {ESP_MOUNT_POINT}: {error}"),
-        )
-    })?;
-    if is_mounted(ESP_MOUNT_POINT)
-        .map_err(|detail| Failure::new(Stage::Storage, "EspMountOwnership", detail))?
-    {
-        return Err(Failure::new(
-            Stage::Storage,
-            "EspMountOwnership",
-            "PID 1 must create the ESP mount, not reuse an inherited mount",
-        ));
-    }
-
-    mount(node, ESP_MOUNT_POINT, "vfat", ESP_MOUNT_FLAGS_RO, "").map_err(|error| {
-        Failure::new(
-            Stage::Storage,
-            "EspMount",
-            format!("cannot mount {node} at {ESP_MOUNT_POINT} read-only: {error}"),
-        )
-    })
-}
-
-/// Mount a filesystem that supports the new mount API, reusing the ramdisk
-/// cleaning path for the minimal early mounts.
-pub fn mount_kernel_fs(name: &str, mountpoint: &str) -> Result<(), String> {
-    use rustix::{
-        fd::AsFd,
-        fs::mkdir,
-        mount::{
-            FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, fsconfig_create, fsmount,
-            fsopen, move_mount,
-        },
-    };
-
-    mkdir(mountpoint, Mode::from_raw_mode(0o755)).ok();
-
-    let filesystem = fsopen(name, FsOpenFlags::FSOPEN_CLOEXEC)
-        .map_err(|error| format!("cannot open {name}: {error}"))?;
-    fsconfig_create(filesystem.as_fd())
-        .map_err(|error| format!("cannot configure {name}: {error}"))?;
-    let context = fsmount(
-        filesystem.as_fd(),
-        FsMountFlags::FSMOUNT_CLOEXEC,
-        MountAttrFlags::empty(),
-    )
-    .map_err(|error| format!("cannot create {name} mount: {error}"))?;
-    move_mount(
-        context.as_fd(),
-        "",
-        CWD,
-        mountpoint,
-        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-    )
-    .map_err(|error| format!("cannot attach {name} at {mountpoint}: {error}"))?;
-
-    Ok(())
-}
-
 fn read_dev(path: &Path) -> Option<(u32, u32)> {
     let value = fs::read_to_string(path).ok()?;
     let (major, minor) = value.trim().split_once(':')?;
@@ -532,132 +306,4 @@ fn read_dev(path: &Path) -> Option<(u32, u32)> {
 
 fn read_u64(path: &Path) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-/// Absolute runtime path of the ESP payload subtree.
-pub fn payload_root(mount: &str) -> PathBuf {
-    Path::new(mount).join("esu")
-}
-
-/// Executable tmpfs recreated by second-stage init after PID 1 detaches it.
-pub const EXECUTABLE_ROOT: &str = "/debug_ramdisk/esu";
-pub const EXECUTABLE_BIN: &str = "/debug_ramdisk/esu/bin";
-
-/// Admit exactly one contextless, whole-filesystem ESP mount before projection.
-/// Reject duplicate/bind mounts and all SELinux superblock context overrides.
-pub fn verify_single_esp(text: &str, device: (u32, u32)) -> Result<(), String> {
-    let device = format!("{}:{}", device.0, device.1);
-    let mut count = 0;
-    for line in text.lines() {
-        let (left, right) = line.split_once(" - ").ok_or("invalid mountinfo")?;
-        let left: Vec<_> = left.split_whitespace().collect();
-        let right: Vec<_> = right.split_whitespace().collect();
-        if left.len() < 6 || right.len() != 3 {
-            return Err("invalid mountinfo fields".into());
-        }
-        if left[2] != device {
-            continue;
-        }
-        count += 1;
-        if left[3] != "/" || left[4] != ESP_MOUNT_POINT || right[0] != "vfat" {
-            return Err("ESP must have one whole-filesystem vfat mount at its staging path".into());
-        }
-        for options in [left[5], right[2]] {
-            if options.split(',').any(|option| {
-                ["context=", "fscontext=", "rootcontext=", "defcontext="]
-                    .iter()
-                    .any(|key| option.starts_with(key))
-            }) {
-                return Err("ESP SELinux mount context override is forbidden".into());
-            }
-        }
-    }
-    if count != 1 {
-        return Err(format!("expected one visible ESP mount, found {count}"));
-    }
-    Ok(())
-}
-
-impl Mount {
-    pub fn verify_retained(&self) -> Result<(), Failure> {
-        let result = fs::read_to_string("/proc/self/mountinfo")
-            .map_err(|error| error.to_string())
-            .and_then(|text| verify_single_esp(&text, self.device()));
-        result.map_err(|detail| Failure::new(Stage::Storage, "EspMountLifecycle", detail))
-    }
-}
-
-/// Stage the complete bin tree, including helpers called by module scripts.
-/// No symlinks or special inodes may escape into the executable tmpfs.
-pub fn stage_executables(payload: &Path, device: (u32, u32)) -> Result<(), Failure> {
-    let result = (|| -> std::io::Result<()> {
-        for name in ["esud", "busybox", "thin-activate"] {
-            if !fs::symlink_metadata(payload.join("bin").join(name))?.is_file() {
-                return Err(std::io::Error::other(format!(
-                    "bin/{name} is not a regular file"
-                )));
-            }
-        }
-        if is_mounted(EXECUTABLE_ROOT).map_err(std::io::Error::other)? {
-            return Err(std::io::Error::other("executable tmpfs already mounted"));
-        }
-        fs::create_dir_all(EXECUTABLE_ROOT)?;
-        mount(
-            "esu",
-            EXECUTABLE_ROOT,
-            "tmpfs",
-            rustix::mount::MountFlags::NOSUID | rustix::mount::MountFlags::NODEV,
-            "mode=0755",
-        )?;
-        copy_bin(&payload.join("bin"), Path::new(EXECUTABLE_BIN))?;
-        fs::write(
-            Path::new(EXECUTABLE_ROOT).join("esp-device"),
-            format!("{}:{}\n", device.0, device.1),
-        )?;
-        Ok(())
-    })();
-    result.map_err(|error| Failure::new(Stage::Storage, "ExecutableStageFailed", error.to_string()))
-}
-
-fn copy_bin(source: &Path, target: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(source)?;
-    if metadata.is_dir() {
-        fs::create_dir(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            copy_bin(&entry.path(), &target.join(entry.file_name()))?;
-        }
-    } else if metadata.is_file() {
-        fs::copy(source, target)?;
-    } else {
-        return Err(std::io::Error::other(format!(
-            "unsupported executable inode: {}",
-            source.display()
-        )));
-    }
-    fs::set_permissions(target, fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-
-    /// The projection admission contract rejects any second mount or context
-    /// override, rather than permitting a loop-pinned conflicting superblock.
-    #[test]
-    fn only_one_contextless_owned_esp_is_admitted() {
-        let valid = "12 1 8:1 / /debug_ramdisk/esp ro,nosuid,nodev,noexec - vfat /dev/esu/esp ro\n";
-        assert!(verify_single_esp(valid, (8, 1)).is_ok());
-        for invalid in [
-            String::new(),
-            format!("{valid}{valid}"),
-            valid.replace(" - vfat", " - ext4"),
-            valid.replace(" /debug_ramdisk/esp ", " /dev/esp "),
-            valid.replace(" ro\n", " ro,context=u:object_r:esu_file:s0\n"),
-            valid.replace(" ro\n", " ro,rootcontext=u:object_r:esu_file:s0\n"),
-            valid.replace("8:1", "8:2"),
-        ] {
-            assert!(verify_single_esp(&invalid, (8, 1)).is_err());
-        }
-    }
 }

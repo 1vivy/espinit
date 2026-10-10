@@ -5,6 +5,7 @@
 #include "../syscall_hook.h"
 #include <linux/nospec.h>
 #include <linux/version.h>
+#include <linux/objtool.h>
 #include "infra/symbol_resolver.h"
 #include "../patch_memory.h"
 #include "arch.h"
@@ -26,6 +27,10 @@ static long __nocfi my_x64_sys_call(const struct pt_regs *regs, unsigned int nr)
     nr = array_index_nospec(nr, NR_syscalls);
     return ksu_syscall_table[nr](regs);
 }
+#ifdef ANNOTATE_NOCFI_SYM
+/* Dispatch the saved syscall table through the existing nocfi adapter. */
+ANNOTATE_NOCFI_SYM(my_x64_sys_call);
+#endif
 #else
 static long (*syscall_enter_from_user_mode_fn)(struct pt_regs *regs, long syscall);
 static void (*syscall_exit_to_user_mode_fn)(struct pt_regs *regs);

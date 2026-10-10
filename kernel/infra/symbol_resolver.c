@@ -2,6 +2,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/version.h>
+#include <linux/objtool.h>
 
 #include "infra/symbol_resolver.h"
 
@@ -75,6 +76,10 @@ unsigned long __nocfi find_kernel_symbol_exact(const char *symbol_name)
     }
     return addr;
 }
+#ifdef ANNOTATE_NOCFI_SYM
+/* Dynamically resolved kallsyms calls use the existing nocfi contract. */
+ANNOTATE_NOCFI_SYM(find_kernel_symbol_exact);
+#endif
 
 static inline bool ksu_symbol_has_suffix(const char *name, size_t name_len, const char *suffix, size_t suffix_len)
 {
@@ -171,6 +176,10 @@ void *ksu_resolve_symbol_for_functable_hook(const char *symbol_name)
     return resolve_symbol_variant(symbol_name, symbol_len);
 #endif
 }
+#ifdef ANNOTATE_NOCFI_SYM
+/* Inlining the nocfi resolver above carries its call into this symbol. */
+ANNOTATE_NOCFI_SYM(ksu_resolve_symbol_for_functable_hook);
+#endif
 
 void __init ksu_init_symbol_resolver()
 {

@@ -9,7 +9,7 @@ import re
 import struct
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple, TypedDict, cast
 
@@ -47,15 +47,13 @@ class ModuleReport(TypedDict):
     kmi: Kmi
     imports: Imports
 
-ROOT = Path(__file__).resolve().parents[1]
-MODULES = {"kernelesp": ROOT / "kernel", **{name: ROOT / "modules" / name for name in ("thin", "gpt", "efivarfs", "efivar_store")}}
 #: ELF machine -> (kbuild ARCH, vermagic flags after the release). x86_64 defines
 #: no MODULE_ARCH_VERMAGIC, so its vermagic ends at `modversions`.
 ARCHES = {183: ("arm64", "SMP preempt mod_unload modversions aarch64"),
           62: ("x86_64", "SMP preempt mod_unload modversions")}
 CONFIG_ARCHES = {"CONFIG_ARM64=y": "arm64", "CONFIG_X86_64=y": "x86_64"}
 INPUTS = ("Module.symvers", "System.map", "include/generated/utsrelease.h")
-BRANCH = "android16-6.12"
+IDENTITY_FILES = ("build.config.constants", "build.config.common", "bazel/constants.scl")
 class CompatibilityError(ValueError):
     pass
 
@@ -125,6 +123,22 @@ class Elf:
         return [Symbol(self.string(names, name), info, shndx, value)
                 for name, info, _, shndx, value, _ in records]
 
+    def verify_x86_relocations(self) -> None:
+        # arch/x86/kernel/module.c applies only these types. In particular,
+        # a freestanding Rust target must not emit userspace GOT references.
+        supported = {0, 1, 2, 4, 10, 11, 24}
+        for name, header in self.sections.items():
+            if header[1] not in (4, 9):  # SHT_RELA, SHT_REL
+                continue
+            require(header[7] < len(self.headers), f"relocations: invalid target in {name}")
+            if not self.headers[header[7]][2] & 2:  # Only SHF_ALLOC targets are loaded.
+                continue
+            require(header[1] == 4 and header[9] == 24 and header[5] % 24 == 0,
+                    f"relocations: malformed x86_64 RELA table {name}")
+            for _, info, _ in struct.iter_unpack("<QQq", self.section(name)):
+                kind = info & 0xffffffff
+                require(kind in supported, f"relocations: unsupported x86_64 type {kind} in {name}")
+
 
 def symvers(path: PathInput) -> SymbolCrcs:
     result: SymbolCrcs = {}
@@ -177,21 +191,27 @@ def kernel_arch(output: Path) -> str | None:
     return found.pop()
 
 
-def kmi_identity(source: Path) -> Kmi:
-    constants = (source / "build.config.constants").read_text()
-    match = re.search(r"^KMI_GENERATION=(\d+)\s*$", constants, re.MULTILINE)
-    if match is None:
-        raise CompatibilityError("kmi: missing KMI_GENERATION in build.config.constants")
-    require(int(match[1]) == 6, "kmi: expected android16-6.12 generation 6")
-    return {"branch": BRANCH, "generation": int(match[1])}
+def kmi_identity(source: Path, branch: str, generation: int) -> Kmi:
+    require(re.fullmatch(r"android\d+-\d+\.\d+", branch), "kmi: specify an exact ACK branch")
+    require(generation >= 0, "kmi: specify an exact nonnegative generation")
+    constants = "\n".join((source / name).read_text() for name in IDENTITY_FILES if (source / name).is_file())
+    generations = {int(value) for value in re.findall(r"^KMI_GENERATION=[\"']?(\d+)[\"']?\s*$", constants, re.MULTILINE)}
+    require(generations == {generation}, "kmi: source generation mismatch or ambiguity")
+    branches = set(re.findall(r"^BRANCH=[\"']?([a-z0-9.-]+)[\"']?\s*$", constants, re.MULTILINE))
+    require(branches == {branch}, "kmi: missing, mismatched or ambiguous source branch")
+    return {"branch": branch, "generation": generation}
 
 
-def verify_module(path: PathInput, name: str, output: Path) -> Imports:
+def verify_module(path: PathInput, name: str, output: Path, architecture: str | None = None) -> Imports:
     elf = Elf(path)
     require(elf.kind == 1 and elf.machine in ARCHES, "elf: expected ET_REL aarch64 or x86_64")
     arch, flags = ARCHES[elf.machine]
+    requested = {"aarch64": "arm64", "x86_64": "x86_64"}.get(architecture) if architecture else None
+    require(architecture is None or requested == arch, "elf: requested architecture mismatch")
     tree = kernel_arch(output)
     require(tree is None or tree == arch, f"elf: {arch} module for a {tree} KMI tree")
+    if elf.machine == 62:
+        elf.verify_x86_relocations()
     imports = {s.name for s in elf.symbols() if s.name and s.shndx == 0 and s.info >> 4 in (1, 2)}
     versions = import_versions(elf)
     exported = symvers(output / "Module.symvers")
@@ -206,7 +226,7 @@ def verify_module(path: PathInput, name: str, output: Path) -> Imports:
     vermagic = [entry[9:].decode("ascii") for entry in modinfo if entry.startswith(b"vermagic=")]
     tokens = vermagic[0].split() if len(vermagic) == 1 else []
     require(len(tokens) == 1 + len(flags.split()) and tokens[1:] == flags.split(), "vermagic: expected release followed by " + flags)
-    require([entry[5:].decode("ascii") for entry in modinfo if entry.startswith(b"name=")] == [name], "modinfo: module name mismatch")
+    require([entry[5:].decode("ascii") for entry in modinfo if entry.startswith(b"name=")] == [name.replace("-", "_")], "modinfo: module name mismatch")
     return {"versioned": len(versions), "kallsyms": sorted(kallsyms)}
 
 
@@ -221,18 +241,21 @@ def provenance(output: Path, module: PathInput, identity: Kmi, imports: Imports)
     return result
 
 
-def verify_payload(output: PathInput, modules: Sequence[PathInput]) -> list[ModuleReport]:
+def verify_payload(output: PathInput, modules: Sequence[PathInput], branch: str,
+                   generation: int, architecture: str) -> list[ModuleReport]:
     output = Path(output).resolve(strict=True)
+    require(re.fullmatch(r"android\d+-\d+\.\d+", branch) and generation >= 0,
+            "kmi: exact branch and generation required")
     reports: list[ModuleReport] = []
     for module in modules:
         name = Path(module).stem
-        imports = verify_module(module, name, output)
+        imports = verify_module(module, name, output, architecture)
         receipt = cast(Provenance, json.loads(receipt_path(module).read_text()))
         identity = cast(Kmi, receipt.get("kmi"))
-        require(identity == {"branch": BRANCH, "generation": 6}, "kmi: expected android16-6.12 generation 6")
-        constants = output / "source/build.config.constants"
-        if constants.is_file():
-            require(identity == kmi_identity(constants.parent), "kmi: receipt/source identity mismatch")
+        require(identity == {"branch": branch, "generation": generation}, "kmi: receipt identity mismatch")
+        source = output / "source"
+        if any((source / name).is_file() for name in IDENTITY_FILES):
+            require(identity == kmi_identity(source, branch, generation), "kmi: receipt/source identity mismatch")
         require(receipt == provenance(output, module, identity, imports), f"provenance: stale or mismatched build receipt for {name}")
         reports.append({"module": name, "kmi": identity, "imports": imports})
     return reports
@@ -254,28 +277,59 @@ def efvs_source(directory: Path) -> Path:
     return checkout / "linux"
 
 
+def run_kbuild(command: Sequence[str], env: Mapping[str, str], log: Path,
+               append: bool = False) -> None:
+    """Stream complete build logs, rejecting objtool diagnostics even on exit 0."""
+    diagnostic: str | None = None
+    overlap = ""
+    with log.open("a" if append else "w") as stream:
+        stream.write("command: " + repr(list(command)) + "\n")
+        with subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, errors="replace") as process:
+            assert process.stdout is not None
+            while chunk := process.stdout.readline(65536):
+                stream.write(chunk)
+                stream.flush()
+                print(chunk, end="", file=sys.stderr)
+                # Bounded overlap catches a diagnostic split across long output
+                # chunks; do not buffer the entire compiler output in memory.
+                window = overlap + chunk
+                if diagnostic is None and re.search(r"\bobjtool:\s", window, re.IGNORECASE):
+                    diagnostic = window[-2048:].strip()
+                overlap = window[-128:]
+            status = process.wait()
+    if status:
+        raise subprocess.CalledProcessError(status, command)
+    require(diagnostic is None, f"objtool: diagnostic rejects module admission; log {log}: {diagnostic}")
+
+
 def build(args: argparse.Namespace) -> ModuleReport:
-    require(len(args.module) == 1 and args.module[0] in MODULES, "build: specify one module name")
+    require(len(args.module) == 1 and args.module_dir, "build: specify one --module and --module-dir")
     require(args.kmi_src, "build: --kmi-src or KMI_SRC is required")
     source, output = Path(args.kmi_src).resolve(strict=True), Path(args.kmi_out).resolve(strict=True)
-    identity = kmi_identity(source)
+    identity = kmi_identity(source, args.branch, args.generation)
+    output_source = output / "source"
+    if any((output_source / name).is_file() for name in IDENTITY_FILES):
+        require(identity == kmi_identity(output_source, args.branch, args.generation),
+                "kmi: build source/output identity mismatch")
     require(1 <= args.jobs <= 13, "build: jobs must be 1..13")
     name = args.module[0]
-    directory = MODULES[name]
+    require(re.fullmatch(r"[A-Za-z0-9_-]+", name), "build: invalid module artifact name")
+    directory = Path(args.module_dir).resolve(strict=True)
+    require((directory / "Kbuild").is_file(), "build: module directory has no standalone Kbuild")
     module = directory / (name + ".ko")
     receipt_path(module).unlink(missing_ok=True)
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CONFIG_", "KBUILD_")) and key not in ("MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "KCFLAGS", "KCPPFLAGS", "CFLAGS_MODULE", "LDFLAGS_MODULE")}
-    build_directory = efvs_source(directory) if name == "efivar_store" else directory
-    llvm = os.environ.get("EFVS_LLVM", "/usr/bin/") if name == "efivar_store" else "1"
+    if (directory / "SOURCE_REVISION").is_file():
+        _ = efvs_source(directory)
     arch = kernel_arch(output)
-    require(arch is not None, "build: the KMI output tree has no .config naming its architecture")
-    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(build_directory), "ARCH=" + str(arch), "LLVM=" + llvm, "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1", "CONFIG_KERNELESP=m"]
-    subprocess.run(command + ["clean"], env=env, check=True)
-    subprocess.run(command + ["modules", f"-j{args.jobs}"], env=env, check=True)
-    if name == "efivar_store":
-        import shutil
-        shutil.copyfile(build_directory / (name + ".ko"), module)
-    imports = verify_module(module, name, output)
+    require(arch == {"aarch64": "arm64", "x86_64": "x86_64"}[args.arch],
+            "build: KMI output architecture mismatch or missing .config")
+    command = ["make", "-C", str(source), "O=" + str(output), "M=" + str(directory), "ARCH=" + str(arch), "LLVM=1", "KBUILD_GENDWARFKSYMS_STABLE=1", "KBUILD_MODPOST_WARN=1"]
+    log = directory / (name + ".build.log")
+    run_kbuild(command + ["clean"], env, log)
+    run_kbuild(command + ["modules", f"-j{args.jobs}"], env, log, append=True)
+    imports = verify_module(module, name, output, args.arch)
     receipt_path(module).write_text(json.dumps(provenance(output, module, identity, imports), indent=2, sort_keys=True) + "\n")
     return {"module": name, "kmi": identity, "imports": imports}
 
@@ -286,11 +340,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--kmi-src", default=os.environ.get("KMI_SRC"))
     parser.add_argument("--kmi-out", default=os.environ.get("KMI_OUT"), required=not os.environ.get("KMI_OUT"))
     parser.add_argument("--module", action="append", required=True)
+    parser.add_argument("--module-dir")
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--generation", type=int, required=True)
+    parser.add_argument("--arch", choices=("aarch64", "x86_64"), required=True)
     parser.add_argument("--jobs", type=int, default=13)
     args = parser.parse_args(argv)
     try:
-        result = build(args) if args.action == "build" else verify_payload(args.kmi_out, args.module)
-        print(json.dumps({"status": "accepted", "kmi": {"branch": BRANCH, "generation": 6}, "result": result}, indent=2, sort_keys=True))
+        result = build(args) if args.action == "build" else verify_payload(args.kmi_out, args.module, args.branch, args.generation, args.arch)
+        print(json.dumps({"status": "accepted", "kmi": {"branch": args.branch, "generation": args.generation}, "result": result}, indent=2, sort_keys=True))
         return 0
     except (OSError, ValueError, struct.error, subprocess.CalledProcessError) as error:
         print(json.dumps({"status": "rejected", "reason": str(error)}, sort_keys=True))

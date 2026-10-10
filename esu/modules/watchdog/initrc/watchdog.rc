@@ -1,9 +1,0 @@
-service esu.watchdog /debug_ramdisk/esu/bin/esud watchdog 180
-    user root
-    group root
-    seclabel u:r:esu:s0
-    oneshot
-    disabled
-
-on init
-    start esu.watchdog

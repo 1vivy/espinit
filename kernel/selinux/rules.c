@@ -15,9 +15,6 @@
 #include "linux/lsm_audit.h" // IWYU pragma: keep
 #include "xfrm.h"
 
-struct selinux_policy *backup_sepolicy;
-
-#define SELINUX_POLICY_INSTEAD_SELINUX_SS
 
 #define ALL NULL
 
@@ -42,146 +39,105 @@ static void reset_avc_cache()
     selinux_xfrm_notify_policyload();
 }
 
-void apply_kernelsu_rules()
+/* Only the declarations and init handoff needed before bootstrap policy.
+ * Never make esp permissive or grant wildcard access to other domains.
+ */
+int apply_kernelsu_rules(void)
 {
     struct selinux_policy *pol, *old_pol;
     struct policydb *db;
-
-    if (!getenforce()) {
-        pr_info("SELinux permissive or disabled, apply rules!\n");
-    }
+    int ret = -EINVAL;
 
     mutex_lock(&selinux_state.policy_mutex);
-
     old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
-    backup_sepolicy = ksu_dup_sepolicy(old_pol);
-    if (IS_ERR(backup_sepolicy)) {
-        pr_err("failed to create backup sepolicy: %ld\n", PTR_ERR(backup_sepolicy));
-        backup_sepolicy = NULL;
-    } else {
-        backup_sepolicy->sidtab = kzalloc(sizeof(*backup_sepolicy->sidtab), GFP_KERNEL);
-        if (!backup_sepolicy->sidtab) {
-            pr_err("failed to alloc backup sidtab\n");
-            ksu_destroy_sepolicy(backup_sepolicy);
-            backup_sepolicy = NULL;
-        } else {
-            int ret = policydb_load_isids(&backup_sepolicy->policydb, backup_sepolicy->sidtab);
-            if (ret) {
-                pr_err("failed to load isids for backup sepolicy: %d!\n", ret);
-                kfree(backup_sepolicy->sidtab);
-                ksu_destroy_sepolicy(backup_sepolicy);
-                backup_sepolicy = NULL;
-            } else {
-                pr_info("backup sepolicy success! latest_granting=%d\n", backup_sepolicy->latest_granting);
-            }
-        }
+    if (!old_pol) {
+        ret = -EAGAIN;
+        goto out_unlock;
     }
     pol = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(pol)) {
-        pr_err("failed to dup selinux_policy: %ld\n", PTR_ERR(pol));
+        ret = PTR_ERR(pol);
         goto out_unlock;
     }
-
     db = &pol->policydb;
-
-    ksu_type(db, KERNEL_SU_DOMAIN, "domain");
-    ksu_permissive(db, KERNEL_SU_DOMAIN);
-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject");
-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "netdomain");
-    ksu_typeattribute(db, KERNEL_SU_DOMAIN, "bluetoothdomain");
-
-    // Create unconstrained file type
-    ksu_type(db, KERNEL_SU_FILE, "file_type");
-    ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject");
-    ksu_allow(db, "domain", KERNEL_SU_FILE, ALL, ALL);
-    ksu_typeattribute(db, KERNEL_SU_FILE, "contextmount_type");
-    ksu_allow(db, KERNEL_SU_FILE, KERNEL_SU_FILE, "filesystem", "associate");
-    // Staged executables use normal tmpfs xattrs, not a context= superblock.
-    ksu_allow(db, KERNEL_SU_FILE, "tmpfs", "filesystem", "associate");
-    ksu_allow(db, "init", KERNEL_SU_FILE, "filesystem", "relabelto");
-
-    // allow all!
-    ksu_allow(db, KERNEL_SU_DOMAIN, ALL, ALL, ALL);
-
-    // allow us do any ioctl
-    if (db->policyvers >= POLICYDB_VERSION_XPERMS_IOCTL) {
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "blk_file", ALL);
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "fifo_file", ALL);
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "chr_file", ALL);
-        ksu_allowxperm(db, KERNEL_SU_DOMAIN, ALL, "file", ALL);
+    if (!ksu_type(db, KERNEL_SU_DOMAIN, "domain") ||
+        !ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject") ||
+        !ksu_type(db, KERNEL_SU_FILE, "file_type") ||
+        !ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject") ||
+        !ksu_type(db, "esp_log_file", "file_type") ||
+        !ksu_allow(db, "init", "device", "dir", "relabelfrom") ||
+        !ksu_allow(db, KERNEL_SU_FILE, "tmpfs", "filesystem", "associate") ||
+        !ksu_allow(db, "esp_log_file", "tmpfs", "filesystem", "associate") ||
+        !ksu_allow(db, "init", "kernel", "security", "load_policy") ||
+        !ksu_allow(db, "init", "toolbox_exec", "file", "execute_no_trans") ||
+        !ksu_allow(db, "init", "block_device", "blk_file", "create") ||
+        !ksu_allow(db, "init", "vfat", "dir", "getattr") ||
+        !ksu_allow(db, "init", "vfat", "dir", "open") ||
+        !ksu_allow(db, "init", "vfat", "dir", "read") ||
+        !ksu_allow(db, "init", "vfat", "dir", "search") ||
+        !ksu_allow(db, "init", "vfat", "file", "getattr") ||
+        !ksu_allow(db, "init", "vfat", "file", "open") ||
+        !ksu_allow(db, "init", "vfat", "file", "read") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "relabelto") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "relabelfrom") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "execute_no_trans") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "create") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "write") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "setattr") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "unlink") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "rename") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "relabelto") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "relabelfrom") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "create") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "search") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "mounton") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "read") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "open") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "getattr") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "setattr") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "write") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "add_name") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "dir", "remove_name") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "create") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "read") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "getattr") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "relabelto") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "relabelfrom") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "unlink") ||
+        !ksu_allow(db, "init", "esp_log_file", "file", "relabelto") ||
+        !ksu_allow(db, "init", KERNEL_SU_DOMAIN, "process", "transition") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, "init", "fd", "use") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, "init", "process", "sigchld") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "execute") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "read") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "open") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "getattr") ||
+        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "map") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "entrypoint") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "execute") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "read") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "open") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "getattr") ||
+        !ksu_allow(db, KERNEL_SU_DOMAIN, KERNEL_SU_FILE, "file", "map")) {
+        ksu_destroy_sepolicy(pol);
+        goto out_unlock;
     }
-
-    // The retained ESP keeps stock genfscon vfat labeling. Never execute or
-    // relabel its files: esu reads module data through a per-mount RO bind.
-    // Remove the concrete vfat grants installed by the upstream wildcard.
-    ksu_deny(db, KERNEL_SU_DOMAIN, "vfat", ALL, ALL);
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "search");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "open");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "read");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "dir", "getattr");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "file", "open");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "file", "read");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "file", "getattr");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "filesystem", "getattr");
-    ksu_allow(db, KERNEL_SU_DOMAIN, "vfat", "filesystem", "remount");
-
-    // our ksud triggered by init
-    ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);
-
-    // copied from Magisk rules
-    // suRights
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "search");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "dir", "read");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "open");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "file", "read");
-    ksu_allow(db, "servicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "process", "sigchld");
-
-    // allowLog
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "dir", "search");
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "read");
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "open");
-    ksu_allow(db, "logd", KERNEL_SU_DOMAIN, "file", "getattr");
-
-    // dumpsys, send fd
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fd", "use");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "write");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "read");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "open");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "fifo_file", "getattr");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "read");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "write");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "connectto");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getopt");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "unix_stream_socket", "getattr");
-
-    // use memfd created by su domain
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "execute");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "getattr");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "map");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "read");
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "memfd_file", "write");
-
-    // bootctl
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "dir", "search");
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "read");
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "file", "open");
-    ksu_allow(db, "hwservicemanager", KERNEL_SU_DOMAIN, "process", "getattr");
-
-    // Allow all binder transactions
-    ksu_allow(db, "domain", KERNEL_SU_DOMAIN, "binder", ALL);
-
-    // Allow system server kill su process
-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
-    ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
-
+    /* Live policy reads allocate exactly db->len, which type additions change. */
+    ret = ksu_update_policydb_len(db);
+    if (ret) {
+        ksu_destroy_sepolicy(pol);
+        goto out_unlock;
+    }
     rcu_assign_pointer(selinux_state.policy, pol);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
-
     reset_avc_cache();
+    ret = 0;
 out_unlock:
     mutex_unlock(&selinux_state.policy_mutex);
+    if (ret)
+        pr_err("kernelsu-esp base policy failed: %d\n", ret);
+    return ret;
 }
 
 #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)
@@ -484,6 +440,10 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
     mutex_lock(&selinux_state.policy_mutex);
 
     old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
+    if (!old_pol) {
+        ret = -EAGAIN;
+        goto out_unlock;
+    }
     pol = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(pol)) {
         ret = PTR_ERR(pol);
@@ -533,12 +493,16 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
         }
         cmd_index++;
     }
+    ret = ksu_update_policydb_len(db);
+    if (ret)
+        goto out_drop_new_policy;
 
     rcu_assign_pointer(selinux_state.policy, pol);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);
 
     reset_avc_cache();
+    cache_sid();
     ret = success_cmd_count;
     goto out_unlock;
 

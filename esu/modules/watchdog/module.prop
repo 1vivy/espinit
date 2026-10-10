@@ -1,6 +1,0 @@
-id=watchdog
-name=Lab boot watchdog
-version=1
-versionCode=1
-author=ESU
-description=Lab-only boot watchdog: when Android never reports sys.boot_completed, writes a kernel-log receipt to the ESP, records bootonce-bootloader with the cause in the misc BCB, and restarts

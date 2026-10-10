@@ -1,8 +1,7 @@
 name: Release
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -12,82 +11,25 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
   release:
-    needs:
-      - build
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
-
-      - name: Rename esud
+      - uses: actions/download-artifact@v8
+      - name: Package native, rdinit and host components
+        shell: bash
         run: |
-          mkdir -p esud
-          for dir in ./esud-*; do
-            if [ -d "$dir" ]; then
-                echo "----- Rename $dir -----"
-                esud_platform_name=$(basename "$dir")
-                if [ -f "$dir/esud" ]; then
-                  mv "$dir/esud" "esud/$esud_platform_name"
-                elif [ -f "$dir/esud.exe" ]; then
-                  mv "$dir/esud.exe" "esud/$esud_platform_name.exe"
-                fi
-            fi
+          set -euo pipefail
+          mkdir release
+          count=0
+          for artifact in kernelsu-esp-native-* kernelsu-esp-rdinit-* ksud-host-*; do
+            test -d "$artifact"
+            tar -C "$artifact" -czf "release/$artifact.tar.gz" .
+            count=$((count + 1))
           done
-
-      - name: Rename esuinit
-        run: |
-          mkdir -p esuinit
-          for dir in ./esuinit-*; do
-            if [ -d "$dir" ]; then
-                echo "----- Rename $dir -----"
-                esuinit_platform_name=$(basename "$dir")
-                if [ -f "$dir/esuinit" ]; then
-                  mv "$dir/esuinit" "esuinit/$esuinit_platform_name"
-                fi
-            fi
-          done
-
-      - name: Rename phone LVM activator
-        run: |
-          mkdir -p thin-activate
-          mv ./esuinit-aarch64/thin-activate \
-            thin-activate/thin-activate-aarch64-linux-android
-
-      - name: Package phone storage helpers
-        run: |
-          mkdir -p storage-helpers/bin storage-helpers/modules
-          cp ./esuinit-aarch64/{fw-views,avb-graft,ota-stage} storage-helpers/bin/
-          cp thin-activate/thin-activate-aarch64-linux-android storage-helpers/bin/thin-activate
-          cp -R esu/modules/{thin,ota,fw-views,avb-graft} storage-helpers/modules/
-          cp esu/manifest.example.toml storage-helpers/
-          tar -C storage-helpers -czf esu-storage-helpers-aarch64-linux-android.tar.gz .
-
-      - name: Rename lkm
-        run: |
-          mkdir -p lkm
-          for dir in ./*-android*-esu-lkm; do
-            if [ -d "$dir" ]; then
-                echo "----- Rename $dir -----"
-                lkm_platform_name=$(basename "$dir")
-                lkm_target="${lkm_platform_name%-esu-lkm}"
-                lkm_kmi="${lkm_target#*-}"
-                mv "$dir/${lkm_kmi}_kernelesp.ko" "lkm/lkm-${lkm_target}_kernelesp.ko"
-            fi
-          done
-
-      - name: Display structure of downloaded files
-        run: ls -R
-
-      - name: release
-        uses: softprops/action-gh-release@v3
+          test "$count" -gt 0
+      - uses: softprops/action-gh-release@v3
         with:
-          files: |
-            esuinit/*
-            esud/*
-            thin-activate/*
-            esu-storage-helpers-aarch64-linux-android.tar.gz
-            lkm/lkm-*_kernelesp.ko
+          files: release/*.tar.gz
+          fail_on_unmatched_files: true

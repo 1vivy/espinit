@@ -17,9 +17,9 @@ struct ksu_ioctl_cmd_map {
     ksu_perm_check_t perm_check; // Permission check function
 };
 
-// Install the esu driver fd to the current process
+// Install the distinct kernelsu-esp control fd to the current process.
 int ksu_install_fd(void);
 
-void ksu_supercalls_init(void);
+int ksu_supercalls_init(void);
 void ksu_supercalls_exit(void);
 #endif // __KSU_H_SUPERCALL

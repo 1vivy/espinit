@@ -1,25 +1,27 @@
-menu "esu"
+menu "kernelsu-esp"
 
 config KERNELESP
-	tristate "esu kernel module support"
-	depends on KPROBES && EXT4_FS
+	tristate "kernelsu-esp init RC and policy helper"
+	depends on KPROBES && SECURITY_SELINUX
 	default y
 	help
-	  Enable the esu early-boot substrate kernel module.
-	  Requires CONFIG_KPROBES for kernel hooking support.
-	  Requires CONFIG_EXT4_FS for `ext4_unregister_sysfs`.
-	  To compile as a module, choose M here: the
-	  module will be called esu.
+	  Enable the root-only init RC supplement and SELinux policy helper.
+	  Requires CONFIG_KPROBES for distinct control FD installation.
+	  To compile as a module, choose M here: the artifact is
+	  kernelsu-esp.ko, with internal name kernelsu_esp.
 	  A loadable module must be loaded by PID 1 during early boot.
 	  Direct syscall hooks keep a loadable module resident once published:
 	  another hook may retain its callback in a saved-original chain.
+	  The helper observes only PID 1's second-stage init policy readiness.
+	  It does not grant credentials, track apps or own boot-mode reports.
+	  Bootstrap and module RC are supplied once by root (maximum 64 KiB).
 
 config KERNELESP_DEBUG
-	bool "esu debug mode"
+	bool "kernelsu-esp debug mode"
 	depends on KERNELESP
 	default n
 	help
-	  Enable esu debug mode.
+	  Enable kernelsu-esp debug mode.
 
 config KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
 	bool "Dynamically patch x64's hardened syscall dispatcher to support syscall hooks"

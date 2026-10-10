@@ -1,2 +1,0 @@
-  PV         VG  Fmt  Attr PSize     PFree     PMdaSize 
-  /dev/loop0 rom lvm2 a--  532676608 356515840   1044480

@@ -1,20 +1,88 @@
-name: Build kernelesp.ko
+name: Exact ACK core artifact matrix
 on:
-  workflow_call:
   workflow_dispatch:
+    inputs:
+      kmi_root:
+        description: 'Absolute prepared root: <branch>/source and <branch>/<arch> complete outputs'
+        required: true
+        type: string
+      llvm_root:
+        description: 'Absolute toolchain root containing clang-<CLANG_VERSION>/bin for each source'
+        required: true
+        type: string
+      ndk:
+        description: 'Installed Android NDK root for static rdinit'
+        required: true
+        type: string
+permissions:
+  contents: read
 jobs:
-  build-lkm:
+  artifacts:
+    runs-on: [self-hosted, linux, x64, kernelsu-esp-kmi]
     strategy:
+      fail-fast: false
       matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
-          - android17-6.18
-    uses: ./.github/workflows/ddk-lkm.yml
-    with:
-      kmi: ${{ matrix.kmi }}
+        branch: [android12-5.10, android13-5.10, android13-5.15, android14-5.15, android14-6.1, android15-6.6, android16-6.12, android17-6.18]
+        arch: [aarch64, x86_64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - name: Read exact prepared source identity
+        env:
+          KMI_ROOT: ${{ inputs.kmi_root }}
+          LLVM_ROOT: ${{ inputs.llvm_root }}
+          BRANCH: ${{ matrix.branch }}
+          KMI_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          for key in ('KMI_ROOT', 'LLVM_ROOT'):
+              value = os.environ[key]
+              if not Path(value).is_absolute() or any(c in value for c in '\r\n'):
+                  raise SystemExit(f'{key} must be an absolute runner-local path')
+          source = Path(os.environ['KMI_ROOT']) / os.environ['BRANCH'] / 'source'
+          files = [source / name for name in ('build.config.constants', 'build.config.common', 'bazel/constants.scl')]
+          constants = '\n'.join(path.read_text() for path in files if path.is_file())
+          def exact(key, pattern):
+              values = set(re.findall(r'^' + key + r'=["\']?(' + pattern + r')["\']?\s*$', constants, re.M))
+              if len(values) != 1:
+                  raise SystemExit(f'Prepared source lacks unambiguous {key}')
+              return values.pop()
+          generation = exact('KMI_GENERATION', r'\d+')
+          if exact('BRANCH', r'android\d+-\d+\.\d+') != os.environ['BRANCH']:
+              raise SystemExit('Prepared source branch mismatch')
+          versions = set(re.findall(r'^CLANG_VERSION=["\']?(r[0-9A-Za-z._-]+)["\']?\s*$', constants, re.M))
+          versions.update(re.findall(r'^CLANG_PREBUILT_BIN=.*?/clang-(r[0-9A-Za-z._-]+)/bin\s*$', constants, re.M))
+          if len(versions) != 1:
+              raise SystemExit('Prepared source lacks unambiguous compiler identity')
+          compiler = Path(os.environ['LLVM_ROOT']) / ('clang-' + versions.pop()) / 'bin'
+          if not os.access(compiler / 'clang', os.X_OK):
+              raise SystemExit(f'Missing matching compiler: {compiler}')
+          output = Path(os.environ['KMI_ROOT']) / os.environ['BRANCH'] / os.environ['KMI_ARCH']
+          for name in ('Module.symvers', 'System.map', 'include/generated/utsrelease.h', '.config'):
+              if not (output / name).is_file() or not (output / name).stat().st_size:
+                  raise SystemExit(f'Missing real kernel input: {output / name}')
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write(f'KMI_SRC={source}\nGENERATION={generation}\nLLVM_BIN={compiler}\n')
+          PY
+      - name: Build and admit complete exact artifact set
+        env:
+          BRANCH: ${{ matrix.branch }}
+          KMI_ARCH: ${{ matrix.arch }}
+          KMI_ROOT: ${{ inputs.kmi_root }}
+          NDK: ${{ inputs.ndk }}
+        run: |
+          RELEASE_DIR=$(mktemp -d "$RUNNER_TEMP/core-artifacts.XXXXXXXX")
+          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
+          PATH="$LLVM_BIN:$PATH" python3 scripts/build_artifacts.py \
+            --kmi-src "$KMI_SRC" --kmi-out "$KMI_ROOT/$BRANCH/$KMI_ARCH" \
+            --branch "$BRANCH" --generation "$GENERATION" --arch "$KMI_ARCH" \
+            --ndk "$NDK" --output "$RELEASE_DIR"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-esp-kmi-${{ matrix.branch }}-${{ matrix.arch }}
+          path: ${{ env.RELEASE_DIR }}/
+          if-no-files-found: error

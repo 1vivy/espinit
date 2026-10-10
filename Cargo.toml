@@ -1,35 +1,16 @@
 [workspace]
 members = [
-    "userspace/esud",
+    "userspace/esp-tools",
+    "userspace/esp-runtime",
     "userspace/esuinit",
-    "userspace/dm",
-    "userspace/lvm2-meta",
-    "userspace/thin-activate",
-    "userspace/fw-views",
-    "userspace/ota-stage",
-    "userspace/avb-graft",
-    "userspace/avb-graft-cli",
-    "userspace/esu-platform",
-    "userspace/esu-config",
-    "userspace/ota-core",
-    "userspace/abl-image",
 ]
 default-members = [
-    "userspace/esud",
+    "userspace/esp-tools",
+    "userspace/esp-runtime",
     "userspace/esuinit",
-    "userspace/dm",
-    "userspace/lvm2-meta",
-    "userspace/thin-activate",
-    "userspace/fw-views",
-    "userspace/ota-stage",
-    "userspace/avb-graft",
-    "userspace/avb-graft-cli",
-    "userspace/esu-config",
-    "userspace/ota-core",
-    "userspace/abl-image",
 ]
 resolver = "3"
-exclude = ["esu/modules/boot-hal/layer", "esu/modules/boot-hal/generic-bootctl"]
+exclude = ["out", "vendor"]
 
 [workspace.package]
 edition = "2024"
@@ -48,5 +29,3 @@ lto = true
 opt-level = "z"
 panic = "abort"
 
-[profile.release.package.esud]
-codegen-units = 1

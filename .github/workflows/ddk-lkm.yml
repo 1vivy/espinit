@@ -1,124 +1,126 @@
-name: Build esu Kernel Module
-
+name: Exact DDK helper gate
 on:
   workflow_call:
     inputs:
-      kmi:
-        description: 'KMI version'
+      branch:
         required: true
         type: string
+      generation:
+        required: true
+        type: number
       ddk_release:
-        description: 'DDK release version'
-        required: false
-        default: '20260828'
+        required: true
         type: string
-
+      kmi_src:
+        required: true
+        type: string
+      aarch64_out:
+        required: true
+        type: string
+      x86_64_out:
+        required: true
+        type: string
+      llvm_bin:
+        required: true
+        type: string
+permissions:
+  contents: read
 jobs:
-  build-esu-ko:
-    name: Build kernelesp.ko for ${{ inputs.kmi }}
+  helper:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ylarod/ddk-min:${{ inputs.kmi }}-${{ inputs.ddk_release }}
-      options: --privileged
-
+      image: ghcr.io/ylarod/ddk-min:${{ inputs.branch }}-${{ inputs.ddk_release }}
+      # The container sees only the runner workspace plus these binds. ddk-min
+      # ships its own source and a modules_prepare-only kdir (`ARCH=arm64`), so
+      # the caller-supplied exact source and complete per-architecture outputs
+      # are transferred by binding each absolute path at the identical container
+      # path; nothing is copied or synthesized inside the container.
+      volumes:
+        - ${{ inputs.kmi_src }}:${{ inputs.kmi_src }}
+        - ${{ inputs.aarch64_out }}:${{ inputs.aarch64_out }}
+        - ${{ inputs.x86_64_out }}:${{ inputs.x86_64_out }}
+        # clang resolves libc++ and other runtime libraries beside bin. Keep
+        # llvm_bin as the caller interface, but bind its complete parent tree.
+        - ${{ inputs.llvm_bin }}/..:${{ inputs.llvm_bin }}/..
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v7
-
-    - name: Build kernelesp.ko
-      run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-        cd kernel
-
-        echo "=== Building kernelesp.ko for KMI: ${{ inputs.kmi }} ==="
-
-        CONFIG_KERNELESP=m CC=clang make
-
-        echo "=== Build completed ==="
-
-        # Create output directory in GitHub workspace
-        OUT_DIR=/github/workspace/out/aarch64
-        mkdir -p $OUT_DIR
-
-        # Copy with KMI-specific naming
-        OUTPUT_NAME="${{ inputs.kmi }}_kernelesp.ko"
-        cp kernelesp.ko "$OUT_DIR/$OUTPUT_NAME"
-
-        echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
-        ls -la "$OUT_DIR/$OUTPUT_NAME"
-        echo "Size: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
-        llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
-        echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
-
-    - name: Upload kernelesp.ko artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: aarch64-${{ inputs.kmi }}-esu-lkm
-        path: /github/workspace/out/aarch64/${{ inputs.kmi }}_kernelesp.ko
-
-    - name: Build kernelesp.ko for x64
-      run: |
-        cd kernel
-        make clean
-
-        echo "=== Preparing KDIR for x64 ==="
-
-        mkdir -p /opt/ddk/kdir-x64
-        unset ARCH
-        unset CROSS_COMPILE
-        export ARCH=x86_64
-        kmi=${{ inputs.kmi }}
-        pushd /opt/ddk/src/$kmi
-        export KDIR=/opt/ddk/kdir-x64/$kmi
-
-        # ddk-min images contain the source tarball, whose modpost patch is
-        # not applied to the fresh x86 kdir.  Keep the patch idempotent so
-        # this also works when the image already contains one or more fixes.
-        MODPOST=scripts/mod/modpost.c
-        sed -i -E 's/^([[:space:]]*)check_exports\(mod\);/\1\/\/ check_exports(mod);/' "$MODPOST"
-        sed -i -E 's/^([[:space:]]*)s->module = exp->module;/\1\/\/ s->module = exp->module;/' "$MODPOST"
-        sed -i 's/^static void check_exports(/static void __attribute__((unused)) check_exports(/' "$MODPOST"
-        sed -i 's/__version_ext_names\\") =\\n/__version_ext_names\\") = \\"\\"\\n/' "$MODPOST"
-
-        make O=$KDIR gki_defconfig
-        scripts/config --file $KDIR/.config -d LTO_CLANG -e LTO_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL -d THINLTO
-        if [ "$kmi" == "android16-6.12" ] || [ "$kmi" == "android17-6.18" ]; then
-            scripts/config --file $KDIR/.config -e CONFIG_CFI_ICALL_NORMALIZE_INTEGERS
-        fi
-        make O=$KDIR modules_prepare
-        # Generate SELinux headers through Kbuild in this x86 output tree.
-        make O=$KDIR security/selinux/built-in.a
-        popd
-
-        echo "=== Building x64 kernelesp.ko for KMI: ${{ inputs.kmi }} ==="
-
-        MDIR=$(realpath .)
-
-        if [ "$kmi" == "android17-6.18" ]; then
-          make -C $KDIR M=$MDIR MO=$MDIR compile_commands.json modules CONFIG_KERNELESP=m CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=y
-        else
-          make -C $KDIR M=$MDIR src=$MDIR compile_commands.json modules CONFIG_KERNELESP=m CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=y
-        fi
-
-        echo "=== Build completed ==="
-
-        # Create output directory in GitHub workspace
-        OUT_DIR=/github/workspace/out/x86_64
-        mkdir -p $OUT_DIR
-
-        # Copy with KMI-specific naming
-        OUTPUT_NAME="${{ inputs.kmi }}_kernelesp.ko"
-        cp kernelesp.ko "$OUT_DIR/$OUTPUT_NAME"
-
-        echo "Copied to: $OUT_DIR/$OUTPUT_NAME"
-        ls -la "$OUT_DIR/$OUTPUT_NAME"
-        echo "Size: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
-        llvm-strip -d "$OUT_DIR/$OUTPUT_NAME"
-        echo "Size after stripping: $(du -h "$OUT_DIR/$OUTPUT_NAME" | cut -f1)"
-
-    - name: Upload x64 kernelesp.ko artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: x86_64-${{ inputs.kmi }}-esu-lkm
-        path: /github/workspace/out/x86_64/${{ inputs.kmi }}_kernelesp.ko
+      - uses: actions/checkout@v7
+      - name: Admit the bound exact inputs for this architecture
+        env:
+          BRANCH: ${{ inputs.branch }}
+          DDK_RELEASE: ${{ inputs.ddk_release }}
+          KMI_SRC: ${{ inputs.kmi_src }}
+          AARCH64_OUT: ${{ inputs.aarch64_out }}
+          X86_64_OUT: ${{ inputs.x86_64_out }}
+          LLVM_BIN: ${{ inputs.llvm_bin }}
+          KMI_ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          # The image tag and the bind specifications are built from the same
+          # values, so reject anything that either would have to reinterpret.
+          case $BRANCH in
+            *[!0-9a-z.-]*) echo "Not an exact ACK branch: $BRANCH" >&2; exit 2 ;;
+          esac
+          case $BRANCH in
+            android[0-9]*-[0-9]*.[0-9]*) ;;
+            *) echo "Not an exact ACK branch: $BRANCH" >&2; exit 2 ;;
+          esac
+          case $DDK_RELEASE in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) echo "Not a dated DDK release: $DDK_RELEASE" >&2; exit 2 ;;
+          esac
+          for path in "$KMI_SRC" "$AARCH64_OUT" "$X86_64_OUT" "$LLVM_BIN"; do
+            case $path in
+              /*) ;;
+              *) echo "Supplied path is not absolute, so its bind cannot transfer it: $path" >&2; exit 2 ;;
+            esac
+            case $path in
+              *:*) echo "A supplied path containing ':' cannot be bound verbatim: $path" >&2; exit 2 ;;
+            esac
+          done
+          if [ "$KMI_ARCH" = aarch64 ]; then KMI_OUT=$AARCH64_OUT; else KMI_OUT=$X86_64_OUT; fi
+          test -s "$KMI_SRC/build.config.constants" || test -s "$KMI_SRC/build.config.common" \
+            || test -s "$KMI_SRC/bazel/constants.scl" \
+            || { echo "Missing prepared source identity under: $KMI_SRC" >&2; exit 2; }
+          test -x "$LLVM_BIN/clang" || { echo "Missing matching compiler: $LLVM_BIN/clang" >&2; exit 2; }
+          for input in Module.symvers System.map include/generated/utsrelease.h .config; do
+            test -s "$KMI_OUT/$input" || { echo "Missing real kernel input: $KMI_OUT/$input" >&2; exit 2; }
+          done
+          {
+            echo "KMI_SRC=$KMI_SRC"
+            echo "KMI_OUT=$KMI_OUT"
+          } >> "$GITHUB_ENV"
+      - name: Build and verify against complete bound kernel outputs
+        env:
+          BRANCH: ${{ inputs.branch }}
+          GENERATION: ${{ inputs.generation }}
+          KMI_ARCH: ${{ matrix.arch }}
+          LLVM_BIN: ${{ inputs.llvm_bin }}
+        run: |
+          set -eu
+          # The container user differs from the checkout owner and the helper
+          # records its git version, so trust the workspace as upstream does.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # ddk-min exports an arm64 CROSS_COMPILE, and kbuild turns its prefix
+          # into `--target=`, which contradicts ARCH on the x86_64 leg. Clearing
+          # it makes kbuild derive the target from ARCH (scripts/Makefile.clang),
+          # which is the same aarch64-linux-gnu for arm64 and x86_64-linux-gnu
+          # for x86_64.
+          unset CROSS_COMPILE
+          export PATH="$LLVM_BIN:$PATH"
+          python3 scripts/kmi_modules.py build --module-dir kernel --module kernelsu-esp \
+            --branch "$BRANCH" --generation "$GENERATION" --arch "$KMI_ARCH" \
+            --kmi-src "$KMI_SRC" --kmi-out "$KMI_OUT"
+          output="release/$BRANCH-$GENERATION/$KMI_ARCH"
+          mkdir -p "$output"
+          install -m644 kernel/kernelsu-esp.ko kernel/kernelsu-esp.ko.compat.json "$output/"
+          python3 scripts/kmi_modules.py verify --module "$output/kernelsu-esp.ko" \
+            --branch "$BRANCH" --generation "$GENERATION" --arch "$KMI_ARCH" --kmi-out "$KMI_OUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-esp-ddk-${{ inputs.branch }}-${{ inputs.generation }}-${{ matrix.arch }}
+          path: release/
+          if-no-files-found: error

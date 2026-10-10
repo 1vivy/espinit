@@ -1,60 +1,52 @@
-# Reporting Security Issues
+# Security policy
 
-## esu baseline scope
+## Product boundary
 
-This repository is a **source baseline** for esu, a fork of
-[KernelSU](https://github.com/tiann/KernelSU). It is not a released product or
-a supported installation path, and its README describes planned behavior that
-is not implemented here yet. Do not treat a successful source build, module
-load, or README example as evidence that a device boots safely or that any
-partition, generation, or receipt guarantee holds.
+KernelSU ESP is a privileged early-boot userspace and kernel-helper cutover, not
+a boot-qualified release merely because its source builds. Enforcing Android
+boot, HAL-domain EFI I/O and credential-consumer gates require separate evidence.
+Report the exact product commit, Magisk pin/patchset, kernel KMI and configuration.
 
-esu inherits KernelSU's early-boot privilege level. Relevant findings
-include, without limitation: bypass of a documented generation or module
-self-check; forged or substituted PID-1 binary, module, or configuration;
-failure to persist or honor the managed-boot hard-failure receipt; and
-`gpt.ko` projection that exposes physical partition names or implements
-writes outside its in-memory contract. Note that a raw-LU or raw block device
-accessed with sufficient privilege is explicitly outside `gpt.ko`'s
-enforcement boundary — that is a documented limit, not a vulnerability.
+The helper is not an app-root provider: no credential grant, allowlist/profile
+API, SU redirection or backing-file credential-provider ABI belongs to it. Its
+retained policy and one-pass rc controls are root-only. Native upstream SU
+machinery retains authorization; separation must not become an unauthenticated
+request path. An installed root's files, socket, ordinary SU entrypoint and
+lifecycle are not ours to appropriate.
 
-The planned early failure receipt lives on the ESP at
-`/esu/receipts/failure.json`, not on unprojected `/metadata`. The ESP is
-normally mounted read-only; failure replacement alone opens a bounded
-read-write remount window for a same-directory temporary file, file `fsync`,
-atomic rename, and directory `fsync`, followed by ESP sync and read-only
-remount. Receipt-storage or remount failure must not permit Android handoff.
-`/metadata/esu` is reserved for daemon runtime receipts/logs after
-successful handoff, once metadata is available.
+Installed modules and supplied policies are trusted privileged code, not a
+sandbox for hostile root modules. Relevant defects include unauthorized stage or
+installer access, archive/path traversal, source/device substitution, namespace
+collisions, premature service start, lost generation state, active-lower mutation,
+and writes or relabelling outside owned metadata subtrees. Android keys and
+password-slot records are not module upper/work directories.
 
-Planned `gpt.ko` schema v1 accepts whole block-device backends only. A
-preallocated ESP regular file must be attached through a standard loop device
-before APPLY and supplied as that block backend, with the attachment retained
-for the projection's lifetime. No regular-file, extent, or FIEMAP ABI is added
-to `gpt.ko`; this does not enlarge its documented enforcement boundary.
+The raw ESP remains RW and nosuid,nodev,noexec. Executables are copied to tmpfs;
+FAT is neither executed nor treated as a per-file SELinux-label store. Restore
+the same selected backing after Android's root transition, without live upper/work
+overlap or competing filesystem ownership. Fatal managed-bootstrap failures must
+not be treated as successful Android handoff. Receipts, when available, are
+failure evidence rather than permission to continue.
 
-Retention of esu's inherited kernel-module lifecycle is intentional
-boot-substrate reuse, not KernelSU Manager or root-product compatibility.
-The core remains GPL-3.0. Future `thin.ko` is planned as a separate
-GPL-2.0-only module aggregated with, not linked into or relicensed as, the
-GPL-3.0 core. Per-subtree license and provenance notices are required; the
-top-level license does not relicense that separate module. This is a planned
-component boundary, not a claim that `thin.ko` is implemented.
+Independent LKMs and platform tools have their own security boundaries. EFI I/O
+uses its backing file's opener credentials, not a helper or caller-credential
+fallback; UID 0 does not bypass SELinux file use or block-device policy. Partition
+projection is not protection against an actor already able to access raw backing
+devices. Symbol relocation cannot repair incompatible kernel layouts, CFI, CRCs
+or module signatures.
 
-Report esu security issues privately through this fork's GitHub Security
-Advisory [Report a Vulnerability](https://github.com/1vivy/kernelesp/security/advisories/new)
-form. This is the reporting route for esu-specific defects, including
-identity collisions with a real KernelSU installation, the esu contract,
-and esu state paths. Do not post security reports or working exploits in
-public issues; keep disclosure coordinated until a fix or agreed disclosure.
+## Disclosure
 
-Reports should state the exact commit, device/firmware, generation values,
-configuration, and reproducible steps, plus whether a real KernelSU
-installation was present.
+Report product-specific issues privately through the existing fork's
+[Report a Vulnerability](https://github.com/1vivy/kernelesp/security/advisories/new)
+route. Repository renames and publication are separate owner-controlled actions;
+this cutover does not invent a new reporting endpoint. Do not post working
+exploits, private keys or credential state in public issues.
 
-## Defects demonstrably present upstream
+Include reproducible steps, exact artifact hashes, observed policy mode, logs with
+secrets removed, and whether another root installation was present. Report defects
+demonstrably present upstream to the relevant upstream project's security
+maintainers as well; do not attribute product-only changes to upstream.
 
-If a defect is demonstrably present in upstream KernelSU, also report it
-through [KernelSU's security policy](https://github.com/tiann/KernelSU/security/policy).
-This additional upstream route applies only to defects present upstream, not
-to esu-specific reports.
+KernelSU history and GPL-3.0 notices are retained. The top-level license does not
+relicense independently distributed LKMs or other licensed subtrees.

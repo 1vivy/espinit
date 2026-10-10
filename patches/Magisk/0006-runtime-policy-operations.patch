@@ -1,0 +1,75 @@
+diff --git a/native/src/sepolicy/rules.rs b/native/src/sepolicy/rules.rs
+--- a/native/src/sepolicy/rules.rs
++++ b/native/src/sepolicy/rules.rs
+@@ -52,14 +52,22 @@
+             type_(file, ["file_type"]);
+             type_(log, ["file_type"]);
+             allow([SEPOL_FILE_TYPE, SEPOL_LOG_TYPE], ["tmpfs", "labeledfs"], ["filesystem"], ["associate"]);
+-            allow(["init"], [proc], ["process"], ["transition", "dyntransition", "sigchld", "getattr"]);
++            // RC services execute from the nosuid product tmpfs and inherit
++            // init's signal/rlimit state, without granting init worker access.
++            allow(["init"], ["init"], ["process"], ["setcurrent"]);
++            allow(["init"], [proc], ["process"], ["transition", "dyntransition", "sigchld", "getattr", "noatsecure", "rlimitinh", "siginh"]);
++            allow(["init"], [proc], ["process2"], ["nosuid_transition"]);
+             allow(["init"], [file], ["dir"], ["search", "open", "read", "getattr", "write", "add_name", "create", "setattr"]);
+             allow(["init"], [file], ["file"], ["open", "read", "execute", "execute_no_trans", "entrypoint", "map", "getattr", "relabelto"]);
+             allow(["init"], [proc], ["unix_stream_socket"], ["connectto"]);
+             allow(["init"], [file], ["sock_file"], ["open", "read", "write", "getattr"]);
+             allow([proc], ["init"], ["fd"], ["use"]);
+             allow([proc], ["init"], ["process"], ["sigchld"]);
+-            allow([proc], [proc], ["process"], ["fork", "sigchld", "signal", "getattr", "setcurrent"]);
++            allow([proc], [proc], ["process"], ["fork", "sigchld", "signal", "sigkill", "getattr", "setcurrent", "dyntransition", "getsched", "setpgid"]);
++            // /proc/self/{mountinfo,exe,fd,attr/current} carries the process SID.
++            allow([proc], [proc], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], [proc], ["file"], ["open", "read", "write", "getattr"]);
++            allow([proc], [proc], ["lnk_file"], ["read", "getattr"]);
+             allow([proc], [proc], ["capability"], ["chown", "dac_override", "dac_read_search", "fowner", "fsetid", "setuid", "setgid", "sys_admin", "sys_chroot", "sys_nice", "mknod", "kill"]);
+             allow([proc], [proc], ["unix_stream_socket"], ["create", "bind", "listen", "accept", "connect", "connectto", "read", "write", "getattr", "setopt", "getopt", "shutdown"]);
+             allow([proc], [proc], ["unix_dgram_socket"], ["create", "connect", "read", "write", "getattr", "setopt", "getopt"]);
+@@ -76,11 +84,18 @@
+             allow([proc], ["file_type"], ["dir"], ["open", "read", "search", "getattr", "mounton"]);
+             allow([proc], ["file_type"], ["file"], ["open", "read", "getattr", "map", "mounton", "relabelto", "relabelfrom"]);
+             // Copy-up and worker entries carry their Android export labels.
++            // Mirrored placeholders are opened read-only; mkdir/clone_attr and
++            // symlink creation must work with arbitrary Android export labels
++            // (CF17: aconfig, perfetto, seccomp and cacerts), not just system_file.
++            // Do not generalize file writes or execution to file_type.
++            allow([proc], ["file_type"], ["dir"], ["create", "write", "add_name", "setattr", "relabelto", "relabelfrom"]);
++            allow([proc], ["file_type"], ["file"], ["create", "setattr"]);
++            allow([proc], ["file_type"], ["lnk_file"], ["create", "setattr"]);
+             allow([proc], ["system_file", "vendor_file"], ["dir"], ["create", "write", "add_name", "remove_name", "setattr", "rmdir", "rename", "relabelto", "relabelfrom"]);
+             allow([proc], ["system_file", "vendor_file"], ["file"], ["create", "write", "append", "setattr", "unlink", "rename", "link", "execute", "execute_no_trans"]);
+             allow([proc], ["system_file", "vendor_file"], ["lnk_file"], ["create", "setattr", "unlink", "rename"]);
+             allow([proc], ["file_type"], ["lnk_file"], ["read", "getattr", "relabelto", "relabelfrom"]);
+-            allow([proc], ["system_file", "vendor_file", "shell_exec"], ["file"], ["execute", "execute_no_trans"]);
++            allow([proc], ["system_file", "vendor_file", "shell_exec", "toolbox_exec"], ["file"], ["execute", "execute_no_trans"]);
+             allow([proc], ["tmpfs"], ["dir"], ["create", "open", "read", "write", "search", "getattr", "setattr", "add_name", "remove_name", "mounton", "relabelto", "relabelfrom"]);
+             allow([proc], ["tmpfs"], ["file"], ["create", "open", "read", "write", "getattr", "setattr", "mounton", "relabelto", "relabelfrom"]);
+             allow([proc], ["tmpfs"], ["lnk_file"], ["create", "read", "getattr", "setattr", "relabelto", "relabelfrom"]);
+@@ -88,7 +103,17 @@
+             allow([proc], ["rootfs", "tmpfs"], ["filesystem"], ["associate"]);
+             allow([proc], ["proc"], ["dir"], ["search", "open", "read", "getattr"]);
+             allow([proc], ["proc"], ["file"], ["open", "read", "getattr"]);
++            // Raw ESP content is read before projection/relabeling. No FAT writes.
++            allow([proc], ["vfat"], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], ["vfat"], ["file"], ["open", "read", "getattr"]);
++            // Selected metadata starts unlabeled; create and relabel its
++            // password_slots directory, without allowing unlabeled file writes.
++            allow([proc], ["unlabeled"], ["dir"], ["search", "getattr", "write", "add_name", "create", "setattr", "relabelfrom"]);
++            // Storage discovery reads block topology/dev numbers and /proc/misc.
++            allow([proc], ["sysfs_block", "sysfs_dm", "sysfs_loop", "sysfs_devices_block", "sysfs_zram"], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], ["sysfs_block", "sysfs_dm", "sysfs_loop", "sysfs_devices_block", "sysfs_zram", "sysfs_zram_uevent", "proc_misc", "proc_filesystems"], ["file"], ["open", "read", "getattr"]);
+             allow([proc], ["null_device", "zero_device"], ["chr_file"], ["open", "read", "write", "getattr", "ioctl"]);
++            allow([proc], ["kmsg_device"], ["chr_file"], ["open", "write"]);
+             allow([proc], ["selinuxfs"], ["file"], ["open", "read", "write", "getattr"]);
+             allow([proc], ["kernel"], ["security"], ["load_policy", "read_policy", "compute_av", "check_context"]);
+             allow([proc], ["property_socket"], ["sock_file"], ["write"]);
+@@ -100,6 +125,8 @@
+             allow([proc], ["ctl_start_prop", "ctl_stop_prop"], ["property_service"], ["set"]);
+             // resetprop is the staged direct-property tool used by platform modules.
+             allow([proc], ["property_type"], ["file"], ["open", "read", "write", "map", "getattr"]);
++            // resetprop updates the shared serial area as well as property values.
++            allow([proc], ["properties_serial"], ["file"], ["open", "read", "write", "map", "getattr"]);
+             allow([proc], ["logd"], ["unix_dgram_socket"], ["sendto"]);
+             allow([proc], ["logdw_socket"], ["sock_file"], ["write"]);
+         }

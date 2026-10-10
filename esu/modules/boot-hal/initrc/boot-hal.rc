@@ -1,9 +1,0 @@
-service esu.bootctl /debug_ramdisk/esu/bin/esu-bootctl
-    class early_hal
-    user root
-    group root
-    seclabel u:r:esu_bootctl:s0
-    critical
-
-on post-fs
-    exec u:r:esu:s0 root root -- /debug_ramdisk/esu/bin/esu-bootctl --stop-stock
