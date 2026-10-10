@@ -5,10 +5,6 @@
 
 bool only_root(void)
 {
-    return current_uid().val == 0;
+    return uid_eq(current_euid(), GLOBAL_ROOT_UID);
 }
 
-bool always_allow(void)
-{
-    return true;
-}

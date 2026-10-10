@@ -1,4 +1,3 @@
-#include "feature/selinux_hide.h"
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
@@ -11,13 +10,10 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/version.h>
-#include <linux/input-event-codes.h>
-#include <linux/kprobes.h>
 #include <linux/printk.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/namei.h>
-#include <linux/workqueue.h>
 #include <linux/uio.h>
 #include <linux/stat.h>
 
@@ -25,46 +21,11 @@
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
 #include "runtime/esud.h"
-#include "runtime/esud_boot.h"
 #include "selinux/selinux.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
-#include "runtime/platform_boot.h"
-
-/* Module failures do not change stock init's execution policy. */
-static const char KERNEL_SU_RC[] = ESU_PLATFORM_RC(KSUD_PATH, KERNEL_SU_DOMAIN);
-
-static int platform_boot_mode;
-static const char *ksu_rc = KERNEL_SU_RC;
-static size_t ksu_rc_len;
-
-int esu_set_platform_boot_mode(int mode)
-{
-    int previous;
-
-    if (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)
-        return -EINVAL;
-    previous = READ_ONCE(platform_boot_mode);
-    if (previous != ESU_PLATFORM_UNSET && previous != mode)
-        return -EPERM;
-    WRITE_ONCE(platform_boot_mode, mode);
-    ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
-    return 0;
-}
-
-int esu_get_platform_boot_mode(void)
-{
-    return READ_ONCE(platform_boot_mode);
-}
-
 static void stop_init_rc_hook();
-static void stop_execve_hook();
 
-static void do_stop_input_hook(struct work_struct *work);
-static DECLARE_WORK(stop_input_hook_work, do_stop_input_hook);
-static bool input_hook_registered;
-
-#define MAX_ARG_STRINGS 0x7FFFFFFF
 struct user_arg_ptr {
 #ifdef CONFIG_COMPAT
     bool is_compat;
@@ -98,48 +59,10 @@ static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
     return native;
 }
 
-/*
- * count() counts the number of strings in array ARGV.
- */
-
-/*
- * Make sure old GCC compiler can use __maybe_unused,
- * Test passed in 4.4.x ~ 4.9.x when use GCC.
- */
-
-static int __maybe_unused count(struct user_arg_ptr argv, int max)
-{
-    int i = 0;
-
-    if (argv.ptr.native != NULL) {
-        for (;;) {
-            const char __user *p = get_user_arg_ptr(argv, i);
-
-            if (!p)
-                break;
-
-            if (IS_ERR(p))
-                return -EFAULT;
-
-            if (i >= max)
-                return -E2BIG;
-            ++i;
-
-            if (fatal_signal_pending(current))
-                return -ERESTARTNOHAND;
-        }
-    }
-    return i;
-}
 
 static bool check_argv(struct user_arg_ptr argv, int index, const char *expected, char *buf, size_t buf_len)
 {
     const char __user *p;
-    int argc;
-
-    argc = count(argv, MAX_ARG_STRINGS);
-    if (argc <= index)
-        return false;
 
     p = get_user_arg_ptr(argv, index);
     if (!p || IS_ERR(p))
@@ -158,41 +81,21 @@ fail:
 
 void ksu_handle_execveat_esud(const char *path, struct user_arg_ptr *argv)
 {
-    static const char app_process[] = "/system/bin/app_process";
-    static bool first_zygote = true;
-
-    /* This applies to versions Android 10+ */
-    static const char system_bin_init[] = "/system/bin/init";
-    static bool init_second_stage_executed = false;
 
     // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
-    if (unlikely(!memcmp(path, system_bin_init, sizeof(system_bin_init) - 1) && argv)) {
+    if (current->pid == 1 && !strcmp(path, "/system/bin/init") && argv) {
         char buf[16];
-        if (!init_second_stage_executed && check_argv(*argv, 1, "second_stage", buf, sizeof(buf))) {
-            pr_info("/system/bin/init second_stage executed\n");
-            ksu_selinux_hide_handle_second_stage();
-            apply_kernelsu_rules();
+        if (check_argv(*argv, 1, "second_stage", buf, sizeof(buf)) && !apply_kernelsu_rules()) {
             cache_sid();
-            setup_ksu_cred();
-            init_second_stage_executed = true;
-        }
-    }
-
-    if (unlikely(first_zygote && !memcmp(path, app_process, sizeof(app_process) - 1) && argv)) {
-        char buf[16];
-        if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
-            pr_info("exec zygote, /data prepared, second_stage: %d\n", init_second_stage_executed);
-            on_post_fs_data();
-            first_zygote = false;
             ksu_stop_esud_execve_hook();
         }
     }
+
 }
 
 static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
 static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
 static struct file_operations fops_proxy;
-static ssize_t ksu_rc_pos = 0;
 
 static DEFINE_MUTEX(module_rc_lock);
 static char *module_rc_buf;
@@ -206,7 +109,7 @@ int esu_set_module_rc(const void __user *ptr, u32 len)
     char *buf = NULL;
     int ret = 0;
 
-    if (len > 65536)
+    if (len > 65536 || (len && !ptr))
         return -EINVAL;
     mutex_lock(&module_rc_lock);
     if (module_rc_set) {
@@ -237,17 +140,15 @@ out:
     return ret;
 }
 
-/* The read proxies append core rc first, then this immutable userspace payload. */
+/* Bootstrap and module RC arrive together as one immutable userspace payload. */
 static void load_module_rc_once(void)
 {
-    int mode;
-
     mutex_lock(&module_rc_lock);
     if (module_rc_loaded)
         goto out;
-    mode = READ_ONCE(platform_boot_mode);
-    if (ksu_no_custom_rc || (mode != ESU_PLATFORM_ANDROID && mode != ESU_PLATFORM_RECOVERY)) {
-        ksu_rc_len = 0;
+    if (ksu_no_custom_rc) {
+        kvfree(module_rc_buf);
+        module_rc_buf = NULL;
         module_rc_len = 0;
     }
     module_rc_loaded = true;
@@ -265,42 +166,23 @@ static void free_module_rc(void)
 // https://cs.android.com/android/platform/superproject/main/+/main:system/core/init/parser.cpp;l=144;drc=61197364367c9e404c7da6900658f1b16c42d0da
 // https://cs.android.com/android/platform/superproject/main/+/main:system/libbase/file.cpp;l=241-243;drc=61197364367c9e404c7da6900658f1b16c42d0da
 // The system will read init.rc file until EOF, whenever read() returns 0,
-// so we begin append ksu rc when we meet EOF.
+// Append the supplied supplement only when the original read reaches EOF.
 
 static ssize_t read_proxy(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
     ssize_t ret = 0;
     size_t append_count;
-    if (ksu_rc_pos && ksu_rc_pos < ksu_rc_len)
-        goto append_ksu_rc;
-    if (ksu_rc_pos >= ksu_rc_len && module_rc_pos < module_rc_len)
+    if (module_rc_pos && module_rc_pos < module_rc_len)
         goto append_module_rc;
 
     ret = orig_read(file, buf, count, pos);
     if (ret != 0) {
         return ret;
     }
-    if (ksu_rc_pos >= ksu_rc_len && module_rc_pos >= module_rc_len) {
+    if (module_rc_pos >= module_rc_len) {
         return ret;
     }
     pr_info("read_proxy: orig read finished, start append rc\n");
-
-append_ksu_rc:
-    if (ksu_rc_pos < ksu_rc_len) {
-        append_count = ksu_rc_len - ksu_rc_pos;
-        if (append_count > count - ret)
-            append_count = count - ret;
-        // copy_to_user returns the number of bytes that could not be copied
-        if (copy_to_user(buf + ret, ksu_rc + ksu_rc_pos, append_count)) {
-            pr_info("read_proxy: append error, totally appended %ld\n", ksu_rc_pos);
-            return ret ? ret : -EFAULT;
-        }
-        pr_info("read_proxy: append static %zu\n", append_count);
-        ksu_rc_pos += append_count;
-        ret += append_count;
-        if (ksu_rc_pos == ksu_rc_len)
-            pr_info("read_proxy: static append done\n");
-    }
 
 append_module_rc:
     if (module_rc_pos < module_rc_len && (size_t)ret < count) {
@@ -327,35 +209,17 @@ static ssize_t read_iter_proxy(struct kiocb *iocb, struct iov_iter *to)
 {
     ssize_t ret = 0;
     size_t append_count;
-    if (ksu_rc_pos && ksu_rc_pos < ksu_rc_len)
-        goto append_ksu_rc;
-    if (ksu_rc_pos >= ksu_rc_len && module_rc_pos < module_rc_len)
+    if (module_rc_pos && module_rc_pos < module_rc_len)
         goto append_module_rc;
 
     ret = orig_read_iter(iocb, to);
     if (ret != 0) {
         return ret;
     }
-    if (ksu_rc_pos >= ksu_rc_len && module_rc_pos >= module_rc_len) {
+    if (module_rc_pos >= module_rc_len) {
         return ret;
     }
     pr_info("read_iter_proxy: orig read finished, start append rc\n");
-
-append_ksu_rc:
-    if (ksu_rc_pos < ksu_rc_len) {
-        // copy_to_iter returns the number of bytes successfully copied
-        append_count = copy_to_iter(ksu_rc + ksu_rc_pos, ksu_rc_len - ksu_rc_pos, to);
-        if (!append_count) {
-            pr_info("read_iter_proxy: append error, totally appended %ld\n", ksu_rc_pos);
-            return ret ? ret : (iov_iter_count(to) ? -EFAULT : 0);
-        }
-        pr_info("read_iter_proxy: append static %zu\n", append_count);
-        ksu_rc_pos += append_count;
-        ret += append_count;
-        if (ksu_rc_pos == ksu_rc_len) {
-            pr_info("read_iter_proxy: static append done\n");
-        }
-    }
 
 append_module_rc:
     if (module_rc_pos < module_rc_len) {
@@ -377,7 +241,7 @@ append_module_rc:
 
 static bool is_init_rc(struct file *fp)
 {
-    if (strcmp(current->comm, "init")) {
+    if (current->pid != 1 || strcmp(current->comm, "init")) {
         // we are only interest in `init` process
         return false;
     }
@@ -415,7 +279,7 @@ static int ksu_install_rc_hook(struct file *file)
     rc_hooked = true;
     stop_init_rc_hook();
 
-    pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n", current->comm, ksu_rc_len, module_rc_len);
+    pr_info("read init.rc, supplement: %zu bytes\n", module_rc_len);
 
     // Now we need to proxy the read and modify the result!
     // But, we can not modify the file_operations directly, because it's in read-only memory.
@@ -446,51 +310,6 @@ static int ksu_handle_sys_read(unsigned int fd)
     return ret;
 }
 
-static unsigned int volumedown_pressed_count = 0;
-
-static bool is_volumedown_enough(unsigned int count)
-{
-    return count >= 3;
-}
-
-int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value)
-{
-    if (*type == EV_KEY && *code == KEY_VOLUMEDOWN) {
-        int val = *value;
-        pr_info("KEY_VOLUMEDOWN val: %d\n", val);
-        if (val) {
-            // key pressed, count it
-            volumedown_pressed_count += 1;
-            if (is_volumedown_enough(volumedown_pressed_count)) {
-                ksu_stop_input_hook_runtime();
-            }
-        }
-    }
-
-    return 0;
-}
-
-bool ksu_is_safe_mode()
-{
-    static bool safe_mode = false;
-    if (safe_mode) {
-        // don't need to check again, userspace may call multiple times
-        return true;
-    }
-
-    // stop hook first!
-    ksu_stop_input_hook_runtime();
-
-    pr_info("volumedown_pressed_count: %d\n", volumedown_pressed_count);
-    if (is_volumedown_enough(volumedown_pressed_count)) {
-        // pressed over 3 times
-        pr_info("KEY_VOLUMEDOWN pressed max times, safe mode detected!\n");
-        safe_mode = true;
-        return true;
-    }
-
-    return false;
-}
 
 static void ksu_execve_hook_esud_common(const char __user *filename_user, const char __user *const __user *argv_user)
 {
@@ -508,7 +327,7 @@ static void ksu_execve_hook_esud_common(const char __user *filename_user, const 
 
     memset(path, 0, sizeof(path));
     ret = strncpy_from_user(path, fn, 32);
-    if (ret < 0) {
+    if (ret < 0 || ret >= sizeof(path)) {
         pr_err("Access filename failed for execve_handler_pre\n");
         return;
     }
@@ -568,10 +387,10 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
     if (is_rc) {
         void __user *st_size_ptr = statbuf + offsetof(struct stat, st_size);
         long size, new_size;
-        size_t extra = ksu_rc_len + module_rc_len;
+        size_t extra = module_rc_len;
         if (!copy_from_user_nofault(&size, st_size_ptr, sizeof(long))) {
             new_size = size + extra;
-            pr_info("adding rc len: %ld -> %ld (static=%zu module=%zu)", size, new_size, ksu_rc_len, module_rc_len);
+            pr_info("adding rc supplement: %ld -> %ld", size, new_size);
             if (!copy_to_user_nofault(st_size_ptr, &new_size, sizeof(long))) {
                 pr_info("added rc len");
             } else {
@@ -587,27 +406,6 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
     return ret;
 }
 
-static int input_handle_event_handler_pre(struct kprobe *p, struct pt_regs *regs)
-{
-    unsigned int *type = (unsigned int *)&PT_REGS_PARM2(regs);
-    unsigned int *code = (unsigned int *)&PT_REGS_PARM3(regs);
-    int *value = (int *)&PT_REGS_CCALL_PARM4(regs);
-    return ksu_handle_input_handle_event(type, code, value);
-}
-
-static struct kprobe input_event_kp = {
-    .symbol_name = "input_event",
-    .pre_handler = input_handle_event_handler_pre,
-};
-
-static void do_stop_input_hook(struct work_struct *work)
-{
-    if (input_hook_registered) {
-        unregister_kprobe(&input_event_kp);
-        input_hook_registered = false;
-    }
-}
-
 static void stop_init_rc_hook()
 {
     int read_ret = ksu_syscall_table_unhook(__NR_read);
@@ -615,17 +413,6 @@ static void stop_init_rc_hook()
 
     if (!read_ret && !stat_ret)
         pr_info("unregister init_rc syscall hook\n");
-}
-
-void ksu_stop_input_hook_runtime(void)
-{
-    static bool input_hook_stopped = false;
-    if (input_hook_stopped) {
-        return;
-    }
-    input_hook_stopped = true;
-    bool ret = schedule_work(&stop_input_hook_work);
-    pr_info("unregister input kprobe: %d!\n", ret);
 }
 
 // esud: module support
@@ -640,10 +427,6 @@ int __init ksu_esud_init(void)
     if (ret)
         goto fail;
 
-    ret = register_kprobe(&input_event_kp);
-    pr_info("esud: input_event_kp: %d\n", ret);
-
-    input_hook_registered = !ret;
     return 0;
 fail:
     pr_err("esud: required init_rc hook installation failed: %d\n", ret);
@@ -658,11 +441,6 @@ void __exit ksu_esud_exit()
      */
     if (ksu_syscall_hooks_published())
         return;
-    cancel_work_sync(&stop_input_hook_work);
-    if (input_hook_registered) {
-        unregister_kprobe(&input_event_kp);
-        input_hook_registered = false;
-    }
 
     if (module_rc_buf) {
         free_module_rc();

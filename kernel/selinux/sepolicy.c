@@ -5,6 +5,13 @@
 #include "ss/policydb.h"
 #include "ss/services.h"
 #include <linux/gfp.h>
+#include <linux/lockdep.h>
+#include <linux/mutex.h>
+#include <linux/overflow.h>
+#include <linux/rcupdate.h>
+#include <linux/uaccess.h>
+#include "security.h"
+#include "uapi/supercall.h"
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/version.h>
@@ -901,6 +908,139 @@ void ksu_destroy_sepolicy(struct selinux_policy *pol)
     kfree(pol);
 }
 
+static int policy_capacity(struct policydb *db, size_t *capacity)
+{
+    size_t allowance;
+
+    if (check_mul_overflow((size_t)db->p_types.nprim, sizeof(u32) + sizeof(u64), &allowance) ||
+        check_add_overflow((size_t)db->len, allowance, capacity))
+        return -EOVERFLOW;
+    return 0;
+}
+
+static int serialize_policy(struct policydb *db, void **buffer, size_t *length)
+{
+    /* policydb_read adds self entries to type maps. Retain the existing
+     * per-type serialization allowance, including after type/rule mutation.
+     */
+    size_t capacity;
+    void *data;
+    struct policy_file fp;
+    int ret = policy_capacity(db, &capacity);
+
+    if (ret)
+        return ret;
+    data = vmalloc(capacity);
+    if (!data)
+        return -ENOMEM;
+    fp.data = data;
+    fp.len = capacity;
+    ret = policydb_write(db, &fp);
+    if (ret) {
+        pr_err("sepolicy: policydb_write: %d\n", ret);
+        kvfree(data);
+        return ret;
+    }
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+    /* Android's writer omits these live fields. The binary policy header
+     * stores little-endian config after magic, identifier and version.
+     * Share this fixup between duplication and the userspace live export.
+     */
+    {
+        const size_t config_offset = 20;
+        __le32 *config_ptr;
+        u32 config;
+
+        if (capacity - fp.len < config_offset + sizeof(*config_ptr)) {
+            kvfree(data);
+            return -EINVAL;
+        }
+        config_ptr = (__le32 *)((char *)data + config_offset);
+        config = le32_to_cpu(*config_ptr);
+        config &= ~(POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE |
+                    POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH);
+        if (db->android_netlink_route)
+            config |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
+        if (db->android_netlink_getneigh)
+            config |= POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH;
+        *config_ptr = cpu_to_le32(config);
+    }
+#endif
+    *buffer = data;
+    *length = capacity - fp.len;
+    return 0;
+}
+
+int ksu_update_policydb_len(struct policydb *db)
+{
+    void *data;
+    size_t length;
+    int ret = serialize_policy(db, &data, &length);
+
+    if (ret)
+        return ret;
+    db->len = length;
+    kvfree(data);
+    return 0;
+}
+
+int ksu_get_sepolicy(void __user *arg)
+{
+    struct esu_get_sepolicy_cmd cmd;
+    struct selinux_policy *pol;
+    void *data = NULL;
+    size_t capacity, length = 0;
+    bool query;
+    int ret;
+
+    if (copy_from_user(&cmd, arg, sizeof(cmd)))
+        return -EFAULT;
+    query = !cmd.ptr && !cmd.len;
+    if (!query && (!cmd.ptr || !cmd.len || cmd.len > ESU_POLICY_MAX_SIZE ||
+                   cmd.ptr != (unsigned long)cmd.ptr))
+        return -EINVAL;
+    if (!query && !access_ok(u64_to_user_ptr(cmd.ptr), (size_t)cmd.len))
+        return -EFAULT;
+
+    mutex_lock(&selinux_state.policy_mutex);
+    pol = rcu_dereference_protected(selinux_state.policy,
+                                   lockdep_is_held(&selinux_state.policy_mutex));
+    if (!pol) {
+        ret = -EAGAIN;
+        goto out_unlock;
+    }
+    ret = policy_capacity(&pol->policydb, &capacity);
+    if (ret)
+        goto out_unlock;
+    if (!capacity || capacity > ESU_POLICY_MAX_SIZE) {
+        ret = -E2BIG;
+        goto out_unlock;
+    }
+    if (query) {
+        cmd.len = capacity;
+        goto out_unlock;
+    }
+    if (cmd.len < capacity) {
+        ret = -ENOSPC;
+        goto out_unlock;
+    }
+    ret = serialize_policy(&pol->policydb, &data, &length);
+out_unlock:
+    mutex_unlock(&selinux_state.policy_mutex);
+    if (!ret && !query) {
+        if (!length || length > cmd.len)
+            ret = -EINVAL;
+        else if (copy_to_user(u64_to_user_ptr(cmd.ptr), data, length))
+            ret = -EFAULT;
+        else
+            cmd.len = length;
+    }
+    if (!ret && copy_to_user(arg, &cmd, sizeof(cmd)))
+        ret = -EFAULT;
+    kvfree(data);
+    return ret;
+}
+
 struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol)
 {
     int ret;
@@ -909,47 +1049,9 @@ struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol)
     void *data;
     struct policy_file fp;
 
-    // Some device policy db seems not marking type itself in type_attr_map_array
-    // policydb_read() adds each type to its own attribute map, so old_pol->policydb.len may be smaller
-    // preserve one ebitmap entry for this condition to avoid trigger -EINVAL
-    len = old_pol->policydb.len + (size_t)old_pol->policydb.p_types.nprim * (sizeof(u32) + sizeof(u64));
-
-    data = vmalloc(len);
-    if (!data) {
-        pr_err("alloc policy buffer len %zu\n", len);
-        ret = -ENOMEM;
-        goto out_free_data;
-    }
-
-    fp.data = data;
-    fp.len = len;
-
-    ret = policydb_write(&old_pol->policydb, &fp);
-    if (ret) {
-        pr_err("sepolicy: policydb_write: %d\n", ret);
-        goto out_free_data;
-    }
-    len -= fp.len;
-    // https://android.googlesource.com/kernel/common/+/35a7845718734ae638b85b420534cb859498dab6%5E%21
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-    // https://android-review.googlesource.com/c/kernel/common/+/3009995/11/security/selinux/ss/policydb.c
-    // fixup config
-    // 4*2+8+4
-    static const size_t kConfigOff = 20;
-    if (len >= kConfigOff + sizeof(u32)) {
-        u32 *config_ptr = (u32 *)((unsigned long)data + kConfigOff);
-        pr_info("old config: %u\n", *config_ptr);
-        if (old_pol->policydb.android_netlink_route) {
-            pr_info("adding POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE\n");
-            *config_ptr |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
-        }
-        if (old_pol->policydb.android_netlink_getneigh) {
-            pr_info("adding POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH\n");
-            *config_ptr |= POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH;
-        }
-        pr_info("new config: %u\n", *config_ptr);
-    }
-#endif
+    ret = serialize_policy(&old_pol->policydb, &data, &len);
+    if (ret)
+        return ERR_PTR(ret);
     new_pol = kmemdup(old_pol, sizeof(*old_pol), GFP_KERNEL);
     if (!new_pol) {
         ret = -ENOMEM;

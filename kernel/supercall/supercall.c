@@ -1,4 +1,5 @@
 #include <linux/anon_inodes.h>
+#include <linux/cred.h>
 #include <linux/err.h>
 #include <linux/fdtable.h>
 #include <linux/file.h>
@@ -52,7 +53,7 @@ int ksu_install_fd(void)
         return fd;
     }
 
-    filp = anon_inode_getfile("[esu]", &anon_esu_fops, NULL, O_RDWR);
+    filp = anon_inode_getfile(ESU_CONTROL_NAME, &anon_esu_fops, NULL, O_RDWR);
     if (IS_ERR(filp)) {
         pr_err("esu_install_fd: failed to create anon inode file\n");
         put_unused_fd(fd);
@@ -84,7 +85,8 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
     int magic1 = (int)PT_REGS_SYSCALL_PARM1(real_regs);
     int magic2 = (int)PT_REGS_PARM2(real_regs);
 
-    if (magic1 == ESU_INSTALL_MAGIC1 && magic2 == ESU_INSTALL_MAGIC2) {
+    if (magic1 == ESU_INSTALL_MAGIC1 && magic2 == ESU_INSTALL_MAGIC2 &&
+        uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
         struct ksu_install_fd_tw *tw;
         unsigned long arg4 = (unsigned long)PT_REGS_SYSCALL_PARM4(real_regs);
 
@@ -109,7 +111,7 @@ static struct kprobe reboot_kp = {
     .pre_handler = reboot_handler_pre,
 };
 
-void __init ksu_supercalls_init(void)
+int __init ksu_supercalls_init(void)
 {
     int rc;
 
@@ -121,10 +123,10 @@ void __init ksu_supercalls_init(void)
     } else {
         pr_info("reboot kprobe registered successfully\n");
     }
+    return rc;
 }
 
 void ksu_supercalls_exit(void)
 {
     unregister_kprobe(&reboot_kp);
-    ksu_supercall_cleanup_state();
 }

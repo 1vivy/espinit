@@ -1,5 +1,5 @@
-#include <linux/cred.h>
 #include <linux/export.h>
+#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/kobject.h>
 #include <linux/module.h>
@@ -8,15 +8,11 @@
 #include <linux/workqueue.h>
 #include <linux/moduleparam.h>
 
-#include "policy/feature.h"
 #include "klog.h" // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
-#include "hook/lsm_hook.h"
 #include "runtime/esud.h"
 #include "selinux/selinux.h"
 #include "hook/syscall_hook.h"
-#include "feature/selinux_hide.h"
-#include "infra/file_wrapper.h"
 #include "infra/symbol_resolver.h"
 #include "supercall/supercall.h"
 
@@ -63,7 +59,6 @@ __attribute__((naked)) int __init esu_init_early(void)
 #define NEED_OWN_STACKPROTECTOR 0
 #endif
 
-struct cred *ksu_cred;
 
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
@@ -106,22 +101,16 @@ int __init esu_init(void)
     pr_alert("*************************************************************");
 #endif
 
-    ksu_cred = prepare_creds();
-    if (!ksu_cred) {
-        pr_err("prepare cred failed!\n");
-        return -ENOSYS;
-    }
 
     ksu_init_symbol_resolver();
     /* Supporting state must survive a failed installation if any callback
      * has been exposed to another owner's saved-original chain.
      */
 
-    ksu_feature_init();
-    ksu_lsm_hook_init();
-    ksu_selinux_hide_init();
 
-    ksu_supercalls_init();
+    ret = ksu_supercalls_init();
+    if (ret)
+        return ret;
 
     ret = ksu_syscall_hook_init();
     if (ret)
@@ -133,14 +122,8 @@ int __init esu_init(void)
     if (ret)
         goto hook_failure;
 
-    ksu_file_wrapper_init();
     WRITE_ONCE(hooks_ready, true);
 
-#ifdef MODULE
-#ifndef CONFIG_KERNELESP_DEBUG
-    kobject_del(&THIS_MODULE->mkobj.kobj);
-#endif
-#endif
     return 0;
 
 hook_failure:
@@ -156,10 +139,6 @@ hook_failure:
         return 0;
     }
     ksu_supercalls_exit();
-    ksu_selinux_hide_exit();
-    ksu_lsm_hook_exit();
-    ksu_feature_exit();
-    put_cred(ksu_cred);
     return ret;
 }
 
@@ -180,12 +159,6 @@ void __exit esu_exit(void)
     // Wait for any in-flight RCU readers
     synchronize_rcu();
 
-    // Phase 2: Now safe to release data structures
-    ksu_selinux_hide_exit();
-    ksu_lsm_hook_exit();
-    ksu_feature_exit();
-
-    put_cred(ksu_cred);
 }
 
 #if NEED_OWN_STACKPROTECTOR
@@ -197,7 +170,7 @@ module_exit(esu_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("weishu");
-MODULE_DESCRIPTION("kernelesp early-boot substrate");
+MODULE_DESCRIPTION("kernelsu-esp init RC and policy helper");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 #else

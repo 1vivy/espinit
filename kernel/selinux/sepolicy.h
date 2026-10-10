@@ -6,6 +6,8 @@
 #include "ss/policydb.h"
 
 struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol);
+int ksu_update_policydb_len(struct policydb *db);
+int ksu_get_sepolicy(void __user *arg);
 
 void ksu_destroy_sepolicy(struct selinux_policy *orig);
 

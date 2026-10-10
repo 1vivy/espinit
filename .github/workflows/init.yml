@@ -1,108 +1,44 @@
-name: Build esuinit
-
+name: Build static ESP rdinit
 on:
   workflow_call:
-    inputs:
-      os:
-        required: false
-        type: string
-        default: ubuntu-latest
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ${{ inputs.os }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            arch: aarch64
+          - target: x86_64-linux-android
+            arch: x86_64
     steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-
-    - name: Setup rustup
-      run: |
-        rustup update stable
-        rustup target add aarch64-linux-android
-        rustup target add x86_64-linux-android
-
-    - uses: nttld/setup-ndk@v1
-      id: setup-ndk
-      with:
-        ndk-version: r29
-
-    - uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: . -> target
-        cache-targets: false
-
-    - name: Build esuinit and phone storage helpers
-      env:
-        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      run: |
-        source .github/scripts/setup-rust-build.sh aarch64-linux-android 26
-        BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-aarch64-android.a"
-        test -f "$BUILTINS"
-        export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo build --locked --package esuinit --package thin-activate --package ota-stage --package fw-views --package avb-graft-cli --target=aarch64-linux-android --release
-
-    - name: Upload esuinit artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: esuinit-aarch64
-        path: |
-          target/aarch64-linux-android/release/esuinit
-          target/aarch64-linux-android/release/thin-activate
-          target/aarch64-linux-android/release/ota-stage
-          target/aarch64-linux-android/release/fw-views
-          target/aarch64-linux-android/release/avb-graft
-
-    - name: Build esuinit x64
-      env:
-        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      run: |
-        source .github/scripts/setup-rust-build.sh x86_64-linux-android 26
-        BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-x86_64-android.a"
-        test -f "$BUILTINS"
-        export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo build --package esuinit --target=x86_64-linux-android --release
-
-    - name: Upload x64 esuinit artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: esuinit-x86_64
-        path: target/x86_64-linux-android/release/esuinit
-
-  build-riscv64:
-    runs-on: ${{ inputs.os }}
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-
-    - name: Setup Rust
-      run: rustup toolchain install nightly-2026-09-23 --profile minimal --component rust-src
-
-    - uses: nttld/setup-ndk@v1
-      id: setup-ndk
-      with:
-        ndk-version: r29
-
-    - uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: . -> target
-        cache-targets: false
-
-    - name: Build RISC-V esuinit
-      env:
-        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      run: |
-        source .github/scripts/setup-rust-build.sh riscv64-linux-android 35
-        BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-riscv64-android.a"
-        export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-        cargo +nightly-2026-09-23 build --config .github/riscv64-cargo.toml -Z build-std=std,panic_abort --package esuinit --target=riscv64-linux-android --release
-
-    - name: Upload RISC-V esuinit artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: esuinit-riscv64
-        path: target/riscv64-linux-android/release/esuinit
+      - uses: actions/checkout@v7
+      - name: Install Rust target
+        run: |
+          rustup update stable
+          rustup target add '${{ matrix.target }}'
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r29
+      - uses: Swatinem/rust-cache@v2
+      - name: Build static rdinit
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          source .github/scripts/setup-rust-build.sh '${{ matrix.target }}' 26
+          BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-${{ matrix.arch }}-android.a"
+          test -f "$BUILTINS"
+          export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
+          cargo build --locked --package esuinit --target '${{ matrix.target }}' --release
+          mkdir -p 'out/rdinit/${{ matrix.arch }}'
+          cp 'target/${{ matrix.target }}/release/esuinit' 'out/rdinit/${{ matrix.arch }}/ksuinit'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-esp-rdinit-${{ matrix.arch }}
+          path: out/rdinit/${{ matrix.arch }}/ksuinit
+          if-no-files-found: error

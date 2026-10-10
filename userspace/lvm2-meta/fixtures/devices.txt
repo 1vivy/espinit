@@ -1,4 +1,0 @@
-pv0 7:0
-pool_tdata 252:3
-pool_tmeta 252:2
-pool-tpool 252:4

@@ -2,73 +2,25 @@ name: Build
 
 on:
   push:
-    branches: [ "main", "dev", "ci" ]
-    paths:
-      - '.github/workflows/build.yml'
-      - '.github/workflows/build-lkm.yml'
-      - '.github/workflows/ddk-lkm.yml'
-      - '.github/workflows/daemon.yml'
-      - '.github/workflows/daemon-extra.yml'
-      - '.github/workflows/init.yml'
-      - '.github/scripts/setup-rust-build.sh'
-      - '.github/riscv64-cargo.toml'
-      - 'kernel/**'
-      - 'userspace/**'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
+    branches: [main, dev, ci]
+    paths: ['.github/**', 'kernel/**', 'uapi/**', 'userspace/**', 'scripts/**', 'patches/**', 'vendor/Magisk', 'Cargo.toml', 'Cargo.lock']
   pull_request:
-    branches: [ "main", "dev" ]
-    paths:
-      - '.github/workflows/build.yml'
-      - '.github/workflows/build-lkm.yml'
-      - '.github/workflows/ddk-lkm.yml'
-      - '.github/workflows/daemon.yml'
-      - '.github/workflows/daemon-extra.yml'
-      - '.github/workflows/init.yml'
-      - '.github/scripts/setup-rust-build.sh'
-      - '.github/riscv64-cargo.toml'
-      - 'kernel/**'
-      - 'userspace/**'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
+    branches: [main, dev]
+    paths: ['.github/**', 'kernel/**', 'uapi/**', 'userspace/**', 'scripts/**', 'patches/**', 'vendor/Magisk', 'Cargo.toml', 'Cargo.lock']
   workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  build-lkm:
-    uses: ./.github/workflows/build-lkm.yml
-
   build-init:
     uses: ./.github/workflows/init.yml
-
-  build-daemon:
+  build-native:
     strategy:
       matrix:
-        include:
-          - target: aarch64-linux-android
-          - target: x86_64-linux-android
-          - target: riscv64-linux-android
+        abi: [arm64-v8a, x86_64]
     uses: ./.github/workflows/daemon.yml
     with:
-      target: ${{ matrix.target }}
-
-  build-daemon-extra:
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-pc-windows-gnu # windows pc
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin # Intel mac
-            os: macos-latest
-          - target: aarch64-apple-darwin # M chip mac
-            os: macos-latest
-          - target: aarch64-unknown-linux-musl # arm64 Linux
-            os: ubuntu-latest
-          - target: x86_64-unknown-linux-musl # x86 Linux
-            os: ubuntu-latest
+      abi: ${{ matrix.abi }}
+  build-host:
     uses: ./.github/workflows/daemon-extra.yml
-    with:
-      target: ${{ matrix.target }}
-      os: ${{ matrix.os }}

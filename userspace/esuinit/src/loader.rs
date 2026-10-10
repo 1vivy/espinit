@@ -639,9 +639,41 @@ pub fn resolve_payload_file(
 /// first-stage init has created any /dev/block/by-name symlinks.
 pub fn substitute_by_name_params(params: &str) -> std::io::Result<String> {
     substitute_params(params, |name| {
-        let device = esu_platform::block::partition_by_name(name)?;
-        Ok((rustix::fs::major(device), rustix::fs::minor(device)))
+        let sources = fs::read_dir("/sys/class/block")?
+            .map(|entry| {
+                let path = entry?.path();
+                Ok((
+                    fs::read_to_string(path.join("uevent"))?,
+                    fs::read_to_string(path.join("dev"))?,
+                ))
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        partition_in(name, &sources)
     })
+}
+
+fn partition_in(name: &str, sources: &[(String, String)]) -> std::io::Result<(u32, u32)> {
+    let mut selected = None;
+    for (event, value) in sources {
+        if !event
+            .lines()
+            .any(|line| line.strip_prefix("PARTNAME=") == Some(name))
+        {
+            continue;
+        }
+        let (major, minor) = value
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| std::io::Error::other("invalid sysfs dev_t"))?;
+        let pair = (
+            major.parse().map_err(std::io::Error::other)?,
+            minor.parse().map_err(std::io::Error::other)?,
+        );
+        if selected.replace(pair).is_some() {
+            return Err(std::io::Error::other("ambiguous partition name"));
+        }
+    }
+    selected.ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "partition not enumerated"))
 }
 
 fn substitute_params(
@@ -772,15 +804,13 @@ mod tests {
             ("DEVTYPE=partition\nPARTNAME=esp\n".into(), "8:16\n".into()),
         ];
         let value = substitute_params("dev=by-name:bdsvars other=by-name:esp", |name| {
-            let device = esu_platform::block::partition_in(name, &sources)?;
-            Ok((rustix::fs::major(device), rustix::fs::minor(device)))
+            partition_in(name, &sources)
         })
         .unwrap();
         assert_eq!(value, "dev=259:3 other=8:16");
         assert!(
             substitute_params("dev=by-name:missing", |name| {
-                let device = esu_platform::block::partition_in(name, &sources)?;
-                Ok((rustix::fs::major(device), rustix::fs::minor(device)))
+                partition_in(name, &sources)
             })
             .is_err()
         );

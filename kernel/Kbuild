@@ -1,49 +1,40 @@
-kernelesp-objs := core/init.o
-
-kernelesp-objs += feature/kernel_umount.o
-kernelesp-objs += feature/selinux_hide.o
-
-kernelesp-objs += hook/lsm_hook.o
-kernelesp-objs += hook/setuid_hook.o
-kernelesp-objs += hook/syscall_event_bridge.o
-kernelesp-objs += hook/syscall_hook_manager.o
-kernelesp-objs += hook/syscall_hook.o
+kernelsu-esp-objs := core/init.o
+kernelsu-esp-objs += hook/syscall_event_bridge.o
+kernelsu-esp-objs += hook/syscall_hook_manager.o
+kernelsu-esp-objs += hook/syscall_hook.o
 ifeq ($(CONFIG_ARM64),y)
-kernelesp-objs += hook/arm64/patch_memory.o
-kernelesp-objs += hook/arm64/syscall_hook.o
+kernelsu-esp-objs += hook/arm64/patch_memory.o
+kernelsu-esp-objs += hook/arm64/syscall_hook.o
 else ifeq ($(CONFIG_X86_64),y)
-kernelesp-objs += hook/x86_64/patch_memory.o
-kernelesp-objs += hook/x86_64/syscall_hook.o
+kernelsu-esp-objs += hook/x86_64/patch_memory.o
+kernelsu-esp-objs += hook/x86_64/syscall_hook.o
 else ifeq ($(CONFIG_RISCV),y)
-kernelesp-objs += hook/riscv64/patch_memory.o
-kernelesp-objs += hook/riscv64/syscall_hook.o
+kernelsu-esp-objs += hook/riscv64/patch_memory.o
+kernelsu-esp-objs += hook/riscv64/syscall_hook.o
 endif
 
-kernelesp-objs += infra/file_wrapper.o
-kernelesp-objs += infra/io_cred.o
-kernelesp-objs += infra/symbol_resolver.o
-
-kernelesp-objs += policy/feature.o
-
-kernelesp-objs += runtime/boot_event.o
-kernelesp-objs += runtime/esud_integration.o
-
-kernelesp-objs += selinux/selinux.o
-kernelesp-objs += selinux/rules.o
-kernelesp-objs += selinux/sepolicy.o
-
-kernelesp-objs += supercall/dispatch.o
-kernelesp-objs += supercall/perm.o
-kernelesp-objs += supercall/supercall.o
+kernelsu-esp-objs += infra/symbol_resolver.o
+kernelsu-esp-objs += runtime/esud_integration.o
+kernelsu-esp-objs += selinux/selinux.o
+kernelsu-esp-objs += selinux/rules.o
+kernelsu-esp-objs += selinux/sepolicy.o
+kernelsu-esp-objs += supercall/dispatch.o
+kernelsu-esp-objs += supercall/perm.o
+kernelsu-esp-objs += supercall/supercall.o
 
 ifdef KBUILD_EXTMOD
 ifeq ($(CONFIG_KERNELESP_DEBUG),y)
 ccflags-y += -DCONFIG_KERNELESP_DEBUG=1
 endif
-ifeq ($(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER),y)
+# Supported external x86 ACK/DDK lanes use the hardened dispatcher adaptation.
+# The generic module builder need not know this helper's Kconfig symbols.
+# Explicit n remains available for a kernel with the source-side bypass patch.
+ifeq ($(CONFIG_X86_64),y)
+ifneq ($(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER),n)
 ccflags-y += -DCONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=1
 endif
 endif
+endif # KBUILD_EXTMOD
 
 ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
 ccflags-y += -I$(objtree)/security/selinux -include $(srctree)/include/uapi/asm-generic/errno.h
@@ -64,7 +55,11 @@ endif
 
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
 
-obj-$(CONFIG_KERNELESP) += kernelesp.o
+ifdef KBUILD_EXTMOD
+obj-m += kernelsu-esp.o
+else
+obj-$(CONFIG_KERNELESP) += kernelsu-esp.o
+endif
 
 MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 

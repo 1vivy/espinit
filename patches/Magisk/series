@@ -1,0 +1,14 @@
+# Pristine vendor/Magisk: e8915d9db15f5aae93973ffe65068e34df375a6a
+# scripts/magisk.py applies exact hunk positions and bytes, never fuzz/offset.
+# Native-only product: upstream SU authorization is retained, not bypassed.
+# ESP runtime owns admission, valued flags, policy preparation and stage scripts;
+# native core owns serialized control and the single post-fs magic mount.
+0001-native-product-namespace.patch
+0002-serialized-runtime-and-magic-mount.patch
+0003-product-policy-and-labels.patch
+0004-runtime-dependency-lock.patch
+0005-policy-file-open-errors.patch
+0006-runtime-policy-operations.patch
+0007-policy-write-errors.patch
+0008-owned-filesystem-policy.patch
+0009-early-daemon-errors.patch

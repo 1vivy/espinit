@@ -1,6 +1,0 @@
-id=boot-hal
-name=ESP Boot HAL
-version=1
-versionCode=1
-author=ESU
-description=generic-bootctl boot HAL with the esu bdsvars efivarfs backend

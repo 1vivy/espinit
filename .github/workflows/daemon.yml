@@ -1,8 +1,8 @@
-name: Build esud
+name: Build Magisk-derived ESP userspace
 on:
   workflow_call:
     inputs:
-      target:
+      abi:
         required: true
         type: string
 
@@ -12,44 +12,24 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: ${{ github.workspace }}/.android-sdk
     steps:
-    - uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-
-    - name: Setup rustup
-      run: |
-        if [ "${{ inputs.target }}" = riscv64-linux-android ]; then
-          rustup toolchain install nightly-2026-09-23 --profile minimal --component rust-src
-        else
-          rustup update stable
-          rustup target add ${{ inputs.target }}
-        fi
-
-    - uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: . -> target
-        cache-targets: false
-
-    - uses: nttld/setup-ndk@v1
-      id: setup-ndk
-      with:
-        ndk-version: r29
-
-    - name: Build esud
-      env:
-        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      run: |
-        if [ "${{ inputs.target }}" = riscv64-linux-android ]; then
-          source .github/scripts/setup-rust-build.sh riscv64-linux-android 35
-          cargo +nightly-2026-09-23 build --config .github/riscv64-cargo.toml -Z build-std=std,panic_abort --package esud --target "$TRIPLE" --release
-        else
-          source .github/scripts/setup-rust-build.sh ${{ inputs.target }} 26
-          cargo build --package esud --target "$TRIPLE" --release
-        fi
-
-    - name: Upload esud artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: esud-${{ inputs.target }}
-        path: target/${{ inputs.target }}/release/esud
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Provision pinned upstream ONDK
+        run: |
+          mkdir -p "$ANDROID_HOME/ndk"
+          python3 vendor/Magisk/build.py ndk
+      - name: Materialize exact product patches
+        run: python3 scripts/magisk.py materialize --init-dependencies
+      - name: Build native daemon and policy tool
+        run: python3 scripts/magisk.py build --ndk "$ANDROID_HOME/ndk/magisk" --abi '${{ inputs.abi }}'
+      - name: Check source materialization remains exact
+        run: python3 scripts/magisk.py materialize --check
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernelsu-esp-native-${{ inputs.abi }}
+          path: out/native/${{ inputs.abi }}/bin/
+          if-no-files-found: error

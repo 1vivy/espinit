@@ -1,5 +1,9 @@
 """Synthetic ELF admission contracts; no compiler or checked-in binaries."""
 import json
+import contextlib
+import io
+import subprocess
+import sys
 import struct
 import tempfile
 import unittest
@@ -33,8 +37,11 @@ def elf_file(sections: Mapping[str, bytes], symbols: Iterable[tuple[str, int]], 
     body.extend(names)
     string_index = list(contents).index(".strtab") + 2
     for name, data in contents.items():
-        typ = 2 if name == ".symtab" else 3 if name == ".strtab" else 1
-        headers.append(struct.pack("<IIQQQQIIQQ", offsets[name], typ, 0, 0, len(body), len(data), string_index if typ == 2 else 0, 1 if typ == 2 else 0, 8, 24 if typ == 2 else 0))
+        typ = 2 if name == ".symtab" else 3 if name == ".strtab" else 4 if name.startswith(".rela.") else 1
+        link = string_index if typ == 2 else list(contents).index(".symtab") + 2 if typ == 4 else 0
+        info = 1 if typ == 2 else list(contents).index(name[5:]) + 2 if typ == 4 else 0
+        flags = 6 if name == ".text" else 0
+        headers.append(struct.pack("<IIQQQQIIQQ", offsets[name], typ, flags, 0, len(body), len(data), link, info, 8, 24 if typ in (2, 4) else 0))
         body.extend(data)
     struct.pack_into("<Q", body, 40, len(body))
     struct.pack_into("<HHH", body, 52, 64, 0, 0)
@@ -104,6 +111,24 @@ class KmiModuleCompatibility(unittest.TestCase):
         with self.assertRaisesRegex(compat.CompatibilityError, "neither or both"):
             self.verify(module_file())
 
+    def test_x86_loaded_relocations_reject_got_but_ignore_debug(self):
+        extra = {".modinfo": f"name=gpt\0vermagic=release {X86_64_FLAGS}\0".encode(),
+                 ".text": bytes(8), ".debug_info": bytes(8),
+                 ".rela.debug_info": struct.pack("<QQq", 0, (1 << 32) | 9, 0)}
+        for kind in (0, 1, 2, 4, 10, 11, 24):
+            with self.subTest(kind=kind):
+                extra[".rela.text"] = struct.pack("<QQq", 0, (1 << 32) | kind, 0)
+                self.assertEqual(self.verify(module_file(extra=extra, machine=62)),
+                                 {"versioned": 2, "kallsyms": ["private"]})
+        for kind in (9, 41, 42):
+            with self.subTest(kind=kind), self.assertRaisesRegex(
+                    compat.CompatibilityError, f"unsupported x86_64 type {kind} in .rela.text"):
+                extra[".rela.text"] = struct.pack("<QQq", 0, (1 << 32) | kind, 0)
+                self.verify(module_file(extra=extra, machine=62))
+        extra[".rela.text"] = bytes(23)
+        with self.assertRaisesRegex(compat.CompatibilityError, "malformed x86_64 RELA"):
+            self.verify(module_file(extra=extra, machine=62))
+
     def test_extended_versions_and_coexisting_tables(self):
         for end in (b"\0", b"\0\0"):
             extra = {"__version_ext_names": b"module_layout\0known" + end,
@@ -130,10 +155,86 @@ class KmiModuleCompatibility(unittest.TestCase):
         receipt = compat.provenance(self.output, self.module, identity, imports)
         self.assertEqual(set(receipt), {"schema_version", "kmi", "kmi_out_inputs", "module_sha256", "imports"})
         compat.receipt_path(self.module).write_text(json.dumps(receipt))
-        self.assertEqual(len(compat.verify_payload(self.output, [self.module])), 1)
+        self.assertEqual(len(compat.verify_payload(self.output, [self.module], "android16-6.12", 6, "aarch64")), 1)
         (self.output / "System.map").write_text("0000000000000001 T private\n0000000000000002 T extra\n")
         with self.assertRaisesRegex(compat.CompatibilityError, "stale or mismatched"):
-            compat.verify_payload(self.output, [self.module])
+            compat.verify_payload(self.output, [self.module], "android16-6.12", 6, "aarch64")
+
+    def test_explicit_identity_is_not_generation_six_only(self):
+        source = self.root / "source"
+        source.mkdir()
+        (source / "build.config.constants").write_text("BRANCH=android15-6.6\nKMI_GENERATION=9\n")
+        self.assertEqual(compat.kmi_identity(source, "android15-6.6", 9),
+                         {"branch": "android15-6.6", "generation": 9})
+        with self.assertRaisesRegex(compat.CompatibilityError, "generation mismatch"):
+            compat.kmi_identity(source, "android15-6.6", 6)
+        with self.assertRaisesRegex(compat.CompatibilityError, "source branch"):
+            compat.kmi_identity(source, "android16-6.12", 9)
+        with self.assertRaisesRegex(compat.CompatibilityError, "exact ACK branch"):
+            compat.kmi_identity(source, "android15", 9)
+
+    def test_legacy_and_bazel_identity_reject_conflicting_sources(self):
+        for index, (name, branch, generation) in enumerate((
+                ("build.config.common", "android12-5.10", 9),
+                ("bazel/constants.scl", "android17-6.18", 5))):
+            with self.subTest(name=name):
+                source = self.root / str(index)
+                identity = source / name
+                identity.parent.mkdir(parents=True)
+                identity.write_text(f'BRANCH="{branch}"\nKMI_GENERATION={generation}\n')
+                self.assertEqual(compat.kmi_identity(source, branch, generation),
+                                 {"branch": branch, "generation": generation})
+                constants = source / "build.config.constants"
+                constants.write_text(f"KMI_GENERATION={generation + 1}\n")
+                with self.assertRaisesRegex(compat.CompatibilityError, "generation"):
+                    compat.kmi_identity(source, branch, generation)
+                constants.write_text(f"KMI_GENERATION={generation}\nBRANCH=android99-9.9\n")
+                with self.assertRaisesRegex(compat.CompatibilityError, "source branch"):
+                    compat.kmi_identity(source, branch, generation)
+
+    def test_hyphenated_artifact_and_explicit_architecture(self):
+        self.module.write_bytes(module_file("dm_thin_pool"))
+        compat.verify_module(self.module, "dm-thin-pool", self.output, "aarch64")
+        with self.assertRaisesRegex(compat.CompatibilityError, "requested architecture"):
+            compat.verify_module(self.module, "dm-thin-pool", self.output, "x86_64")
+
+    def test_receipt_rejects_wrong_explicit_identity(self):
+        imports = self.verify(module_file())
+        identity = {"branch": "android15-6.6", "generation": 9}
+        compat.receipt_path(self.module).write_text(json.dumps(
+            compat.provenance(self.output, self.module, identity, imports)))
+        compat.verify_payload(self.output, [self.module], "android15-6.6", 9, "aarch64")
+        with self.assertRaisesRegex(compat.CompatibilityError, "receipt identity"):
+            compat.verify_payload(self.output, [self.module], "android15-6.6", 8, "aarch64")
+
+    def test_success_exit_with_objtool_diagnostic_is_rejected_and_logged(self):
+        log = self.root / "module.build.log"
+        for diagnostic in ("warning: objtool: naked return",
+                           "warning: objtool: indirect call",
+                           "warning: objtool: data relocation to !ENDBR",
+                           "objtool: error: invalid instruction"):
+            with self.subTest(diagnostic=diagnostic), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(compat.CompatibilityError, "rejects module admission"):
+                    compat.run_kbuild([sys.executable, "-c", f"print({diagnostic!r})"], {}, log)
+                self.assertIn(diagnostic, log.read_text())
+
+    def test_private_modpost_warning_is_not_suppressed_or_rejected(self):
+        log = self.root / "module.build.log"
+        diagnostic = 'WARNING: modpost: "private_symbol" undefined!'
+        with contextlib.redirect_stderr(io.StringIO()):
+            compat.run_kbuild([sys.executable, "-c", f"print({diagnostic!r})"], {}, log)
+        self.assertIn(diagnostic, log.read_text())
+
+    def test_stream_boundary_and_nonzero_build_keep_logs(self):
+        log = self.root / "module.build.log"
+        diagnostic = "x" * 65530 + "warning: objtool: indirect jump"
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(compat.CompatibilityError, "objtool"):
+                compat.run_kbuild([sys.executable, "-c", f"print({diagnostic!r})"], {}, log)
+            with self.assertRaises(subprocess.CalledProcessError):
+                compat.run_kbuild([sys.executable, "-c", "print('compiler error'); raise SystemExit(2)"], {}, log, append=True)
+        self.assertIn(diagnostic, log.read_text())
+        self.assertIn("compiler error", log.read_text())
 
 if __name__ == "__main__":
     unittest.main()

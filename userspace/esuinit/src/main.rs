@@ -1,49 +1,81 @@
 #![cfg_attr(not(test), no_main)]
 
-#[cfg(not(test))]
-use std::io::Write;
-
-#[cfg(not(test))]
-use esuinit::{handoff, init, receipt};
-
-/// PID-1 entry point.
-///
-/// The early managed boot runs first, and only as process 1: any other caller
-/// gets a nonzero exit status immediately, without touching the platform. As
-/// PID 1, any failure stops the handoff, persists a bounded receipt, and enters
-/// the fatal-boot stop path; the real init is never executed after an init
-/// error. Both fatal paths record the receipt and then reboot and park PID 1;
-/// a classified failure also records the one-shot bootloader request in the
-/// misc BCB, so the next ordinary restart is observable through Surfacer.
-/// On success the stock `/init` is executed with the original `argv[1..]` and
-/// `envp` and `argv[0] = "/init"`, preserving PID 1 and the init the kernel
-/// would have run.
+/// Same binary is PID1 rdinit, the init-context reconstruction tool, and the
+/// root-only ELF module loader tool. No invocation starts another daemon.
 ///
 /// # Safety
-/// Called by the kernel as the process entry point.
+/// argc/argv/envp are the C process entry vectors supplied by the runtime.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
-    if !rustix::process::getpid().is_init() {
-        // Not the boot init: report the usage error and return instead of
-        // rebooting the machine or parking the caller. Kernel logging is not
-        // set up yet, so this goes to stderr, best-effort.
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "esu: must run as process 1; refusing to continue"
-        );
+    // no_main bypasses Rust's argv initialization on static bionic. Read the
+    // supplied C vectors directly; handoff still uses the original raw bytes.
+    if argc < 1 || argv.is_null() {
         return 1;
     }
-
-    let mut state = receipt::ReceiptState::default();
-
-    if let Err(failure) = init::run(&mut state) {
-        init::fatal_boot_classified(&failure, || receipt::record(&mut state, &failure));
+    let args = (0..argc as usize)
+        .map(|index| {
+            unsafe { std::ffi::CStr::from_ptr((*argv.add(index)).cast()) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("--load-module") {
+        let load = (|| -> anyhow::Result<()> {
+            esp_runtime::fsutil::root_only()?;
+            anyhow::ensure!(
+                args.len() >= 3,
+                "usage: esuinit --load-module /absolute/file.ko [key=value ...]"
+            );
+            let path = std::path::Path::new(&args[2]);
+            anyhow::ensure!(path.is_absolute(), "module path must be absolute");
+            esp_runtime::fsutil::regular(path)?;
+            let entry = esuinit::config::ModuleEntry {
+                name: path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("module")
+                    .to_owned(),
+                path: args[2].clone(),
+                params: args[3..].join(" "),
+            };
+            esuinit::loader::load_managed_module(path, &entry)?;
+            Ok(())
+        })();
+        return match load {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error:#}");
+                1
+            }
+        };
     }
-
-    if let Err(failure) = unsafe { handoff::exec_real_init(argc, argv, envp) } {
-        init::fatal_boot_classified(&failure, || receipt::record(&mut state, &failure));
+    match esp_runtime::reconstruction_argument(&args) {
+        Ok(Some(descriptor)) => {
+            if unsafe { libc::geteuid() } != 0 {
+                eprintln!("reconstruction requires root");
+                return 1;
+            }
+            if let Err(error) = esp_runtime::bootstrap::reconstruct(descriptor) {
+                esp_runtime::fatal_boot(&format!("reconstruction: {error:#}"));
+            }
+            return 0;
+        }
+        Err(error) => {
+            eprintln!("{error:#}");
+            return 1;
+        }
+        Ok(None) => {}
     }
-
-    init::stop_boot()
+    if unsafe { libc::getpid() } != 1 {
+        eprintln!("esuinit must run as PID 1");
+        return 1;
+    }
+    if let Err(error) = esuinit::init::run() {
+        esp_runtime::fatal_boot(&format!("rdinit: {error:#}"));
+    }
+    if let Err(error) = unsafe { esuinit::handoff::exec_real_init(argc, argv, envp) } {
+        esp_runtime::fatal_boot(&format!("handoff: {error:#}"));
+    }
+    esp_runtime::fatal_boot("original init unexpectedly returned")
 }
