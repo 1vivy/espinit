@@ -2,9 +2,9 @@
 
 Egysk is the current core product: a separated Magisk-derived native userspace,
 an rdinit loader, and a small kernel helper for multi-OS Android. This README
-owns the remaining integration checklist. Core source/producer cutover is
-implemented; platform integration, hosted/local repository cutover and
-whole-device validation are not complete. Source builds alone do not establish
+owns the remaining integration checklist. Core and platform source/producer
+cutover, repository naming and complete release packaging are implemented.
+Whole-device validation is not complete. Source builds alone do not establish
 Android consumer behavior; existing real-device userspace evidence and source/RE
 remain valid inputs.
 
@@ -31,17 +31,18 @@ profiles or SU compatibility. Second-stage exec observation initializes the
 bounded base policy before `egysk`-labelled init commands run. The independent
 EFI backend brackets device I/O with its backing file's opener credentials.
 
-The local core checkout remains `../kernelesp`, with origin
-`https://github.com/1vivy/kernelesp.git`, until final rename. Current split sources
-are `../egysk-modules`, recovered full main
-`e985dfac4fea73751f5ef3865cdcc4122c8a4eb3` from
-`retired/kernelsu-esp-modules`, and `../egysk-lkms`, recovered main
-`75af27f5b2d79c2f11721069f8d1f739c4ac9f36` from
-`retired/kernelsu-esp-lkms`. Both retain complete histories. Their platform source
-is integrated; release and device checks remain below. Preserve KernelSU history,
-upstream licenses and pinned Magisk. The public core hosted rename to `1vivy/egysk` and
-creation/private push of the split repositories are explicitly authorized but
-not yet performed; authorization is not publication evidence.
+The core checkout is `../egysk`, with public origin
+`https://github.com/1vivy/egysk.git`. The private split origins are
+`1vivy/egysk-modules` and `1vivy/egysk-lkms`; their local checkouts have matching
+names and recovery remotes point to this core checkout. The split histories
+were recovered from main revisions `e985dfac4fea73751f5ef3865cdcc4122c8a4eb3`
+(`retired/kernelsu-esp-modules`) and `75af27f5b2d79c2f11721069f8d1f739c4ac9f36`
+(`retired/kernelsu-esp-lkms`). Upstream KernelSU history, licenses and the pinned
+Magisk submodule are preserved. Hosted names/privacy and the local move are
+verified. Both private histories and the public core/gobbl integration commits
+have been pushed with owner authorization, including their existing ancestry.
+Fresh mirrors of all four published main branches matched local commits,
+reachable object sets and complete trees; restored object integrity checks passed.
 
 ## Boot and storage contract
 
@@ -201,8 +202,8 @@ The in-place rename preserves inodes, xattrs, journals, module edits and state,
 including persisted `.esp-generation` and `esp-tmp` markers. It never traverses
 credential siblings such as `password_slots`, recursively relabels metadata,
 or transitions credential identity. The stopped-consumer `host`/peer credential
-identity transition remains next-phase platform work, not another product-root
-migration engine.
+transition is implemented separately in the shared installation registry and
+provisioning commands; it is not another product-root migration engine.
 
 ## Platform contracts retained through integration
 
@@ -338,7 +339,7 @@ Its read-only host CLI also checks produced archives at the lab boundary:
 # From ../gobbl; the optional final argument byte-matches the exact helper set.
 cargo run --release --locked -p takeover-contract --bin takeover-validate -- \
   /path/to/takeover.cpio.lz4 android16-6.12-6 aarch64 \
-  ../kernelesp/out/kmi/android16-6.12-6/aarch64
+  ../egysk/out/kmi/android16-6.12-6/aarch64
 ```
 
 Acceptance prints JSON with `"status":"accepted"`; wrong identity, mismatched
@@ -416,8 +417,10 @@ The actual Android Partformer CLI produced CRC-valid 512-byte and 4Kn GPT
 metadata. Actual offline maintenance preserved hardware namespace zero,
 slot-map ownership/mode/xattrs and unrelated payloads while publishing and
 retiring installation identities. These temporary-root checks do not establish
-phone credential behavior. Full Gatekeeper production, final platform packaging
-and whole-device integration remain separate checks.
+phone credential behavior. Pinned Gatekeeper builds and complete packages passed
+for arm64 and x86_64; both takeover archives passed exact-artifact admission.
+Real stock-image assembly and the lab's installer source admission also passed.
+Whole-device integration remains a separate check.
 
 ## Remaining Egysk integration checklist
 
@@ -429,14 +432,15 @@ deltas, not deployed replacements.
 This is the authoritative remaining-work list; the storage split draft retains
 ownership rationale, not a competing implementation plan.
 
-- [ ] **Repository/source cutover:** rename the public core repository to
-  `1vivy/egysk`, create/private-push `egysk-modules` and `egysk-lkms`, and perform
-  the final local core move. Reconcile Git remotes, submodule URLs/gitlinks,
-  shared-crate dependency URLs and revision locks, local checkout references
-  and imported generic-bootctl ownership. Preserve unique source/history.
+- [x] **Repository publication:** owner-authorized source pushes are complete;
+  all four published histories passed restore-and-compare.
+  - [x] Rename public core to `1vivy/egysk`, create both private repositories,
+    move the local core checkout, and reconcile origins/recovery remotes.
+    Upstream submodule identity/gitlink and imported generic-bootctl history
+    remain intact; shared-crate dependencies carry full verified revision pins.
   - [x] Recover authoritative split main revisions at `../egysk-modules` and
     `../egysk-lkms`, preserving complete histories (revisions listed above).
-- [ ] **Complete rename surface:** migrate downstream platform init/`rdinit`
+- [x] **Complete rename surface:** migrate downstream platform init/`rdinit`
   callers, module/tool packaging, config, environment, properties, services and
   SELinux consumers as one coordinated platform cutover. Update CI
   checkout paths, self-hosted runner labels, artifact upload/download patterns,
@@ -453,8 +457,8 @@ ownership rationale, not a competing implementation plan.
   - [x] Implement and wire explicit offline metadata/ESP product-subtree and
     journaled credential-identity transitions; no automatic boot-time adoption.
 
-- [ ] **Native integration and Egysk identity:** whole-device behavioral
-  validation and downstream packaging remain pending.
+- [x] **Native source integration and Egysk identity:** both native producers and
+  downstream packaging passed; whole-device behavior remains separately pending.
   - [x] Port the selected
     [Magisk additive-boundary design](../mockups/2026-10-09/magisk-selection/README.md)
     into one production three-patch series/materializer; link authoritative
@@ -472,22 +476,22 @@ ownership rationale, not a competing implementation plan.
   identity across reload. The actual CLI covers 512-byte and 4Kn metadata.
   Live partition discovery, projected I/O and hardware-wrapped crypto remain
   part of the final device integration check, not consequences of a build.
-- [ ] **Peer credential lifecycle:** integrate the
+- [x] **Peer credential source lifecycle:** integrate the
   [credential coordinator and pinned gatekeeperd patch](../mockups/2026-10-09/gobbl-credentials/README.md)
   with existing installation/update/wipe selection, `gobbl-runtime`, packaging,
   init dependencies and policy. System-only updates preserve identity; wipe/new
   install assigns a new one with explicit replacement, never namespace reuse.
   Follow Android GSI/DSU credential allocation, ownership and deletion lifecycle;
   module removal must not delete an installation's credentials. Gobbl itself
-  owns no slot. Integrate the UID/slot semantics, local fake users, PIN unlock
-  and biometric/vendor interactions needed for multi-OS Android.
+  owns no slot. UID/slot semantics and local fake-user bounds are implemented;
+  PIN unlock and biometric/vendor interactions remain final device checks.
   **Capacity decision (2026-10-10):** assume 16 Weaver slots for five Android
   installations, roughly three slots per installation. This is a planning
   assumption, not a measured device capacity or a per-ROM quota. Capacity
   discovery, quotas, reservation policy and generalized reclamation are out of
   scope; organic exhaustion remains Android/backend behavior, not a gobbl
   capacity-management responsibility. Do not mask the backend's failure.
-- [ ] **Cross-repository wiring:** reconcile changed native hooks, configfs ABI4
+- [x] **Cross-repository wiring:** reconcile changed native hooks, configfs ABI4
   and peer identities through schema v2, Surfacer, bootgen/provisioning,
   module/tool packaging, cpio/OTA assembly and gobbl-lab fixtures. Keep one
   module inventory and shared view, independent bootstrap inputs, exact KMI
@@ -495,7 +499,7 @@ ownership rationale, not a competing implementation plan.
   duplicate admission paths where callers still use them. Preserve LVM
   activation/configuration semantics, including the pinned release's
   `thin_check_executable` behavior.
-- [ ] **Release and bootstrap closure:** integrate the recovered platform
+- [x] **Release and bootstrap closure:** integrate the recovered platform
   packager source and consume renamed core/modules/LKM release inputs with
   their existing exact revision/KMI/artifact identities. The core's
   three-file helper set is not the platform OTA set: trace production of
@@ -507,7 +511,7 @@ ownership rationale, not a competing implementation plan.
   do not revive legacy `dev=by-name:bdsvars` examples. Keep ROM schema,
   bootstrap config, cpio receipt, OTA-set receipt and KMI receipt contracts
   distinct; a shared numeric schema version does not make them one schema.
-- [ ] **Bounded ownership refactors during integration:**
+- [x] **Bounded ownership refactors during integration:**
   - [x] Generate native constants from owned `product/identity.json`; consolidate
     runtime path/policy/tool/mount constants without depending on a materialized
     Magisk tree for standalone runtime/init builds.
@@ -528,7 +532,7 @@ ownership rationale, not a competing implementation plan.
     and state semantics; keep firmware storage and Android efivarfs separate.
   - [x] Migrate platform callers to the shared interfaces and exact gobbl
     revision locks; final artifact production is tracked separately above.
-- [ ] **Lifecycle and documentation consumers:** connect installation identity
+- [x] **Lifecycle and documentation consumers:** connect installation identity
   to install/update/wipe and existing ROM-retirement work, including the
   stopped-consumer `host` transition. Trace staged-letter boot, staged cpio,
   `Stage-<id>` and live DM reload through Surfacer and OTA/HAL callers. Keep
