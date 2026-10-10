@@ -84,7 +84,7 @@ diff --git a/native/src/core/bootstages.rs b/native/src/core/bootstages.rs
          // Reset the bootloop counter once we have boot-complete
          self.set_db_setting(DbEntryKey::BootloopCount, 0).log_ok();
  
-@@ -200,36 +225,107 @@
+@@ -200,36 +225,110 @@
          }
      }
  
@@ -138,7 +138,10 @@ diff --git a/native/src/core/bootstages.rs b/native/src/core/bootstages.rs
 +            egysk_runtime::run_stage(stage).unwrap_or_else(|error| {
 +                egysk_runtime::fatal_boot(&format!("stage {name}: {error:#}"))
 +            });
-+            state.product.complete(stage);
++            state.product.complete(stage, egysk_runtime::publish_stage)
++                .unwrap_or_else(|error| {
++                    egysk_runtime::fatal_boot(&format!("publish stage {name}: {error:#}"))
++                });
 +            0i32.encode(&mut client).log_ok();
 +            return;
 +        }

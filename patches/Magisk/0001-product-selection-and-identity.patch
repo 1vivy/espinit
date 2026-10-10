@@ -12,6 +12,14 @@ diff --git a/build.py b/build.py
  rust_targets = default_targets.copy()
  clean_targets = {"native", "cpp", "rust", "app"}
  
+@@ -140,6 +140,6 @@
+ def clean_elf():
+     ensure_cargo()
+     cargo_toml = Path("tools", "elf-cleaner", "Cargo.toml")
+-    cmds = ["cargo", "run", "--release", "--manifest-path", cargo_toml]
++    cmds = ["cargo", "run", "--locked", "--release", "--manifest-path", cargo_toml]
+     if args.verbose == 0:
+         cmds.append("-q")
 @@ -146,7 +146,7 @@
      elif args.verbose > 1:
          cmds.append("--verbose")
@@ -21,6 +29,14 @@ diff --git a/build.py b/build.py
      cmds.extend(glob.glob("native/out/*/magiskpolicy"))
      proc = execv(cmds)
      if proc.returncode != 0:
+@@ -230,6 +230,6 @@
+     os.chdir(Path("native", "src"))
+ 
+     # Start building the build commands
+-    cmds = ["cargo", "build", "--lib"]
++    cmds = ["cargo", "build", "--locked", "--lib"]
+     if args.release:
+         cmds.append("-r")
 @@ -281,6 +281,10 @@
      rust_flag_txt = f'pub const MAGISK_VERSION: &str = "{config["version"]}";\n'
      rust_flag_txt += f'pub const MAGISK_VER_CODE: i32 = {config["versionCode"]};\n'

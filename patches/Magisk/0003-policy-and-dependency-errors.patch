@@ -40,10 +40,13 @@ diff --git a/native/src/Cargo.lock b/native/src/Cargo.lock
  dependencies = [
   "cmov",
   "subtle",
-@@ -449,10 +455,23 @@
- checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
- 
- [[package]]
+@@ -419,6 +425,19 @@
+  "signature",
+  "spki",
+  "zeroize",
++]
++
++[[package]]
 +name = "egysk-runtime"
 +version = "0.1.0"
 +dependencies = [
@@ -54,9 +57,12 @@ diff --git a/native/src/Cargo.lock b/native/src/Cargo.lock
 + "serde_json",
 + "sha2",
 + "toml",
-+]
-+
-+[[package]]
+ ]
+ 
+ [[package]]
+@@ -450,9 +469,9 @@
+ 
+ [[package]]
  name = "fdt"
 -version = "0.2.0-alpha2"
 -source = "registry+https://github.com/rust-lang/crates.io-index"

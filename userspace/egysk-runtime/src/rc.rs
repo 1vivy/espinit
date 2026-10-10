@@ -161,7 +161,7 @@ fn bootstrap_step(
 ) -> std::fmt::Result {
     write!(
         rc,
-        "\nservice egysk-bootstrap-{name} {command}\n    user root\n    group root\n    seclabel u:r:init:s0\n    disabled\n    oneshot\n    reboot_on_failure reboot\n\non early-init\n    exec_start egysk-bootstrap-{name}\n"
+        "\nservice egysk.bootstrap-{name} {command}\n    user root\n    group root\n    seclabel u:r:init:s0\n    disabled\n    oneshot\n    timeout_period 120\n    reboot_on_failure reboot\n\non init\n    exec_start egysk.bootstrap-{name}\n"
     )
 }
 
@@ -182,9 +182,10 @@ pub fn assemble(
         );
     }
     let encoded = descriptor.encode()?;
-    // Explicit service labels keep stock toybox in init, instead of taking its
-    // ordinary toolbox transition. exec_start plus reboot_on_failure makes each
-    // prerequisite blocking and fatal, including failure to execute the tool.
+    // Prefix actions register before stock actions. Android's early-init must
+    // first start ueventd/bootstrap APEXes and complete the built-in coldboot
+    // wait; reconstruction and logical EarlyInit run at the front of `init`.
+    // Explicit service labels keep stock toybox in init, not toolbox.
     let mut rc = String::with_capacity(encoded.len() + 4096);
     bootstrap_step(
         &mut rc,
@@ -235,22 +236,23 @@ pub fn assemble(
         "reconstruct",
         format_args!("{BIN}/{LOADER} --reconstruct {encoded}"),
     )?;
+    // A launch/lookup failure must not fall through into product or stock work.
+    // Only reconstruct() publishes this after policy, mounts and labels succeed.
+    rc.push_str("    wait_for_prop egysk.bootstrap.ready 1\n");
     for stage in crate::Stage::ALL {
-        let single = [stage.as_str()];
-        let events: &[&str] = match stage {
-            crate::Stage::Service => &[
-                "nonencrypted",
-                "property:vold.decrypt=trigger_restart_framework",
-            ],
-            crate::Stage::BootCompleted => &["property:sys.boot_completed=1"],
-            crate::Stage::PostMount => &["post-fs-data"],
-            _ => &single,
-        };
-        for event in events {
-            rc.push_str(&format!(
-                "\non {event}\n    exec {DOMAIN} root -- {BIN}/{DAEMON} --egysk-stage {}\n",
-                stage.as_str()
-            ));
+        writeln!(
+            rc,
+            "\nservice egysk.stage-{} {BIN}/{DAEMON} --egysk-stage {}\n    user root\n    group root\n    seclabel {DOMAIN}\n    disabled\n    oneshot\n    timeout_period 300\n    reboot_on_failure reboot",
+            stage.as_str(),
+            stage.as_str(),
+        )?;
+        for event in stage.init_events() {
+            writeln!(
+                rc,
+                "\non {event}\n    exec_start egysk.stage-{}\n    wait_for_prop {STAGE_PROPERTY_PREFIX}{} 1",
+                stage.as_str(),
+                stage.as_str(),
+            )?;
         }
     }
     for module in &descriptor.modules {

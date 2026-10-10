@@ -254,6 +254,10 @@ pub fn reconstruct(hex: &str) -> Result<()> {
     stage_tools(&descriptor.config, false)?;
     // Base helper declarations allow these labels and init-context execution;
     // the complete native policy is loaded only after its executable is usable.
+    // This boot-local parent is shared with system-UID module consumers; do not
+    // let the launching init's umask make their explicitly labelled files
+    // unreachable. Contents retain their own narrower permissions.
+    fs::set_permissions(ROOT, fs::Permissions::from_mode(0o755))?;
     label(Path::new(ROOT), FILE_CONTEXT)?;
     label_tree(Path::new(BIN), FILE_CONTEXT)?;
     let mut selected = descriptor.config.clone();
@@ -327,7 +331,7 @@ pub fn reconstruct(hex: &str) -> Result<()> {
     label(Path::new(SOURCE), FILE_CONTEXT)?;
     fsu::atomic(&Path::new(ROOT).join("reconstructed"), b"1")?;
     label(&Path::new(ROOT).join("reconstructed"), FILE_CONTEXT)?;
-    Ok(())
+    crate::property("egysk.bootstrap.ready", "1")
 }
 pub fn restore_efivarfs() -> Result<()> {
     // Only a loaded filesystem is restored; EFI is an independent critical LKM

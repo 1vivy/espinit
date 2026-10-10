@@ -37,9 +37,9 @@ are `../egysk-modules`, recovered full main
 `e985dfac4fea73751f5ef3865cdcc4122c8a4eb3` from
 `retired/kernelsu-esp-modules`, and `../egysk-lkms`, recovered main
 `75af27f5b2d79c2f11721069f8d1f739c4ac9f36` from
-`retired/kernelsu-esp-lkms`. Both retain complete histories; their old module
-code still needs platform integration. Preserve KernelSU history, upstream
-licenses and pinned Magisk. The public core hosted rename to `1vivy/egysk` and
+`retired/kernelsu-esp-lkms`. Both retain complete histories. Their platform source
+is integrated; release and device checks remain below. Preserve KernelSU history,
+upstream licenses and pinned Magisk. The public core hosted rename to `1vivy/egysk` and
 creation/private push of the split repositories are explicitly authorized but
 not yet performed; authorization is not publication evidence.
 
@@ -48,9 +48,9 @@ not yet performed; authorization is not publication evidence.
 The generic archive entry is `/egyskinit` at the archive root; its consumer
 selects it with `rdinit=/egyskinit`. It executes the original `/init` without
 replacement, preserving PID, remaining arguments and environment. Critical LKMs
-load before ESP discovery. This existing generic handoff does not migrate
-downstream boot producers: platform `rdinit=/esuinit` callers remain an
-integration task.
+load before ESP discovery. Gobbl-generated launchers select
+`rdinit=/egyskinit`; the independent platform archive names `esu.cpio` and
+`esu.stage.cpio` remain unchanged.
 
 ```text
 /dev/esp                         one raw RW ESP, nosuid,nodev,noexec
@@ -97,12 +97,20 @@ critical failures stop managed boot. Keep recovery/charger/safe-mode and
 
 The helper rc supplement remains root-only, pointer/length/reserved-validated,
 bounded to 64 KiB and supplied once (`EALREADY` on repeat, `EBUSY` after
-consumption). Base policy precedes product init commands; admitted module rules
-apply once before their services. Dispatch `early-init`, `init`, `early-fs`,
-`post-fs`, `post-fs-data`, `post-mount`, `service`, `boot-completed` in order.
+consumption). Its immutable bytes precede the original init.rc bytes in the same
+parse, so product barriers register before stock actions for each event. Base
+policy precedes product init commands; admitted module rules apply once before
+their services. Dispatch logical `early-init`, `init`, `early-fs`, `post-fs`,
+`post-fs-data`, `post-mount`, `service`, `boot-completed` in order. Reconstruction
+and logical `early-init` run at the **front of Android's `init` event**, followed
+by logical `init`, not before stock `early-init`: the latter must start ueventd,
+set up bootstrap APEXes/linker configuration, and finish before init's built-in
+coldboot wait. System/vendor mounts and SELinux policy come from first stage.
 Projection completes no later than post-fs and before projected HALs start;
-post-fs-data scripts run only at their actual event. Projected module-backed
-files stay writable, unrelated Android mounts stay read-only. Never mutate an
+post-fs-data and post-mount scripts run at the real post-fs-data event, after
+late-fs has supplied `/data`, but before stock post-fs-data commands.
+Projected module-backed files stay writable, unrelated Android mounts stay
+read-only. Never mutate an
 active lower or reuse upper/work with live overlay references; unchanged
 generations keep their uppers, and durable state stays outside generations.
 
@@ -113,10 +121,46 @@ the same selected devices and generations before consumers start. Reconstruction
 does not introduce a second permanent ESP mount.
 
 Reconstruction runs stock tools as explicitly labelled `init` services, with
-blocking `exec_start` and `reboot_on_failure` for each prerequisite. Selected
-block nodes live under `/dev/block` with mode 0600. The helper's initial policy
-allows the required copying, relabelling, backing mounts and native policy load;
+blocking `exec_start`, `reboot_on_failure`, and a 120-second timeout for each
+prerequisite. Reconstruction alone publishes `egysk.bootstrap.ready=1` after
+mount, policy, label and descriptor completion. Its action waits for that value
+before product dispatch. Every logical stage uses a disabled named oneshot,
+`exec_start`, a 300-second outer timeout and `reboot_on_failure`, followed by
+`wait_for_prop egysk.stage.<stage> 1`. Only the serialized native completion
+boundary publishes stage success, after native callbacks/projection and module
+work; it acknowledges duplicate dispatch only after publication succeeds.
+Failed execution requests, unsuccessful exits and timeouts reboot; even a
+service lookup failure cannot advance stock same-event actions past an absent
+success property. A failed reboot leaves the consumer barrier closed.
+Selected block nodes live under `/dev/block` with mode 0600. The helper's initial
+policy allows copying, relabelling, backing mounts and native policy load;
 it does not make the product domain permissive.
+
+The ordering basis is pinned AOSP system/core
+[`68be0c2c0006a0740d0b1809abe4717308f90d15`](https://android.googlesource.com/platform/system/core/+/68be0c2c0006a0740d0b1809abe4717308f90d15/):
+[`init.cpp`](https://android.googlesource.com/platform/system/core/+/68be0c2c0006a0740d0b1809abe4717308f90d15/init/init.cpp)
+queues early-init, coldboot wait, then init and suspends command execution for
+exec services/property waits;
+[`action_manager.cpp`](https://android.googlesource.com/platform/system/core/+/68be0c2c0006a0740d0b1809abe4717308f90d15/init/action_manager.cpp)
+matches actions in registration order;
+[`service.cpp`](https://android.googlesource.com/platform/system/core/+/68be0c2c0006a0740d0b1809abe4717308f90d15/init/service.cpp)
+implements ExecStart/Start failure reboot guards, failed-exit reboot and timeout
+killing. The stock
+[`init.rc`](https://android.googlesource.com/platform/system/core/+/68be0c2c0006a0740d0b1809abe4717308f90d15/rootdir/init.rc)
+starts vold at early-fs and queues post-fs-data after late-fs. Consumer preparation
+must finish synchronously in critical module scripts: early-init work precedes
+vold, and post-fs-data checks precede consumers started by stock post-fs-data or
+later actions. Module RC property actions run asynchronously after publication;
+`ctl.start` acknowledges a start request, not service readiness. Neither is a
+substitute for script completion. Scripts must not wait for later init actions,
+stock post-fs-data-created directories, installkey or CE unlock. The product
+contract requires `/data` mounted by late-fs and credential consumers not started
+in stock early-init or before their prerequisite event; core does not infer ROM
+identity or maintain service-name allowlists.
+The pinned
+[`gatekeeperd.rc`](https://android.googlesource.com/platform/system/core/+/68be0c2c0006a0740d0b1809abe4717308f90d15/gatekeeperd/gatekeeperd.rc)
+uses class `late_start`, started by the stock nonencrypted/framework restart
+actions after post-fs-data. Product packages preserve that service schedule.
 
 The native policy tool consumes a coherent helper-exported snapshot, preserving
 Android policy configuration bits that the kernel's ordinary sysfs export omits.
@@ -168,18 +212,24 @@ migration engine.
   Module lifecycle operations must never traverse Android credential state.
 - Every Android installation is a peer, including the former ROM1/`host`.
   Boot slot selects an installation; immutable installer identity selects its
-  monotonic namespace, never a module profile. The credential mockup specifies
-  namespaces 1..2146, local user IDs 0..999999 and checked hardware UID
-  `namespace * 1,000,000 + local_user_id`; this is not a cryptographic SID.
-  Preserve handles, authentication tokens, KeyMint bindings and local SID files.
-  Shared `/metadata/password_slots/slot_map` uses Java Properties `gsiN` owners,
-  with `ro.gsid.image_running=N`; no privileged `host` owner remains the target.
-  Existing `host` state needs an explicit lifecycle transition, not silent reset.
-- Disable vold's global metadata-key deletion before initialization and remove
-  Gatekeeper cold-boot `deleteAllUsers` for every peer. Numeric namespaces above
-  one cannot rely on the old boolean GSI property handling. Shared-slot binding
-  precedes vold; post-/data preparation precedes gatekeeperd, with blocking
-  failure propagation. A `.coldboot` marker alone is not sufficient.
+  monotonic namespace, never a module profile. The shared `installation-state`
+  crate allocates fresh namespaces 2..2146, with local user IDs 0..999999 and
+  checked hardware UID `namespace * 1,000,000 + local_user_id`; this is not a
+  cryptographic SID. Explicit offline adoption preserves existing hardware
+  namespace zero as immutable record data while assigning positive Weaver
+  ownership. It does not rewrite handles, tokens, KeyMint bindings or local SIDs.
+  Shared `/metadata/password_slots/slot_map` uses Java Properties `gsiN` owners
+  and `ro.gsid.image_running=N`; namespace one is excluded because Android's
+  boolean property consumers would interpret it as ordinary DSU mode.
+  Journaled adoption/replacement publishes the selected ESP config with the
+  registry; pending transitions block runtime admission. Retirement does not
+  claim hardware erasure or recycle a namespace.
+- Runtime preparation disables vold's global metadata-key deletion and binds
+  the shared slot map before vold. The pinned Gatekeeper patch removes global
+  cold-boot `deleteAllUsers`, retaining per-user cleanup. Early preparation
+  verifies the projected daemon's protocol and publishes its read-only namespace
+  handoff; post-fs-data rechecks these before Gatekeeper's late-start service.
+  A `.coldboot` marker alone is not sufficient proof.
 - Independent thin retains the owned `dm-thin-pool` / `dm_thin_pool` fork,
   target versions and suspend/resume/gate behavior. One pinned `lvm2` recipe owns
   static `lvm`, `dmsetup`, FAT-safe `dmstats` and configuration; LVM owns its own
@@ -193,11 +243,13 @@ migration engine.
   `Plan(mapping, views, endpoints, seal, lvs)` belong to partformer; ROM selection
   belongs to the gobbl-multi-os adapter. ppconf only checks/operates the externally
   provisioned configfs ABI, never mounts configfs or loads the LKM.
-  [ABI4](../mockups/2026-10-09/partformer/ABI.md) specifies ordered synchronous
-  upload of 67 GPT sector records, `pp-meta`/`pp-range`/`pp-hole` DM targets,
-  `endpoints`, commit and reset after normal DM removal. Preserve real partition
-  publication, writable/RO ranges, physical PARTNAME hiding and seal behavior;
-  hiding/sealing is not protection against a hostile root ROM.
+  Production ABI4 uploads 67/70/76/88 ordered 512-byte sector records for
+  512/1024/2048/4096-byte logical blocks, then uses
+  `pp-meta`/`pp-range`/`pp-hole` DM targets, `endpoints`, commit and reset after
+  normal DM removal. GPT construction uses one bounded metadata buffer;
+  upstream DM owns data I/O and queue/crypto propagation. Partition publication,
+  writable/RO ranges, physical PARTNAME hiding and seal behavior remain separate
+  from protection against a hostile root ROM.
 - EFI remains at `/sys/firmware/efi/efivars`, type `efivarfs`, with native EFI
   ownership preserved. `efivar_store` brackets backing-file I/O with
   `override_creds(store_file->f_cred)` / `revert_creds`; opener-domain block
@@ -240,8 +292,11 @@ python3 scripts/build_artifacts.py \
   --ndk /path/to/android-ndk-r29 --output out/kmi --jobs 13
 ```
 
-The native build uses Magisk's matching ONDK Rust/linker. The independently
-built static rdinit uses the Android NDK. `out/native/<abi>/bin` supplies native
+The native build uses Magisk's matching ONDK Rust/linker and the resolved
+lockfile in the production patch series. Both native Cargo entry points use
+`--locked`; sequential arm64/x86_64 builds preserve exact materialized source.
+The independently built static rdinit uses the Android NDK.
+`out/native/<abi>/bin` supplies native
 package inputs; BusyBox is an explicit independent input. Artifact publication
 creates an immutable complete `<branch>-<generation>/<arch>` set containing
 `egyskinit`, `egysk.ko` and `egysk.ko.compat.json`; it does not replace
@@ -255,7 +310,7 @@ distinct from the Android `egyskd` daemon. It consumes already-built inputs and
 downloads nothing.
 
 ```sh
-cargo build --release -p egysk-tools
+cargo build --release --locked -p egysk-tools
 target/release/egysk-build-cpio --build-cpio --legacy-lz4 \
   --kmi android16-6.12-6 --arch aarch64 --artifact-dir out/kmi \
   --bootstrap-dir /path/to/bootstrap --entry egyskinit \
@@ -281,7 +336,7 @@ Its read-only host CLI also checks produced archives at the lab boundary:
 
 ```sh
 # From ../gobbl; the optional final argument byte-matches the exact helper set.
-cargo run --release -p takeover-contract --bin takeover-validate -- \
+cargo run --release --locked -p takeover-contract --bin takeover-validate -- \
   /path/to/takeover.cpio.lz4 android16-6.12-6 aarch64 \
   ../kernelesp/out/kmi/android16-6.12-6/aarch64
 ```
@@ -339,8 +394,8 @@ DDK gate re-verifies through `scripts/kmi_modules.py verify`, which compares
 ## Checks and integration
 
 ```sh
-cargo ndk -t arm64-v8a check -p egysk-runtime -p egyskinit
-cargo ndk -t arm64-v8a clippy -p egysk-runtime -p egyskinit
+cargo ndk -t arm64-v8a check --locked -p egysk-runtime -p egyskinit
+cargo ndk -t arm64-v8a clippy --locked -p egysk-runtime -p egyskinit -- -D warnings
 cargo fmt --all
 cargo test --workspace --locked --offline
 python3 -m unittest scripts.test_kmi_modules
@@ -354,18 +409,15 @@ kernel-provenance-qualified. Enforcing Android lifecycle, OTA and physical
 credential-consumer behavior remain distinct requirements from source builds and
 admission; do not read them as satisfied by this document.
 
-Current foundational evidence (parent-run, 2026-10-10): core workspace
-tests/clippy and Android check/clippy passed; exact three-patch native replay
-and arm64 production emitted `egyskd`, `magiskpolicy` and `util_functions.sh`.
-C helper ABI tests and generation-6 arm64 KMI admission accepted `egysk`;
-compiler build-number difference/private-import warnings remain. Real builder
-output and `takeover-validate` accepted `android16-6.12-6/aarch64`; wrong KMI and
-corrupt framing were rejected. A real offline-transition CLI smoke preserved
-settings/inodes/password-slot siblings, repeated as `AlreadyTransitioned`, and
-rejected collisions. Shared contract/codec/esu-vars/rom-install/ota-core and
-platform-qcom tests/clippy plus both AArch64 UEFI lanes passed. No device
-operations were performed; platform/deployment/credential-consumer proof remains
-outstanding. Keep this summary short, not a permanent build-output snapshot.
+Parent-run integration checks cover core and platform host contracts, Android
+arm64/x86_64 builds and Clippy, both AArch64 UEFI lanes, exact native replay
+before and after dual-ABI builds, and helper/independent-LKM KMI admission.
+The actual Android Partformer CLI produced CRC-valid 512-byte and 4Kn GPT
+metadata. Actual offline maintenance preserved hardware namespace zero,
+slot-map ownership/mode/xattrs and unrelated payloads while publishing and
+retiring installation identities. These temporary-root checks do not establish
+phone credential behavior. Full Gatekeeper production, final platform packaging
+and whole-device integration remain separate checks.
 
 ## Remaining Egysk integration checklist
 
@@ -398,8 +450,8 @@ ownership rationale, not a competing implementation plan.
   - [x] Core daemon/builder/loader/helper identities, runtime/ESP roots,
     bootstrap config/receipt, owned env/properties/services and policy names
     use Egysk; standalone generic `/init` handoff remains intact.
-  - [x] Implement explicit offline metadata/ESP product-subtree transition.
-    Installer wiring and credential-identity transition remain unchecked.
+  - [x] Implement and wire explicit offline metadata/ESP product-subtree and
+    journaled credential-identity transitions; no automatic boot-time adoption.
 
 - [ ] **Native integration and Egysk identity:** whole-device behavioral
   validation and downstream packaging remain pending.
@@ -409,18 +461,17 @@ ownership rationale, not a competing implementation plan.
     runtime sources within the enforced `out/<tree>` layout.
   - [x] Retain upstream stage serialization, prepared-view built-in magic mount,
     actual late callbacks/common scripts and authorized native SU; refuse
-    excluded stock side effects at entry boundaries. Exact replay and arm64
-    producer are green, not whole-device proof.
-- [ ] **Partformer ABI4 cutover:** port the
-  [selected implementation](../mockups/2026-10-09/partformer/README.md) into an
-  Android-ready toolchain/package (the Python mockup is not one); independently
-  package/provision the ABI4 LKM. Migrate ppconf, current fw-views,
-  gobbl-multi-os and OTA/HAL callers together and remove obsolete ABI3/gptctl
-  paths. Preserve check/prepare/publish/reload/teardown, failed publication
-  rollback, ordinary busy removal and stable dev_t/open FDs across reload,
-  not remove/recreate. Resolve real partition discovery/Android by-name behavior
-  and inline/hardware-wrapped crypto compatibility from source/RE and available
-  runtime evidence, identifying any genuinely unobserved behavior.
+    excluded stock side effects at entry boundaries. Exact replay and both
+    native architecture producers are green, not whole-device proof.
+- [x] **Partformer ABI4 source cutover:** the
+  [selected design](../mockups/2026-10-09/partformer/README.md) is implemented as
+  Rust Partformer/ppconf with Android arm64/x86_64 producers. Independent ABI4
+  LKMs build and pass admission in both lanes. Firmware views, gobbl-multi-os
+  and OTA/HAL callers use the shared check/prepare/publish/reload/teardown
+  lifecycle, retaining rollback, busy-removal failure and stable mapped-device
+  identity across reload. The actual CLI covers 512-byte and 4Kn metadata.
+  Live partition discovery, projected I/O and hardware-wrapped crypto remain
+  part of the final device integration check, not consequences of a build.
 - [ ] **Peer credential lifecycle:** integrate the
   [credential coordinator and pinned gatekeeperd patch](../mockups/2026-10-09/gobbl-credentials/README.md)
   with existing installation/update/wipe selection, `gobbl-runtime`, packaging,
@@ -475,8 +526,8 @@ ownership rationale, not a competing implementation plan.
     retain consumer publication/selection policy and licensing boundaries.
   - [x] Share the `no_std` GBS1/GBM1/GBT1 codec while preserving bytes, bounds
     and state semantics; keep firmware storage and Android efivarfs separate.
-  - [ ] Reconcile the remaining platform callers and packaging with these
-    foundational interfaces; completed shared crates are not platform closure.
+  - [x] Migrate platform callers to the shared interfaces and exact gobbl
+    revision locks; final artifact production is tracked separately above.
 - [ ] **Lifecycle and documentation consumers:** connect installation identity
   to install/update/wipe and existing ROM-retirement work, including the
   stopped-consumer `host` transition. Trace staged-letter boot, staged cpio,

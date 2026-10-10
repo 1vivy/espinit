@@ -1,3 +1,4 @@
+#ifndef EGYSK_INIT_RC_TEST
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
@@ -93,17 +94,20 @@ void egysk_observe_second_stage(const char *path, struct user_arg_ptr *argv)
 
 }
 
+#endif
 static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
 static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
 static struct file_operations fops_proxy;
+static const struct file_operations *orig_fops;
 
 static DEFINE_MUTEX(module_rc_lock);
 static char *module_rc_buf;
 static size_t module_rc_len;
-static ssize_t module_rc_pos;
+static size_t module_rc_pos;
 static bool module_rc_set;
 static bool module_rc_loaded;
 
+#ifndef EGYSK_INIT_RC_TEST
 int egysk_set_module_rc(const void __user *ptr, u32 len)
 {
     char *buf = NULL;
@@ -156,6 +160,7 @@ out:
     mutex_unlock(&module_rc_lock);
 }
 
+#endif
 static void free_module_rc(void)
 {
     kvfree(module_rc_buf);
@@ -163,81 +168,68 @@ static void free_module_rc(void)
     module_rc_len = 0;
 }
 
-// https://cs.android.com/android/platform/superproject/main/+/main:system/core/init/parser.cpp;l=144;drc=61197364367c9e404c7da6900658f1b16c42d0da
-// https://cs.android.com/android/platform/superproject/main/+/main:system/libbase/file.cpp;l=241-243;drc=61197364367c9e404c7da6900658f1b16c42d0da
-// The system will read init.rc file until EOF, whenever read() returns 0,
-// Append the supplied supplement only when the original read reaches EOF.
-
+/*
+ * Android 16 r2 init/util.cpp ReadFile opens once, fstats, then calls
+ * libbase/file.cpp ReadFdToString: positive short reads are accumulated until
+ * EOF before parser.cpp ParseData sees any bytes. Return prefix-only short
+ * reads; never advance the backing file's position for synthetic bytes.
+ *
+ * This proxy belongs to exactly one admitted open file, not every init.rc
+ * open. Reopening/seeking is not a second supplement stream. Userspace owns
+ * RC syntax (including the terminating newline) and all stage policy.
+ */
 static ssize_t read_proxy(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
-    ssize_t ret = 0;
-    size_t append_count;
-    if (module_rc_pos && module_rc_pos < module_rc_len)
-        goto append_module_rc;
+    size_t wanted, copied;
 
-    ret = orig_read(file, buf, count, pos);
-    if (ret != 0) {
-        return ret;
+    if (!count)
+        return 0;
+    mutex_lock(&module_rc_lock);
+    if (module_rc_pos < module_rc_len) {
+        wanted = min(count, module_rc_len - module_rc_pos);
+        copied = wanted - copy_to_user(buf, module_rc_buf + module_rc_pos, wanted);
+        module_rc_pos += copied;
+        mutex_unlock(&module_rc_lock);
+        return copied ? (ssize_t)copied : -EFAULT;
     }
-    if (module_rc_pos >= module_rc_len) {
-        return ret;
-    }
-    pr_info("read_proxy: orig read finished, start append rc\n");
-
-append_module_rc:
-    if (module_rc_pos < module_rc_len && (size_t)ret < count) {
-        append_count = module_rc_len - module_rc_pos;
-        if (append_count > count - ret)
-            append_count = count - ret;
-        if (copy_to_user(buf + ret, module_rc_buf + module_rc_pos, append_count)) {
-            pr_info("read_proxy: module append error, totally appended %zd\n", module_rc_pos);
-            return ret ? ret : -EFAULT;
-        }
-        pr_info("read_proxy: append module %zu\n", append_count);
-        module_rc_pos += append_count;
-        ret += append_count;
-        if (module_rc_pos == (ssize_t)module_rc_len) {
-            pr_info("read_proxy: module append done\n");
-            free_module_rc();
-        }
-    }
-
-    return ret;
+    mutex_unlock(&module_rc_lock);
+    return orig_read(file, buf, count, pos);
 }
 
 static ssize_t read_iter_proxy(struct kiocb *iocb, struct iov_iter *to)
 {
-    ssize_t ret = 0;
-    size_t append_count;
-    if (module_rc_pos && module_rc_pos < module_rc_len)
-        goto append_module_rc;
+    size_t copied;
 
-    ret = orig_read_iter(iocb, to);
-    if (ret != 0) {
-        return ret;
-    }
-    if (module_rc_pos >= module_rc_len) {
-        return ret;
-    }
-    pr_info("read_iter_proxy: orig read finished, start append rc\n");
-
-append_module_rc:
+    if (!iov_iter_count(to))
+        return 0;
+    mutex_lock(&module_rc_lock);
     if (module_rc_pos < module_rc_len) {
-        append_count = copy_to_iter(module_rc_buf + module_rc_pos, module_rc_len - module_rc_pos, to);
-        if (!append_count) {
-            pr_info("read_iter_proxy: module append error, appended %zd\n", module_rc_pos);
-            return ret ? ret : (iov_iter_count(to) ? -EFAULT : 0);
-        }
-        pr_info("read_iter_proxy: append module %zu\n", append_count);
-        module_rc_pos += append_count;
-        ret += append_count;
-        if (module_rc_pos == (ssize_t)module_rc_len) {
-            pr_info("read_iter_proxy: module append done\n");
-            free_module_rc();
-        }
+        copied = copy_to_iter(module_rc_buf + module_rc_pos,
+                              module_rc_len - module_rc_pos, to);
+        module_rc_pos += copied;
+        mutex_unlock(&module_rc_lock);
+        return copied ? (ssize_t)copied : -EFAULT;
     }
+    mutex_unlock(&module_rc_lock);
+    return orig_read_iter(iocb, to);
+}
+
+static int release_proxy(struct inode *inode, struct file *file)
+{
+    int ret = 0;
+
+    /* Keep the immutable allocation through the open file's lifetime, even
+     * after the prefix is consumed. In particular, fstat must retain its size.
+     */
+    file->f_op = orig_fops;
+    if (orig_fops->release)
+        ret = orig_fops->release(inode, file);
+    mutex_lock(&module_rc_lock);
+    free_module_rc();
+    mutex_unlock(&module_rc_lock);
     return ret;
 }
+#ifndef EGYSK_INIT_RC_TEST
 
 static bool is_init_rc(struct file *fp)
 {
@@ -273,11 +265,15 @@ static int ksu_install_rc_hook(struct file *file)
 {
     static bool rc_hooked;
 
-    if (!is_init_rc(file) || rc_hooked)
+    if (!is_init_rc(file))
         return 0;
     load_module_rc_once();
+    mutex_lock(&module_rc_lock);
+    if (rc_hooked) {
+        mutex_unlock(&module_rc_lock);
+        return 0;
+    }
     rc_hooked = true;
-    stop_init_rc_hook();
 
     pr_info("read init.rc, supplement: %zu bytes\n", module_rc_len);
 
@@ -285,6 +281,7 @@ static int ksu_install_rc_hook(struct file *file)
     // But, we can not modify the file_operations directly, because it's in read-only memory.
     // We just replace the whole file_operations with a proxy one.
     memcpy(&fops_proxy, file->f_op, sizeof(struct file_operations));
+    orig_fops = file->f_op;
     orig_read = file->f_op->read;
     if (orig_read) {
         fops_proxy.read = read_proxy;
@@ -293,8 +290,11 @@ static int ksu_install_rc_hook(struct file *file)
     if (orig_read_iter) {
         fops_proxy.read_iter = read_iter_proxy;
     }
+    fops_proxy.release = release_proxy;
     // replace the file_operations
     file->f_op = &fops_proxy;
+    mutex_unlock(&module_rc_lock);
+    stop_init_rc_hook();
     return 0;
 }
 
@@ -362,6 +362,17 @@ static long ksu_sys_read(const struct pt_regs *regs)
     return orig_sys_read(regs);
 }
 
+static long (*orig_sys_readv)(const struct pt_regs *regs);
+static long ksu_sys_readv(const struct pt_regs *regs)
+{
+    unsigned int fd = PT_REGS_SYSCALL_PARM1(regs);
+    int ret = ksu_handle_sys_read(fd);
+
+    if (ret)
+        return ret;
+    return orig_sys_readv(regs);
+}
+
 static long (*orig_sys_fstat)(const struct pt_regs *regs);
 static long ksu_sys_fstat(const struct pt_regs *regs)
 {
@@ -373,9 +384,12 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
     struct file *file = fget(fd);
     if (file) {
         if (is_init_rc(file)) {
-            pr_info("stat init.rc");
-            is_rc = true;
-            load_module_rc_once();
+            ret = ksu_install_rc_hook(file);
+            if (ret) {
+                fput(file);
+                return ret;
+            }
+            is_rc = file->f_op == &fops_proxy;
         }
         fput(file);
     }
@@ -410,8 +424,9 @@ static void stop_init_rc_hook()
 {
     int read_ret = ksu_syscall_table_unhook(__NR_read);
     int stat_ret = ksu_syscall_table_unhook(__NR_fstat);
+    int readv_ret = ksu_syscall_table_unhook(__NR_readv);
 
-    if (!read_ret && !stat_ret)
+    if (!read_ret && !readv_ret && !stat_ret)
         pr_info("unregister init_rc syscall hook\n");
 }
 
@@ -421,6 +436,9 @@ int __init egysk_init_integration_init(void)
     int ret;
 
     ret = ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
+    if (ret)
+        goto fail;
+    ret = ksu_syscall_table_hook(__NR_readv, ksu_sys_readv, &orig_sys_readv);
     if (ret)
         goto fail;
     ret = ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
@@ -446,3 +464,4 @@ void __exit egysk_init_integration_exit()
         free_module_rc();
     }
 }
+#endif /* EGYSK_INIT_RC_TEST */

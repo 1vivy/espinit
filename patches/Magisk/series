@@ -5,6 +5,8 @@
 # common scripts and runtime completion before ACK, under the daemon's lock.
 # Selected additive-boundary design: pristine upstream stays untouched; owned
 # product/ inputs are installed by scripts/magisk.py, never mockup userspace.
+# The resolved native Cargo.lock graph is exact patch authority; native Rust and
+# elf-cleaner builds require --locked and must leave tracked sources unchanged.
 0001-product-selection-and-identity.patch
 0002-lifecycle-and-projection-adapters.patch
 0003-policy-and-dependency-errors.patch

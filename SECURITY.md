@@ -37,11 +37,10 @@ or module signatures.
 
 ## Disclosure
 
-Report product-specific issues privately through the existing fork's
-[Report a Vulnerability](https://github.com/1vivy/kernelesp/security/advisories/new)
-route. Repository renames and publication are separate owner-controlled actions;
-this cutover does not invent a new reporting endpoint. Do not post working
-exploits, private keys or credential state in public issues.
+Report product-specific issues privately through the core Egysk repository's
+[Report a Vulnerability](https://github.com/1vivy/egysk/security/advisories/new)
+route. The modules and LKM repositories use this same reporting route. Do not
+post working exploits, private keys or credential state in public issues.
 
 Include reproducible steps, exact artifact hashes, observed policy mode, logs with
 secrets removed, and whether another root installation was present. Report defects

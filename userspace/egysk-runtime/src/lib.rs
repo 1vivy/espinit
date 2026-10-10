@@ -59,6 +59,23 @@ impl Stage {
             Self::BootCompleted => "boot-completed",
         }
     }
+
+    /// Android event boundaries, not module script names. Stock early-init
+    /// starts ueventd and bootstrap APEXes; init's coldboot wait follows it.
+    /// Logical EarlyInit therefore runs first at the safe `init` boundary.
+    pub fn init_events(self) -> &'static [&'static str] {
+        match self {
+            Self::EarlyInit | Self::Init => &["init"],
+            Self::EarlyFs => &["early-fs"],
+            Self::PostFs => &["post-fs"],
+            Self::PostFsData | Self::PostMount => &["post-fs-data"],
+            Self::Service => &[
+                "nonencrypted",
+                "property:vold.decrypt=trigger_restart_framework",
+            ],
+            Self::BootCompleted => &["property:sys.boot_completed=1"],
+        }
+    }
 }
 impl std::str::FromStr for Stage {
     type Err = anyhow::Error;
@@ -238,9 +255,24 @@ pub fn run_stage(stage: Stage) -> Result<()> {
         }
     }
     runtime.descriptor.modules = admitted;
-    property(&format!("{STAGE_PROPERTY_PREFIX}{}", stage.as_str()), "1")?;
     runtime.stages.completed = Some(stage);
     Ok(())
+}
+
+/// Publish only from the serialized native completion boundary, after native
+/// callbacks/projection and module work. RC never manufactures this success.
+pub fn publish_stage(stage: Stage) -> Result<()> {
+    fsutil::root_only()?;
+    let guard = RUNTIME
+        .lock()
+        .map_err(|_| anyhow::anyhow!("runtime mutex poisoned"))?;
+    let runtime = guard.as_ref().context("missing prepared runtime")?;
+    ensure!(
+        runtime.stages.completed == Some(stage),
+        "native completion before runtime stage {}",
+        stage.as_str()
+    );
+    property(&format!("{STAGE_PROPERTY_PREFIX}{}", stage.as_str()), "1")
 }
 
 /// Projection consumes the admission-time value, never a second flag inventory.
@@ -339,6 +371,29 @@ pub fn reconstruction_argument(args: &[String]) -> Result<Option<&str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn android_boundaries_preserve_coldboot_and_real_data_event_order() {
+        let at = |event| {
+            Stage::ALL
+                .into_iter()
+                .filter(|stage| stage.init_events().contains(&event))
+                .collect::<Vec<_>>()
+        };
+        // No product action can block the stock early-init ueventd/APEX setup
+        // that the built-in coldboot wait needs in order to finish.
+        assert!(at("early-init").is_empty());
+        assert_eq!(at("init"), [Stage::EarlyInit, Stage::Init]);
+        assert_eq!(at("early-fs"), [Stage::EarlyFs]);
+        assert_eq!(at("post-fs"), [Stage::PostFs]);
+        assert_eq!(at("post-fs-data"), [Stage::PostFsData, Stage::PostMount]);
+        assert_eq!(at("nonencrypted"), [Stage::Service]);
+        assert_eq!(
+            at("property:vold.decrypt=trigger_restart_framework"),
+            [Stage::Service]
+        );
+        assert_eq!(at("property:sys.boot_completed=1"), [Stage::BootCompleted]);
+    }
 
     #[test]
     fn stages_reject_skips_and_suppress_only_successful_completions() {

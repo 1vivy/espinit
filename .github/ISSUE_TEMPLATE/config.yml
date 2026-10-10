@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report an Egysk security vulnerability privately
-    url: https://github.com/1vivy/kernelesp/security/advisories/new
+    url: https://github.com/1vivy/egysk/security/advisories/new
     about: Use this fork's private GitHub Security Advisory, not a public issue.

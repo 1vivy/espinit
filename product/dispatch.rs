@@ -29,13 +29,21 @@ impl BootState {
         }
     }
 
-    pub fn complete(&mut self, stage: Stage) {
+    pub fn complete<E>(
+        &mut self,
+        stage: Stage,
+        publish: impl FnOnce(Stage) -> Result<(), E>,
+    ) -> Result<(), E> {
         assert_eq!(
             Stage::ALL.get(self.completed),
             Some(&stage),
             "completion without admitted stage"
         );
+        // Do not acknowledge duplicates until the native completion property
+        // is committed. Failed publication leaves consumers behind the barrier.
+        publish(stage)?;
         self.completed += 1;
+        Ok(())
     }
 }
 
@@ -49,7 +57,7 @@ mod tests {
         assert_eq!(state.admit(Stage::PostFsData), Err("out-of-order stage"));
         for stage in Stage::ALL {
             assert_eq!(state.admit(stage), Ok(Admission::Execute(stage)));
-            state.complete(stage);
+            state.complete(stage, |_| Ok::<_, ()>(())).unwrap();
             assert_eq!(state.admit(stage), Ok(Admission::Duplicate));
         }
     }
@@ -67,5 +75,30 @@ mod tests {
             Ok(Admission::Execute(Stage::EarlyInit))
         );
         assert_eq!(state.admit(Stage::Init), Err("out-of-order stage"));
+    }
+
+    #[test]
+    fn failed_publication_cannot_acknowledge_duplicate_or_next_stage() {
+        let mut state = BootState::default();
+        let stage = Stage::EarlyInit;
+        assert_eq!(
+            state.complete(stage, |_| Err("property failed")),
+            Err("property failed")
+        );
+        assert_eq!(state.admit(stage), Ok(Admission::Execute(stage)));
+        assert_eq!(state.admit(Stage::Init), Err("out-of-order stage"));
+        let mut published = Vec::new();
+        state
+            .complete(stage, |completed| {
+                published.push(completed);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(published, [stage]);
+        assert_eq!(state.admit(stage), Ok(Admission::Duplicate));
+        assert_eq!(
+            state.admit(Stage::Init),
+            Ok(Admission::Execute(Stage::Init))
+        );
     }
 }
