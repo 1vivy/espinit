@@ -290,7 +290,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-runtime"
+name = "egysk-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -304,13 +304,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-tools"
+name = "egysk-tools"
 version = "0.1.0"
 dependencies = [
  "android-bootimg",
  "anyhow",
  "clap",
- "esp-runtime",
+ "egysk-runtime",
  "goblin",
  "libc",
  "lz4",
@@ -321,11 +321,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "esuinit"
+name = "egyskinit"
 version = "2.0.0"
 dependencies = [
  "anyhow",
- "esp-runtime",
+ "egysk-runtime",
  "goblin",
  "libc",
  "log",

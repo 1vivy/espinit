@@ -1,14 +1,14 @@
-menu "kernelsu-esp"
+menu "Egysk"
 
-config KERNELESP
-	tristate "kernelsu-esp init RC and policy helper"
+config EGYSK
+	tristate "Egysk init RC and policy helper"
 	depends on KPROBES && SECURITY_SELINUX
 	default y
 	help
 	  Enable the root-only init RC supplement and SELinux policy helper.
 	  Requires CONFIG_KPROBES for distinct control FD installation.
 	  To compile as a module, choose M here: the artifact is
-	  kernelsu-esp.ko, with internal name kernelsu_esp.
+	  egysk.ko, with internal name egysk.
 	  A loadable module must be loaded by PID 1 during early boot.
 	  Direct syscall hooks keep a loadable module resident once published:
 	  another hook may retain its callback in a saved-original chain.
@@ -16,16 +16,16 @@ config KERNELESP
 	  It does not grant credentials, track apps or own boot-mode reports.
 	  Bootstrap and module RC are supplied once by root (maximum 64 KiB).
 
-config KERNELESP_DEBUG
-	bool "kernelsu-esp debug mode"
-	depends on KERNELESP
+config EGYSK_DEBUG
+	bool "Egysk debug mode"
+	depends on EGYSK
 	default n
 	help
-	  Enable kernelsu-esp debug mode.
+	  Enable Egysk debug mode.
 
-config KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
+config EGYSK_X86_PATCH_SYSCALL_DISPATCHER
 	bool "Dynamically patch x64's hardened syscall dispatcher to support syscall hooks"
-	depends on KERNELESP && X86_64
+	depends on EGYSK && X86_64
 	default n
 	help
 	  Dynamically patch x64's hardened syscall dispatcher to support syscall hooks. This is a

@@ -7,6 +7,6 @@
 long ksu_hook_execve(syscall_fn_t original, const struct pt_regs *regs);
 long ksu_hook_execveat(syscall_fn_t original, const struct pt_regs *regs);
 
-void ksu_stop_esud_execve_hook(void);
+void egysk_stop_init_execve_hook(void);
 
 #endif // __KSU_H_SYSCALL_EVENT_BRIDGE

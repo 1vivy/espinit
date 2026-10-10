@@ -1,0 +1,1168 @@
+diff --git a/native/src/core/bootstages.rs b/native/src/core/bootstages.rs
+--- a/native/src/core/bootstages.rs
++++ b/native/src/core/bootstages.rs
+@@ -19,9 +19,21 @@
+ use std::process::{Command, Stdio};
+ use std::sync::atomic::Ordering;
+ 
++#[path = "../../../product/dispatch.rs"]
++mod product_events;
++use crate::consts::EGYSK_PRODUCT;
++use crate::socket::{Decodable, Encodable};
++use product_events::Admission;
++
++#[derive(Default)]
++pub struct BootState {
++    stock: BootFlags,
++    product: product_events::BootState,
++}
++
+ bitflags! {
+     #[derive(Default)]
+-    pub struct BootState : u32 {
++    pub struct BootFlags : u32 {
+         const PostFsDataDone = 1 << 0;
+         const LateStartDone = 1 << 1;
+         const BootComplete = 1 << 2;
+@@ -31,6 +43,10 @@
+ 
+ impl MagiskD {
+     fn setup_magisk_env(&self) -> bool {
++        if EGYSK_PRODUCT {
++            error!("Stock installation migration is excluded; use prepared ESP tools");
++            return false;
++        }
+         info!("* Initializing Magisk environment");
+ 
+         let mut buf = cstr::buf::default();
+@@ -46,11 +62,7 @@
+         }
+ 
+         // Alternative binaries paths
+-        let alt_bin_dirs = [
+-            cstr!("/cache/data_adb/magisk"),
+-            cstr!("/data/magisk"),
+-            &buf,
+-        ];
++        let alt_bin_dirs = [cstr!("/cache/data_adb/magisk"), cstr!("/data/magisk"), &buf];
+         for dir in alt_bin_dirs {
+             if dir.exists() {
+                 cstr!(DATABIN).remove_all().ok();
+@@ -115,6 +127,14 @@
+         setup_logfile();
+         info!("** post-fs-data mode running");
+ 
++        if EGYSK_PRODUCT {
++            // Preparation and safe/mode admission completed before early events.
++            // Do not upgrade/mutate an active lower or replay module scripts here.
++            self.prune_su_access();
++            exec_common_scripts(cstr!("post-fs-data"));
++            return false;
++        }
++
+         self.preserve_stub_apk();
+ 
+         // Check secure dir
+@@ -175,7 +195,7 @@
+         info!("** late_start service mode running");
+ 
+         exec_common_scripts(cstr!("service"));
+-        if let Some(module_list) = self.module_list.get() {
++        if !EGYSK_PRODUCT && let Some(module_list) = self.module_list.get() {
+             exec_module_scripts(cstr!("service"), module_list);
+         }
+     }
+@@ -184,6 +204,11 @@
+         setup_logfile();
+         info!("** boot-complete triggered");
+ 
++        if EGYSK_PRODUCT {
++            // The selected metadata/view was already prepared; no Manager or
++            // stock preinit installation belongs to this product.
++            return;
++        }
+         // Reset the bootloop counter once we have boot-complete
+         self.set_db_setting(DbEntryKey::BootloopCount, 0).log_ok();
+ 
+@@ -200,36 +225,107 @@
+         }
+     }
+ 
+-    pub fn boot_stage_handler(&self, client: UnixStream, code: RequestCode) {
++    pub fn boot_stage_handler(&self, mut client: UnixStream, code: RequestCode) {
+         // Make sure boot stage execution is always serialized
+         let mut state = self.boot_stage_lock.lock();
++        if EGYSK_PRODUCT {
++            let stage = match code {
++                RequestCode::EGYSK_STAGE => {
++                    let Ok(name) = String::decode(&mut client) else { return };
++                    match name.parse::<egysk_runtime::Stage>() {
++                        Ok(stage) => stage,
++                        Err(_) => {
++                            1i32.encode(&mut client).log_ok();
++                            return;
++                        }
++                    }
++                }
++                RequestCode::POST_FS_DATA => egysk_runtime::Stage::PostFsData,
++                RequestCode::LATE_START => egysk_runtime::Stage::Service,
++                RequestCode::BOOT_COMPLETE => egysk_runtime::Stage::BootCompleted,
++                _ => return,
++            };
++            let name = stage.as_str();
++            match state.product.admit(stage) {
++                Ok(Admission::Duplicate) => {
++                    0i32.encode(&mut client).log_ok();
++                    return;
++                }
++                Ok(Admission::Execute(_)) => {}
++                Err(error) => egysk_runtime::fatal_boot(&format!("{error}: {name}")),
++            }
++            if stage == egysk_runtime::Stage::PostFs {
++                // Clone admitted IDs only at the single projection boundary.
++                let ids = egysk_runtime::prepare().unwrap_or_else(|error| {
++                    egysk_runtime::fatal_boot(&format!("prepare {name}: {error:#}"))
++                });
++                self.project_prepared_view(&ids);
++            }
++            // Reuse native common-script/logging/authorization upkeep, not
++            // stock module discovery, upgrades or automatic system SU injection.
++            match stage {
++                egysk_runtime::Stage::PostFsData => {
++                    self.post_fs_data();
++                }
++                egysk_runtime::Stage::Service => self.late_start(),
++                egysk_runtime::Stage::BootCompleted => self.boot_complete(),
++                _ => {}
++            }
++            egysk_runtime::run_stage(stage).unwrap_or_else(|error| {
++                egysk_runtime::fatal_boot(&format!("stage {name}: {error:#}"))
++            });
++            state.product.complete(stage);
++            0i32.encode(&mut client).log_ok();
++            return;
++        }
++        let state = &mut state.stock;
+ 
+         match code {
+             RequestCode::POST_FS_DATA
+-                if check_data() && !state.contains(BootState::PostFsDataDone) =>
++                if check_data() && !state.contains(BootFlags::PostFsDataDone) =>
+             {
+                 if self.post_fs_data() {
+-                    state.insert(BootState::SafeMode);
+-                }
+-                state.insert(BootState::PostFsDataDone);
++                    state.insert(BootFlags::SafeMode);
++                }
++                state.insert(BootFlags::PostFsDataDone);
+             }
+             RequestCode::LATE_START => {
+                 drop(client);
+-                if state.contains(BootState::PostFsDataDone) && !state.contains(BootState::SafeMode)
++                if state.contains(BootFlags::PostFsDataDone) && !state.contains(BootFlags::SafeMode)
+                 {
+                     self.late_start();
+-                    state.insert(BootState::LateStartDone);
++                    state.insert(BootFlags::LateStartDone);
+                 }
+             }
+             RequestCode::BOOT_COMPLETE => {
+                 drop(client);
+-                if state.contains(BootState::PostFsDataDone) {
+-                    state.insert(BootState::BootComplete);
++                if state.contains(BootFlags::PostFsDataDone) {
++                    state.insert(BootFlags::BootComplete);
+                     self.boot_complete()
+                 }
+             }
+             _ => {}
+         }
++    }
++
++    fn project_prepared_view(&self, ids: &[String]) {
++        let system = std::fs::canonicalize("/system").unwrap_or_else(|error| {
++            egysk_runtime::fatal_boot(&format!("system target unavailable: {error}"))
++        });
++        let mounts = base::parse_mount_info("self");
++        let ready = mounts
++            .iter()
++            .filter(|mount| system.starts_with(&mount.target))
++            .max_by_key(|mount| mount.target.len())
++            .is_some_and(|mount| {
++                !matches!(mount.fs_type.as_str(), "tmpfs" | "devtmpfs" | "rootfs")
++            });
++        if !system.is_dir() || !ready {
++            egysk_runtime::fatal_boot("post-fs system target is not backed by Android filesystem");
++        }
++        self.project_modules(ids).unwrap_or_else(|_| {
++            egysk_runtime::fatal_boot("magic mount failed; see native operation log")
++        });
+     }
+ }
+ 
+diff --git a/native/src/core/daemon.rs b/native/src/core/daemon.rs
+--- a/native/src/core/daemon.rs
++++ b/native/src/core/daemon.rs
+@@ -8,8 +8,7 @@
+     ModuleInfo, RequestCode, RespondCode, denylist_handler, fork_dont_care, get_magisk_tmp,
+     scan_deny_apps, set_nice_name,
+ };
+-use crate::logging::{android_logging, magisk_logging, setup_logfile, start_log_daemon};
+-use crate::module::remove_modules;
++use crate::logging::{daemon_setup_logging, magisk_logging, setup_logfile, start_log_daemon};
+ use crate::package::ManagerInfo;
+ use crate::resetprop::{get_prop, set_prop};
+ use crate::selinux::restore_tmpcon;
+@@ -139,9 +138,19 @@
+             }
+             RequestCode::REMOVE_MODULES => {
+                 let do_reboot: bool = client.read_decodable().log().unwrap_or_default();
+-                remove_modules();
+-                client.write_pod(&0).log_ok();
+-                if do_reboot {
++                let result = if crate::consts::EGYSK_PRODUCT {
++                    egysk_runtime::request_remove_all()
++                } else {
++                    crate::module::remove_modules();
++                    Ok(())
++                };
++                if let Err(error) = &result {
++                    base::error!("remove modules: {error:#}");
++                }
++                client
++                    .write_pod(&if result.is_ok() { 0i32 } else { 1i32 })
++                    .log_ok();
++                if do_reboot && result.is_ok() {
+                     self.reboot();
+                 }
+             }
+@@ -198,7 +207,6 @@
+         context.rebuild().ok();
+ 
+         let is_root = cred.uid == 0;
+-        let is_shell = cred.uid == 2000;
+         let is_zygote = &context == "u:r:zygote:s0";
+ 
+         if !is_root && !is_zygote && !self.is_client(cred.pid.unwrap_or(-1)) {
+@@ -221,7 +229,8 @@
+ 
+         // Permission checks
+         match code {
+-            RequestCode::POST_FS_DATA
++            RequestCode::EGYSK_STAGE
++            | RequestCode::POST_FS_DATA
+             | RequestCode::LATE_START
+             | RequestCode::BOOT_COMPLETE
+             | RequestCode::ZYGOTE_RESTART
+@@ -233,8 +242,8 @@
+                 client.write_pod(&RespondCode::ROOT_REQUIRED.repr).log_ok();
+                 return;
+             }
+-            RequestCode::REMOVE_MODULES if !is_root && !is_shell => {
+-                // Only allow root and ADB shell to remove modules
++            RequestCode::REMOVE_MODULES if !is_root => {
++                // Product module changes are root/init-only.
+                 client.write_pod(&RespondCode::ACCESS_DENIED.repr).log_ok();
+                 return;
+             }
+@@ -279,8 +288,8 @@
+ }
+ 
+ fn daemon_entry() {
+-    set_nice_name(cstr!("magiskd"));
+-    android_logging();
++    set_nice_name(cstr!("egyskd"));
++    daemon_setup_logging();
+ 
+     // Block all signals
+     SigSet::all().thread_set_mask().log_ok();
+@@ -296,17 +305,33 @@
+ 
+     setsid().log_ok();
+ 
+-    // Make sure the current context is magisk
+-    if let Ok(mut current) =
+-        cstr!("/proc/self/attr/current").open(OFlag::O_WRONLY | OFlag::O_CLOEXEC)
+-    {
+-        let con = cstr!(MAGISK_PROC_CON);
+-        current.write_all(con.as_bytes_with_nul()).log_ok();
++    // Bootstrap has installed the product policy before entering this binary.
++    let setup = || -> LoggedResult<()> {
++        let mut current =
++            cstr!("/proc/self/attr/current").open(OFlag::O_WRONLY | OFlag::O_CLOEXEC)?;
++        current.write_all(cstr!(MAGISK_PROC_CON).as_bytes_with_nul())?;
++        cstr!("/dev/egysk/.egysk").mkdirs(0o755)?;
++        cstr!("/dev/egysk/.egysk").set_secontext(cstr!(MAGISK_FILE_CON))?;
++        cstr!("/dev/egysk/.egysk/device").mkdirs(0o755)?;
++        cstr!("/dev/egysk/.egysk/device").set_secontext(cstr!(MAGISK_FILE_CON))?;
++        let pipe = cstr!("/dev/egysk/.egysk/device/log");
++        if pipe.exists() {
++            if pipe.get_attr()?.st.st_mode & libc::S_IFMT != libc::S_IFIFO {
++                return log_err!("Product log path is not a FIFO");
++            }
++        } else {
++            pipe.mkfifo(0o600)?;
++        }
++        restore_tmpcon()?;
++        Ok(())
++    };
++    if setup().is_err() {
++        egysk_runtime::fatal_boot("native daemon setup failed; see kernel log");
+     }
+ 
+     start_log_daemon();
+     magisk_logging();
+-    info!("Magisk {MAGISK_FULL_VER} daemon started");
++    info!("Egysk {MAGISK_FULL_VER} daemon started");
+ 
+     let is_emulator = get_prop(cstr!("ro.kernel.qemu")) == "1"
+         || get_prop(cstr!("ro.boot.qemu")) == "1"
+@@ -348,8 +373,6 @@
+     }
+     info!("* Device API level: {sdk_int}");
+ 
+-    restore_tmpcon().log_ok();
+-
+     // Escape from cgroup
+     let pid = getpid().as_raw();
+     switch_cgroup("/acct", pid);
+diff --git a/native/src/core/magisk.rs b/native/src/core/magisk.rs
+--- a/native/src/core/magisk.rs
++++ b/native/src/core/magisk.rs
+@@ -1,4 +1,4 @@
+-use crate::consts::{APPLET_NAMES, MAGISK_VER_CODE, MAGISK_VERSION, POST_FS_DATA_WAIT_TIME};
++use crate::consts::{APPLET_NAMES, MAGISK_VER_CODE, MAGISK_VERSION};
+ use crate::daemon::connect_daemon;
+ use crate::ffi::{RequestCode, denylist_cli, get_magisk_tmp, install_module, unlock_blocks};
+ use crate::mount::find_preinit_device;
+@@ -6,17 +6,15 @@
+ use crate::socket::{Decodable, Encodable};
+ use argh::FromArgs;
+ use base::{CmdArgs, EarlyExitExt, LoggedResult, Utf8CString, argh, clone_attr};
+-use nix::poll::{PollFd, PollFlags, PollTimeout};
+ use std::ffi::c_char;
+-use std::os::fd::AsFd;
+ use std::process::exit;
+ 
+ fn print_usage() {
+     eprintln!(
+-        r#"Magisk - Multi-purpose Utility
+-
+-Usage: magisk [applet [arguments]...]
+-   or: magisk [options]...
++        r#"Egysk - Native Utility
++
++Usage: egyskd [applet [arguments]...]
++   or: egyskd [options]...
+ 
+ Options:
+    -c                        print current binary version
+@@ -25,20 +23,21 @@
+    --list                    list all available applets
+    --remove-modules [-n]     remove all modules, reboot if -n is not provided
+    --install-module ZIP      install a module zip file
++   --module ACTION ID [GEN]  enable, disable, remove, cancel-remove, rollback
+ 
+ Advanced Options (Internal APIs):
+-   --daemon                  manually start magisk daemon
+-   --stop                    remove all magisk changes and stop daemon
++   --egysk-stage STAGE         serialized root/init lifecycle callback
++   --daemon                  manually start product daemon
++   --stop                    stop product daemon
+    --[init trigger]          callback on init triggers. Valid triggers:
+                              post-fs-data, service, boot-complete, zygote-restart
+    --unlock-blocks           set BLKROSET flag to OFF for all block devices
+-   --restorecon              restore selinux context on Magisk files
++   --restorecon              restore product file contexts
+    --clone-attr SRC DEST     clone permission, owner, and selinux context
+    --clone SRC DEST          clone SRC to DEST
+-   --sqlite SQL              exec SQL commands to Magisk database
+-   --path                    print Magisk tmpfs mount path
++   --sqlite SQL              exec SQL commands to product database
++   --path                    print product runtime path
+    --denylist ARGS           denylist config CLI
+-   --preinit-device          resolve a device to store preinit files
+ 
+ Available applets:
+      {}
+@@ -62,8 +61,11 @@
+     List(ListApplets),
+     RemoveModules(RemoveModules),
+     InstallModule(InstallModule),
++    StageInstall(StageInstall),
++    Module(ModuleCmd),
+     Daemon(StartDaemon),
+     Stop(StopDaemon),
++    EgyskStage(EgyskStage),
+     PostFsData(PostFsData),
+     Service(ServiceCmd),
+     BootComplete(BootComplete),
+@@ -109,12 +111,39 @@
+ }
+ 
+ #[derive(FromArgs)]
++#[argh(subcommand, name = "--stage-install")]
++struct StageInstall {
++    #[argh(positional)]
++    id: String,
++    #[argh(positional)]
++    directory: String,
++}
++
++#[derive(FromArgs)]
++#[argh(subcommand, name = "--module")]
++struct ModuleCmd {
++    #[argh(positional)]
++    action: String,
++    #[argh(positional)]
++    id: String,
++    #[argh(positional)]
++    generation: Option<String>,
++}
++
++#[derive(FromArgs)]
+ #[argh(subcommand, name = "--daemon")]
+ struct StartDaemon {}
+ 
+ #[derive(FromArgs)]
+ #[argh(subcommand, name = "--stop")]
+ struct StopDaemon {}
++
++#[derive(FromArgs)]
++#[argh(subcommand, name = "--egysk-stage")]
++struct EgyskStage {
++    #[argh(positional)]
++    stage: String,
++}
+ 
+ #[derive(FromArgs)]
+ #[argh(subcommand, name = "--post-fs-data")]
+@@ -214,6 +243,36 @@
+             InstallModule(self::InstallModule { zip }) => {
+                 install_module(&zip);
+             }
++            StageInstall(self::StageInstall { id, directory }) => {
++                if unsafe { base::libc::getuid() } != 0 {
++                    return base::log_err!("Root is required for module installation");
++                }
++                if let Err(error) =
++                    egysk_runtime::stage_install(&id, std::path::Path::new(&directory))
++                {
++                    return base::log_err!("Stage install {id}: {error:#}");
++                }
++            }
++            Module(ModuleCmd {
++                action,
++                id,
++                generation,
++            }) => {
++                if unsafe { base::libc::getuid() } != 0 {
++                    return base::log_err!("Root is required for module changes");
++                }
++                let result = match (action.as_str(), generation.as_deref()) {
++                    ("enable", None) => egysk_runtime::set_enabled(&id, true),
++                    ("disable", None) => egysk_runtime::set_enabled(&id, false),
++                    ("remove", None) => egysk_runtime::request_remove(&id),
++                    ("cancel-remove", None) => egysk_runtime::cancel_remove(&id),
++                    ("rollback", Some(generation)) => egysk_runtime::rollback(&id, generation),
++                    _ => return base::log_err!("Invalid module action/arguments"),
++                };
++                if let Err(error) = result {
++                    return base::log_err!("Module {action} {id}: {error:#}");
++                }
++            }
+             Daemon(_) => {
+                 let _ = connect_daemon(RequestCode::START_DAEMON, true)?;
+             }
+@@ -221,19 +280,25 @@
+                 let mut fd = connect_daemon(RequestCode::STOP_DAEMON, false)?;
+                 return Ok(i32::decode(&mut fd)?);
+             }
++            EgyskStage(self::EgyskStage { stage }) => {
++                if stage.parse::<egysk_runtime::Stage>().is_err() {
++                    return base::log_err!("Unknown Egysk stage: {stage}");
++                }
++                let mut fd = connect_daemon(RequestCode::EGYSK_STAGE, true)?;
++                stage.encode(&mut fd)?;
++                return Ok(i32::decode(&mut fd)?);
++            }
+             PostFsData(_) => {
+-                let fd = connect_daemon(RequestCode::POST_FS_DATA, true)?;
+-                let mut pfd = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+-                nix::poll::poll(
+-                    &mut pfd,
+-                    PollTimeout::try_from(POST_FS_DATA_WAIT_TIME * 1000)?,
+-                )?;
++                let mut fd = connect_daemon(RequestCode::POST_FS_DATA, true)?;
++                return Ok(i32::decode(&mut fd)?);
+             }
+             Service(_) => {
+-                let _ = connect_daemon(RequestCode::LATE_START, true)?;
++                let mut fd = connect_daemon(RequestCode::LATE_START, true)?;
++                return Ok(i32::decode(&mut fd)?);
+             }
+             BootComplete(_) => {
+-                let _ = connect_daemon(RequestCode::BOOT_COMPLETE, false)?;
++                let mut fd = connect_daemon(RequestCode::BOOT_COMPLETE, false)?;
++                return Ok(i32::decode(&mut fd)?);
+             }
+             ZygoteRestart(_) => {
+                 let _ = connect_daemon(RequestCode::ZYGOTE_RESTART, false)?;
+@@ -241,4 +306,7 @@
+             UnlockBlocks(_) => {
++                if crate::consts::EGYSK_PRODUCT {
++                    return base::log_err!("Global block unlocking is excluded from Egysk");
++                }
+                 unlock_blocks();
+             }
+             RestoreCon(_) => {
+@@ -273,6 +341,11 @@
+                 return Ok(denylist_cli(&mut args));
+             }
+             PreInitDevice(_) => {
++                if crate::consts::EGYSK_PRODUCT {
++                    return base::log_err!(
++                        "Stock preinit discovery is excluded; use selected metadata bootstrap"
++                    );
++                }
+                 let name = find_preinit_device();
+                 if name.is_empty() {
+                     return Ok(1);
+diff --git a/native/src/core/module.rs b/native/src/core/module.rs
+--- a/native/src/core/module.rs
++++ b/native/src/core/module.rs
+@@ -4,9 +4,8 @@
+ use crate::mount::setup_module_mount;
+ use crate::resetprop::load_prop_file;
+ use base::{
+-    DirEntry, Directory, FsPathBuilder, LoggedResult, OsResult, ResultExt, SilentLogExt, Utf8CStr,
+-    Utf8CStrBuf, Utf8CString, WalkResult, clone_attr, cstr, debug, error, info, libc, raw_cstr,
+-    warn,
++    DirEntry, Directory, FsPathBuilder, LoggedResult, ResultExt, SilentLogExt, Utf8CStr,
++    Utf8CStrBuf, Utf8CString, WalkResult, clone_attr, cstr, debug, info, libc, log_err, raw_cstr,
+ };
+ use nix::fcntl::OFlag;
+ use nix::mount::MsFlags;
+@@ -35,27 +34,24 @@
+     }
+ }
+ 
+-#[allow(unused_variables)]
+-fn bind_mount(reason: &str, src: &Utf8CStr, dest: &Utf8CStr, rec: bool) {
++fn bind_mount(reason: &str, src: &Utf8CStr, dest: &Utf8CStr, rec: bool) -> LoggedResult<()> {
+     module_log!(reason, dest, src);
+-    // Ignore any kind of error here. If a single bind mount fails due to selinux permissions or
+-    // kernel limitations, don't let it break module mount entirely.
+-    src.bind_mount_to(dest, rec).log_ok();
+-    dest.remount_mount_point_flags(MsFlags::MS_RDONLY).log_ok();
+-}
+-
+-fn mount_dummy<'a>(
+-    reason: &str,
+-    src: &Utf8CStr,
+-    dest: &'a Utf8CStr,
+-    is_dir: bool,
+-) -> OsResult<'a, ()> {
++    src.bind_mount_to(dest, rec)?;
++    // Only mirrored Android files remain read-only. Effective module files and
++    // worker tmpfs directories must retain the writable backing view.
++    if reason == "mirror" {
++        dest.remount_mount_point_flags(MsFlags::MS_RDONLY)?;
++    }
++    Ok(())
++}
++
++fn mount_dummy(reason: &str, src: &Utf8CStr, dest: &Utf8CStr, is_dir: bool) -> LoggedResult<()> {
+     if is_dir {
+         dest.mkdir(0o000)?;
+     } else {
+         dest.create(OFlag::O_CREAT | OFlag::O_RDONLY | OFlag::O_CLOEXEC, 0o000)?;
+     }
+-    bind_mount(reason, src, dest, false);
++    bind_mount(reason, src, dest, false)?;
+     Ok(())
+ }
+ 
+@@ -144,12 +140,12 @@
+         self.real.path
+     }
+ 
+-    // Returns "/data/adb/modules/{module}/system/bin"
++    // Returns "/dev/egysk/modules/{module}/system/bin".
+     fn module(&self) -> &Utf8CStr {
+         self.module.path
+     }
+ 
+-    // Returns "$MAGISK_TMP/.magisk/modules/{module}/system/bin"
++    // Returns "/dev/egysk/.egysk/modules/{module}/system/bin".
+     fn module_mnt(&self) -> &Utf8CStr {
+         self.module_mnt.path
+     }
+@@ -190,7 +186,7 @@
+         self.real.path
+     }
+ 
+-    // Returns "$MAGISK_TMP/.magisk/worker/system/bin"
++    // Returns "/dev/egysk/.egysk/worker/system/bin".
+     fn worker(&self) -> &Utf8CStr {
+         self.worker.path
+     }
+@@ -288,35 +284,23 @@
+             FsNode::Directory { children } => {
+                 let mut is_tmpfs = false;
+ 
+-                // First determine whether tmpfs is required
+-                children.retain(|name, node| {
+-                    if name == ".replace" {
+-                        return if is_root_dir {
+-                            warn!("Unable to replace '{}', ignore request", path.real());
+-                            false
+-                        } else {
+-                            is_tmpfs = true;
+-                            true
+-                        };
+-                    }
+-
+-                    let path = path.append(name);
+-                    if node.parent_should_be_tmpfs(path.real()) {
++                // Unsupported root additions are real projection errors, not
++                // successful boot with a missing critical export.
++                for (name, node) in children.iter() {
++                    let child = path.append(name);
++                    if name == ".replace" || node.parent_should_be_tmpfs(child.real()) {
+                         if is_root_dir {
+-                            // Ignore the unsupported child node
+-                            warn!("Unable to add '{}', skipped", path.real());
+-                            return false;
++                            return log_err!("Unsupported root projection: {}", child.real());
+                         }
+                         is_tmpfs = true;
+                     }
+-                    true
+-                });
++                }
+ 
+                 if is_tmpfs {
+                     self.commit_tmpfs(path.reborrow())?;
+                     // Transitioning from non-tmpfs to tmpfs, we need to actually mount the
+                     // worker dir to dest after all children are committed.
+-                    bind_mount("move", path.worker(), path.real(), true);
++                    bind_mount("move", path.worker(), path.real(), true)?;
+                 } else {
+                     for (name, node) in children {
+                         let path = path.append(name);
+@@ -325,10 +309,10 @@
+                 }
+             }
+             FsNode::File { src } => {
+-                bind_mount("mount", src, path.real(), false);
++                bind_mount("mount", src, path.real(), false)?;
+             }
+             _ => {
+-                error!("Unable to handle '{}': parent should be tmpfs", path.real());
++                return log_err!("Unable to handle '{}': parent should be tmpfs", path.real());
+             }
+         }
+ 
+@@ -368,8 +352,9 @@
+                 }
+ 
+                 // Traverse the real directory and mount mirror files
+-                if let Ok(mut dir) = Directory::open(path.real()) {
+-                    while let Ok(Some(entry)) = dir.read() {
++                if path.real().exists() {
++                    let mut dir = Directory::open(path.real())?;
++                    while let Some(entry) = dir.read()? {
+                         if children.contains_key(entry.name().as_str()) {
+                             // Should not be mirrored, next
+                             continue;
+@@ -385,7 +370,7 @@
+                             FsNode::new_dir().commit_tmpfs(path)?;
+                         } else if entry.is_symlink() {
+                             let mut link = cstr::buf::default();
+-                            entry.read_link(&mut link).log_ok();
++                            entry.read_link(&mut link)?;
+                             FsNode::Symlink {
+                                 target: link.to_owned(),
+                             }
+@@ -431,13 +416,11 @@
+         Ok(())
+     }
+ }
+-
+ fn get_path_env() -> String {
+     std::env::var_os("PATH")
+         .and_then(|s| s.into_string().ok())
+         .unwrap_or_default()
+ }
+-
+ fn inject_magisk_bins(system: &mut FsNode, is_emulator: bool) {
+     fn inject(children: &mut FsNodeMap) {
+         let mut path = cstr::buf::default().join_path(get_magisk_tmp());
+@@ -563,7 +546,6 @@
+         inject(children)
+     }
+ }
+-
+ fn inject_zygisk_bins(name: &str, system: &mut FsNode) {
+     #[cfg(target_pointer_width = "64")]
+     let has_32_bit = cstr!("/system/bin/linker").exists();
+@@ -619,7 +601,6 @@
+         }
+     }
+ }
+-
+ fn upgrade_modules() -> LoggedResult<()> {
+     let mut upgrade = Directory::open(cstr!(MODULEUPGRADE)).silent()?;
+     let root = Directory::open(cstr!(MODULEROOT))?;
+@@ -654,7 +635,6 @@
+     cstr!(MODULEUPGRADE).remove()?;
+     Ok(())
+ }
+-
+ fn for_each_module(mut func: impl FnMut(&DirEntry) -> LoggedResult<()>) -> LoggedResult<()> {
+     let mut root = Directory::open(cstr!(MODULEROOT))?;
+     while let Some(ref e) = root.read()? {
+@@ -664,7 +644,6 @@
+     }
+     Ok(())
+ }
+-
+ pub fn disable_modules() {
+     for_each_module(|e| {
+         let dir = e.open_as_dir()?;
+@@ -677,7 +656,6 @@
+     })
+     .log_ok();
+ }
+-
+ fn run_uninstall_script(module_name: &Utf8CStr) {
+     let script = cstr::buf::default()
+         .join_path(MODULEROOT)
+@@ -685,7 +663,6 @@
+         .join_path("uninstall.sh");
+     exec_script(&script);
+ }
+-
+ pub fn remove_modules() {
+     for_each_module(|e| {
+         let dir = e.open_as_dir()?;
+@@ -697,7 +674,6 @@
+     .log_ok();
+     cstr!(MODULEROOT).remove_all().log_ok();
+ }
+-
+ fn collect_modules(zygisk_enabled: bool, open_zygisk: bool) -> Vec<ModuleInfo> {
+     let mut modules = Vec::new();
+ 
+@@ -821,6 +797,9 @@
+ 
+ impl MagiskD {
+     pub fn handle_modules(&self) {
++        if crate::consts::EGYSK_PRODUCT {
++            egysk_runtime::fatal_boot("Stock module upgrades cannot mutate the prepared ESP view");
++        }
+         setup_module_mount();
+         upgrade_modules().ok();
+ 
+@@ -830,12 +809,46 @@
+ 
+         // Recollect modules (module scripts could remove itself)
+         let modules = collect_modules(zygisk, true);
+-        self.apply_modules(&modules);
++        self.apply_modules(&modules).log_ok();
+ 
+         self.module_list.set(modules).ok();
+     }
+ 
+-    fn apply_modules(&self, module_list: &[ModuleInfo]) {
++    pub fn project_modules(&self, ids: &[String]) -> LoggedResult<()> {
++        let worker = cstr::buf::default()
++            .join_path(get_magisk_tmp())
++            .join_path(WORKERDIR);
++        worker.mkdirs(0o700)?;
++        nix::mount::mount(
++            Some("egysk"),
++            worker.as_str(),
++            Some("tmpfs"),
++            MsFlags::MS_NODEV,
++            Some("mode=0700"),
++        )?;
++        worker.set_mount_private(true)?;
++        // Recursive bind preserves the per-module OverlayFS/local bind mounts.
++        let module_mnt = cstr::buf::default()
++            .join_path(get_magisk_tmp())
++            .join_path(MODULEMNT);
++        module_mnt.mkdirs(0o700)?;
++        cstr!(MODULEROOT).bind_mount_to(&module_mnt, true)?;
++        let modules: Vec<ModuleInfo> = ids
++            .iter()
++            .map(|id| ModuleInfo {
++                name: id.clone(),
++                z32: -1,
++                z64: -1,
++            })
++            .collect();
++        self.apply_modules(&modules)?;
++        if self.module_list.set(modules).is_err() {
++            return log_err!("Modules already projected");
++        }
++        Ok(())
++    }
++
++    fn apply_modules(&self, module_list: &[ModuleInfo]) -> LoggedResult<()> {
+         let mut system = FsNode::new_dir();
+ 
+         // Create buffers for paths
+@@ -860,18 +873,16 @@
+             }
+             drop(prop);
+ 
+-            // Check whether skip mounting
+-            let skip = paths.append("skip_mount");
+-            if skip.module().exists() {
++            // Use the same valued flag frozen by rdinit/runtime admission.
++            if egysk_runtime::skip_mount(&info.name)? {
+                 continue;
+             }
+-            drop(skip);
+ 
+             // Double check whether the system folder exists
+             let sys = paths.append("system");
+             if sys.module().exists() {
+                 info!("{}: loading module files", &info.name);
+-                system.collect(sys).log_ok();
++                system.collect(sys)?;
+             }
+         }
+ 
+@@ -883,12 +894,14 @@
+         // We directly inject file nodes into the virtual filesystem tree we built in the previous
+         // step, treating Magisk just like a special "module".
+ 
+-        if get_magisk_tmp() != "/sbin" || get_path_env().split(":").all(|s| s != "/sbin") {
++        if !crate::consts::EGYSK_PRODUCT
++            && (get_magisk_tmp() != "/sbin" || get_path_env().split(":").all(|s| s != "/sbin"))
++        {
+             inject_magisk_bins(&mut system, self.is_emulator);
+         }
+ 
+         // Handle zygisk
+-        if self.zygisk_enabled.load(Ordering::Acquire) {
++        if !crate::consts::EGYSK_PRODUCT && self.zygisk_enabled.load(Ordering::Acquire) {
+             let mut zygisk = self.zygisk.lock();
+             zygisk.set_prop();
+             inject_zygisk_bins(&zygisk.lib_name, &mut system);
+@@ -930,7 +943,8 @@
+             // tmpfs worker directory, and real sub-nodes need to be mirrored inside it.
+ 
+             let paths = paths.append(dir);
+-            root.commit(paths, true).log_ok();
+-        }
+-    }
+-}
++            root.commit(paths, true)?;
++        }
++        Ok(())
++    }
++}
+diff --git a/native/src/core/mount.rs b/native/src/core/mount.rs
+--- a/native/src/core/mount.rs
++++ b/native/src/core/mount.rs
+@@ -8,7 +8,6 @@
+ use libc::{c_uint, dev_t, major};
+ use nix::mount::MsFlags;
+ use nix::sys::stat::{Mode, SFlag, mknod};
+-use num_traits::AsPrimitive;
+ use std::cmp::Ordering::{Greater, Less};
+ use std::ffi::OsStr;
+ use std::path::{Path, PathBuf};
+@@ -25,7 +24,7 @@
+         .join_path(magisk_tmp)
+         .join_path(PREINITDEV);
+     if let Ok(attr) = dev_path.get_attr()
+-        && attr.st.st_mode & libc::S_IFMT as c_uint == libc::S_IFBLK.as_()
++        && attr.st.st_mode & libc::S_IFMT as c_uint == libc::S_IFBLK as c_uint
+     {
+         // DO NOT mount the block device directly, as we do not know the flags and configs
+         // to properly mount the partition; mounting block devices directly as rw could cause
+@@ -235,9 +234,9 @@
+ 
+     let mut targets = Vec::new();
+ 
+-    // Unmount Magisk tmpfs and mounts from module files
++    // Select only mounts owned by this product, never a foreign installation.
+     for info in parse_mount_info("self") {
+-        if info.source == "magisk" || info.root.starts_with("/adb/modules") {
++        if info.source == "egysk" {
+             targets.push(info.target);
+         }
+     }
+diff --git a/native/src/core/scripting.cpp b/native/src/core/scripting.cpp
+--- a/native/src/core/scripting.cpp
++++ b/native/src/core/scripting.cpp
+@@ -23,7 +23,7 @@
+ static void set_script_env() {
+     setenv("ASH_STANDALONE", "1", 1);
+     char new_path[4096];
+-    ssprintf(new_path, sizeof(new_path), "%s:%s", getenv("PATH"), get_magisk_tmp());
++    ssprintf(new_path, sizeof(new_path), DATABIN ":%s", getenv("PATH") ?: "/system/bin");
+     setenv("PATH", new_path, 1);
+     if (MagiskD::Get().zygisk_enabled())
+         setenv("ZYGISK_ENABLED", "1", 1);
+@@ -232,6 +232,7 @@
+     PFS_DONE()
+ }
+ 
++
+ constexpr char install_script[] = R"EOF(
+ APK=%s
+ log -t Magisk "pm_install: $APK"
+@@ -241,6 +242,10 @@
+ )EOF";
+ 
+ void install_apk(Utf8CStr apk) {
++    if constexpr (EGYSK_PRODUCT) {
++        LOGE("Manager APK installation is excluded from this product\n");
++        return;
++    }
+     setfilecon(apk.c_str(), MAGISK_FILE_CON);
+     char cmds[sizeof(install_script) + 4096];
+     ssprintf(cmds, sizeof(cmds), install_script, apk.c_str(), JAVA_PACKAGE_NAME);
+@@ -283,7 +288,7 @@
+ }
+ 
+ constexpr char install_module_script[] = R"EOF(
+-. /data/adb/magisk/util_functions.sh
++. /dev/egysk/bin/util_functions.sh
+ install_module
+ exit 0
+ )EOF";
+@@ -294,20 +299,20 @@
+     if (access(DATABIN, F_OK) ||
+         access(bbpath(), X_OK) ||
+         access(DATABIN "/util_functions.sh", F_OK))
+-        abort(stderr, "Incomplete Magisk install");
++        abort(stderr, "Incomplete Egysk install");
+     if (access(file.c_str(), F_OK))
+         abort(stderr, "'%s' does not exist", file.c_str());
+ 
+     char *zip = realpath(file.c_str(), nullptr);
+     setenv("OUTFD", "1", 1);
++    setenv("BOOTMODE", "true", 1);
+     setenv("ZIPFILE", zip, 1);
+     setenv("ASH_STANDALONE", "1", 1);
+-    setenv("MAGISKTMP", get_magisk_tmp(), 0);
++    setenv("MAGISKTMP", get_magisk_tmp(), 1);
++    setenv("PATH", DATABIN ":/system/bin:/system/xbin", 1);
++    setenv("EGYSK", "true", 1);
+     free(zip);
+ 
+-    int fd = xopen("/dev/null", O_RDONLY);
+-    xdup2(fd, STDERR_FILENO);
+-    close(fd);
+ 
+     const char *argv[] = { BBEXEC_CMD, "-c", install_module_script, nullptr };
+     execve(argv[0], (char **) argv, environ);
+diff --git a/scripts/util_functions.sh b/scripts/util_functions.sh
+--- a/scripts/util_functions.sh
++++ b/scripts/util_functions.sh
+@@ -63,6 +63,7 @@
+   local VALUE
+   local PROPPATH='/data/.magisk /cache/.magisk'
+   [ ! -z $MAGISKTMP ] && PROPPATH="$MAGISKTMP/.magisk/config $PROPPATH"
++  $EGYSK_PRODUCT && PROPPATH="$EGYSK_STORE/config"
+   VALUE=$(grep_prop $VARNAME $PROPPATH)
+   [ ! -z $VALUE ] && eval $VARNAME=\$VALUE
+ }
+@@ -162,6 +163,7 @@
+ }
+ 
+ recovery_actions() {
++  $EGYSK_PRODUCT && egysk_unsupported "recovery setup"
+   # Make sure random won't get blocked
+   mount -o bind /dev/urandom /dev/random
+   # Unset library paths
+@@ -174,6 +176,7 @@
+ }
+ 
+ recovery_cleanup() {
++  $EGYSK_PRODUCT && egysk_unsupported "recovery mount cleanup"
+   local DIR
+   ui_print "- Unmounting partitions"
+   (
+@@ -272,6 +275,7 @@
+ # After calling this method, the following variables will be set:
+ # SLOT, SYSTEM_AS_ROOT, LEGACYSAR
+ mount_partitions() {
++  $EGYSK_PRODUCT && egysk_unsupported "stock partition mounting"
+   # Check A/B slot
+   SLOT=$(grep_cmdline androidboot.slot_suffix)
+   if [ -z $SLOT ]; then
+@@ -403,6 +407,7 @@
+ }
+ 
+ flash_image() {
++  $EGYSK_PRODUCT && egysk_unsupported "boot image flashing"
+   local CMD1
+   case "$1" in
+     *.gz) CMD1="gzip -d < '$1' 2>/dev/null";;
+@@ -428,6 +433,7 @@
+ 
+ # Common installation script for flash_script.sh and addon.d.sh
+ install_magisk() {
++  $EGYSK_PRODUCT && egysk_unsupported "stock Magisk installation"
+   cd $MAGISKBIN
+ 
+   # Source the boot patcher
+@@ -452,6 +458,7 @@
+ }
+ 
+ remove_system_su() {
++  $EGYSK_PRODUCT && egysk_unsupported "system SU removal"
+   [ -d /postinstall/tmp ] && POSTINST=/postinstall
+   cd $POSTINST/system
+   if [ -f bin/su -o -f xbin/su ] && [ ! -f /su/bin/su ]; then
+@@ -514,6 +521,7 @@
+ }
+ 
+ check_data() {
++  $EGYSK_PRODUCT && egysk_unsupported "foreign installation discovery"
+   DATA=false
+   DATA_DE=false
+   if grep ' /data ' /proc/mounts | grep -vq 'tmpfs'; then
+@@ -529,6 +537,7 @@
+ }
+ 
+ run_migrations() {
++  $EGYSK_PRODUCT && egysk_unsupported "foreign installation migration"
+   local SHA1
+   local TARGET
+   # Legacy app installation
+@@ -567,6 +576,7 @@
+ }
+ 
+ copy_preinit_files() {
++  $EGYSK_PRODUCT && egysk_unsupported "stock preinit policy copying"
+   local PREINITDIR=$MAGISKTMP/.magisk/preinit
+   if [ ! -d $PREINITDIR ]; then
+     ui_print "- Unable to find preinit dir"
+@@ -629,15 +639,42 @@
+   set_perm_recursive $1/system/vendor/bin 0 2000 0755 0755 u:object_r:vendor_file:s0
+ }
+ 
++# Selected product hooks own only context and commit; extraction/customization
++# and permissions remain the upstream module installer below.
++egysk_unsupported() {
++  printf '%s\n' "! Egysk excludes $1" >&2
++  exit 1
++}
++
++egysk_prepare_install() {
++  [ "$(id -u)" = 0 ] || egysk_unsupported "non-root module control"
++  MODPATH=
++  [ -d "$EGYSK_STORE" ] || egysk_unsupported "installation without prepared metadata"
++  [ -x "$MAGISKBIN/egyskd" ] || egysk_unsupported "installation without staged egyskd"
++  mkdir -p "$EGYSK_STORE/install-tmp" || exit 1
++  TMPDIR=$(mktemp -d "$EGYSK_STORE/install-tmp/install.XXXXXX") || exit 1
++  cd "$TMPDIR" || abort "! Cannot enter install staging"
++  BOOTMODE=true
++}
++
++egysk_commit_install() {
++  "$MAGISKBIN/egyskd" --stage-install "$MODID" "$MODPATH" ||
++    abort "! Module generation staging failed"
++}
++
+ # Require OUTFD, ZIPFILE to be set
+ install_module() {
+-  rm -rf $TMPDIR
+-  mkdir -p $TMPDIR
+-  chcon u:object_r:system_file:s0 $TMPDIR
+-  cd $TMPDIR
+-
+-  setup_flashable
+-  mount_partitions
++  if $EGYSK_PRODUCT; then
++    egysk_prepare_install
++  else
++    rm -rf $TMPDIR
++    mkdir -p $TMPDIR
++    chcon u:object_r:system_file:s0 $TMPDIR
++    cd $TMPDIR
++
++    setup_flashable
++    mount_partitions
++  fi
+   api_level_arch_detect
+ 
+   # Setup busybox and binaries
+@@ -654,7 +691,13 @@
+   local MODDIRNAME=modules
+   $BOOTMODE && MODDIRNAME=modules_update
+   local MODULEROOT=/data/adb/$MODDIRNAME
++  $EGYSK_PRODUCT && MODULEROOT=$TMPDIR/payload
+   MODID=$(grep_prop id $TMPDIR/module.prop)
++  if $EGYSK_PRODUCT; then
++    case "$MODID" in
++      ''|.*|*[!a-zA-Z0-9._-]*) abort "! Invalid module ID" ;;
++    esac
++  fi
+   MODNAME=$(grep_prop name $TMPDIR/module.prop)
+   MODAUTH=$(grep_prop author $TMPDIR/module.prop)
+   MODPATH=$MODULEROOT/$MODID
+@@ -675,7 +718,7 @@
+     on_install
+ 
+     [ -f $TMPDIR/uninstall.sh ] && cp -af $TMPDIR/uninstall.sh $MODPATH/uninstall.sh
+-    $SKIPMOUNT && touch $MODPATH/skip_mount
++    $SKIPMOUNT && echo 1 > "$MODPATH/skip_mount"
+     $PROPFILE && cp -af $TMPDIR/system.prop $MODPATH/system.prop
+     cp -af $TMPDIR/module.prop $MODPATH/module.prop
+     $POSTFSDATA && cp -af $TMPDIR/post-fs-data.sh $MODPATH/post-fs-data.sh
+@@ -711,7 +754,7 @@
+     mknod $MODPATH$TARGET c 0 0
+   done
+ 
+-  if $BOOTMODE; then
++  if ! $EGYSK_PRODUCT && $BOOTMODE; then
+     # Update info for Magisk app
+     mktouch /data/adb/modules/$MODID/update
+     rm -rf /data/adb/modules/$MODID/remove 2>/dev/null
+@@ -720,7 +763,7 @@
+   fi
+ 
+   # Copy over custom sepolicy rules
+-  if [ -f $MODPATH/sepolicy.rule ]; then
++  if ! $EGYSK_PRODUCT && [ -f $MODPATH/sepolicy.rule ]; then
+     ui_print "- Installing custom sepolicy rules"
+     copy_preinit_files
+   fi
+@@ -730,6 +773,7 @@
+   $MODPATH/system/placeholder $MODPATH/customize.sh \
+   $MODPATH/README.md $MODPATH/.git*
+   rmdir -p $MODPATH 2>/dev/null
++  $EGYSK_PRODUCT && egysk_commit_install
+ 
+   cd /
+   $BOOTMODE || recovery_cleanup
+@@ -741,11 +785,16 @@
+ ##########
+ # Presets
+ ##########
++
++# Build-selected product capability, not root-provider detection.
++readonly EGYSK_PRODUCT=true
++EGYSK_STORE=/dev/egysk/store
++BOOTMODE=true
+ 
+ # Detect whether in boot mode
+ [ -z $BOOTMODE ] && ps | grep zygote | grep -qv grep && BOOTMODE=true
+ [ -z $BOOTMODE ] && ps -A 2>/dev/null | grep zygote | grep -qv grep && BOOTMODE=true
+ [ -z $BOOTMODE ] && BOOTMODE=false
+ 
+-TMPDIR=/dev/tmp
+-MAGISKBIN="/data/adb/magisk"
++TMPDIR=$EGYSK_STORE/install-tmp
++MAGISKBIN="/dev/egysk/bin"

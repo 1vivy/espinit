@@ -1,37 +1,37 @@
-kernelsu-esp-objs := core/init.o
-kernelsu-esp-objs += hook/syscall_event_bridge.o
-kernelsu-esp-objs += hook/syscall_hook_manager.o
-kernelsu-esp-objs += hook/syscall_hook.o
+egysk-objs := core/init.o
+egysk-objs += hook/syscall_event_bridge.o
+egysk-objs += hook/syscall_hook_manager.o
+egysk-objs += hook/syscall_hook.o
 ifeq ($(CONFIG_ARM64),y)
-kernelsu-esp-objs += hook/arm64/patch_memory.o
-kernelsu-esp-objs += hook/arm64/syscall_hook.o
+egysk-objs += hook/arm64/patch_memory.o
+egysk-objs += hook/arm64/syscall_hook.o
 else ifeq ($(CONFIG_X86_64),y)
-kernelsu-esp-objs += hook/x86_64/patch_memory.o
-kernelsu-esp-objs += hook/x86_64/syscall_hook.o
+egysk-objs += hook/x86_64/patch_memory.o
+egysk-objs += hook/x86_64/syscall_hook.o
 else ifeq ($(CONFIG_RISCV),y)
-kernelsu-esp-objs += hook/riscv64/patch_memory.o
-kernelsu-esp-objs += hook/riscv64/syscall_hook.o
+egysk-objs += hook/riscv64/patch_memory.o
+egysk-objs += hook/riscv64/syscall_hook.o
 endif
 
-kernelsu-esp-objs += infra/symbol_resolver.o
-kernelsu-esp-objs += runtime/esud_integration.o
-kernelsu-esp-objs += selinux/selinux.o
-kernelsu-esp-objs += selinux/rules.o
-kernelsu-esp-objs += selinux/sepolicy.o
-kernelsu-esp-objs += supercall/dispatch.o
-kernelsu-esp-objs += supercall/perm.o
-kernelsu-esp-objs += supercall/supercall.o
+egysk-objs += infra/symbol_resolver.o
+egysk-objs += runtime/init_integration.o
+egysk-objs += selinux/selinux.o
+egysk-objs += selinux/rules.o
+egysk-objs += selinux/sepolicy.o
+egysk-objs += supercall/dispatch.o
+egysk-objs += supercall/perm.o
+egysk-objs += supercall/supercall.o
 
 ifdef KBUILD_EXTMOD
-ifeq ($(CONFIG_KERNELESP_DEBUG),y)
-ccflags-y += -DCONFIG_KERNELESP_DEBUG=1
+ifeq ($(CONFIG_EGYSK_DEBUG),y)
+ccflags-y += -DCONFIG_EGYSK_DEBUG=1
 endif
 # Supported external x86 ACK/DDK lanes use the hardened dispatcher adaptation.
 # The generic module builder need not know this helper's Kconfig symbols.
 # Explicit n remains available for a kernel with the source-side bypass patch.
 ifeq ($(CONFIG_X86_64),y)
-ifneq ($(CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER),n)
-ccflags-y += -DCONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER=1
+ifneq ($(CONFIG_EGYSK_X86_PATCH_SYSCALL_DISPATCHER),n)
+ccflags-y += -DCONFIG_EGYSK_X86_PATCH_SYSCALL_DISPATCHER=1
 endif
 endif
 endif # KBUILD_EXTMOD
@@ -56,9 +56,9 @@ endif
 ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
 
 ifdef KBUILD_EXTMOD
-obj-m += kernelsu-esp.o
+obj-m += egysk.o
 else
-obj-$(CONFIG_KERNELESP) += kernelsu-esp.o
+obj-$(CONFIG_EGYSK) += egysk.o
 endif
 
 MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
@@ -77,11 +77,11 @@ ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
 $(shell cd $(GIT_ROOT) && [ -f .git/shallow ] && $(GIT) fetch --unshallow 2>/dev/null || true)
 KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(GIT) rev-list --count HEAD 2>/dev/null)
 KSU_GIT_VERSION_VALID := 1
-$(info -- esu: Git repo detected at $(GIT_ROOT))
+$(info -- egysk: Git repo detected at $(GIT_ROOT))
 endif
 endif
 else
-$(warning -- esu: Git not detected, make sure git is installed in your PATH!)
+$(warning -- egysk: Git not detected, make sure git is installed in your PATH!)
 endif
 
 
@@ -89,11 +89,11 @@ endif
 ifdef KSU_GIT_VERSION_VALID
 # ksu_version: major * 10000 + git version + 200 for historical reasons
 $(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION)))
-$(info -- esu version: $(KSU_VERSION))
+$(info -- egysk version: $(KSU_VERSION))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 else
 # If there is no .git directory, use default version
-$(warning "KSU_GIT_VERSION not defined! It is better to make esu a git repository!")
+$(warning "KSU_GIT_VERSION not defined! It is better to make egysk a git repository!")
 ccflags-y += -DKSU_VERSION=16
 endif
 

@@ -25,4 +25,4 @@ jobs:
       - name: Run ShellCheck
         uses: ludeeus/action-shellcheck@2.0.0
         with:
-          ignore_paths: ./userspace/esud/src/installer.sh ./.github/scripts/setup-rust-build.sh
+          ignore_paths: ./.github/scripts/setup-rust-build.sh

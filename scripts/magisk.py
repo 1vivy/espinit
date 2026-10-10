@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize the pinned native product exactly, then optionally build ksud/policy.
+"""Materialize the pinned native product exactly, then optionally build egyskd/policy.
 
 The pristine submodule is never patched. Hunk positions and every old/context byte
 must match; unlike git apply/patch this deliberately has no offset or fuzz search.
@@ -8,6 +8,7 @@ Run `materialize --check` to compare a generated tree to the production series.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -21,6 +22,7 @@ PIN = "e8915d9db15f5aae93973ffe65068e34df375a6a"
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor/Magisk"
 PATCHES = ROOT / "patches/Magisk"
+PRODUCT = ROOT / "product"
 DEFAULT_OUTPUT = ROOT / "out/Magisk"
 HUNK = re.compile(rb"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)\n$")
 
@@ -130,6 +132,36 @@ def series() -> list[Path]:
     return [PATCHES / name for name in names]
 
 
+def install_product(tree: Path) -> set[str]:
+    """Install owned adapter and derive both native identities from one source."""
+    values = json.loads((PRODUCT / "identity.json").read_text())
+    if values.get("EGYSK_PRODUCT") is not True:
+        raise ValueError("owned native sources require EGYSK_PRODUCT")
+    rust = "//! Generated from product/identity.json by scripts/magisk.py.\n"
+    rust += "".join(
+        f"pub const {key}: {'bool' if isinstance(value, bool) else '&str'} = {json.dumps(value)};\n"
+        for key, value in values.items()
+    )
+    mapping = {
+        "JAVA_PACKAGE_NAME": "APP_PACKAGE_NAME", "SECURE_DIR": "SECURE_DIR",
+        "MODULEROOT": "MODULEROOT", "DATABIN": "DATABIN", "MAGISKDB": "MAGISKDB",
+        "INTLROOT": "INTERNAL_DIR", "SEPOL_PROC_DOMAIN": "SEPOL_PROC_DOMAIN",
+        "SEPOL_FILE_TYPE": "SEPOL_FILE_TYPE", "EGYSK_PRODUCT": "EGYSK_PRODUCT",
+    }
+    cpp = "// Generated from product/identity.json by scripts/magisk.py.\n#pragma once\n"
+    cpp += "".join(
+        f"#define {key} {int(values[value]) if isinstance(values[value], bool) else json.dumps(values[value])}\n"
+        for key, value in mapping.items()
+    )
+    destination = tree / "product"
+    destination.mkdir()
+    for name in ("identity.json", "dispatch.rs"):
+        shutil.copy2(PRODUCT / name, destination / name)
+    for name, contents in (("identity.rs", rust), ("identity.hpp", cpp)):
+        (destination / name).write_text(contents)
+    return {f"product/{name}" for name in ("identity.json", "dispatch.rs", "identity.rs", "identity.hpp")}
+
+
 def materialize(output: Path, check: bool, dependencies: bool) -> None:
     if git_bytes("rev-parse", "HEAD").decode().strip() != PIN:
         raise ValueError(f"vendor/Magisk must be pinned at {PIN}")
@@ -143,6 +175,7 @@ def materialize(output: Path, check: bool, dependencies: bool) -> None:
         changed = set()
         for patch in series():
             changed.update(exact_patch(tree, patch))
+        changed.update(install_product(tree))
         if output.exists():
             # Compare all tracked regular sources, not just a marker or the edited
             # files. Build output/untracked toolchain files are intentionally ignored.
@@ -173,15 +206,15 @@ def build(args: argparse.Namespace) -> None:
     env = os.environ.copy()
     env["MAGISK_ONDK"] = str(ndk)
     env.setdefault("ANDROID_HOME", str(ndk.parent.parent))
-    config = args.output / "esp-build.prop"
-    config.write_text(f"abiList={args.abi}\nversion=esp-{PIN[:8]}\nversionCode=1000000\n")
+    config = args.output / "egysk-build.prop"
+    config.write_text(f"abiList={args.abi}\nversion=egysk-{PIN[:8]}\nversionCode=1000000\n")
     command = [sys.executable, args.output / "build.py", "-v", "-c", config]
     if not args.debug:
         command.append("-r")
     run(*command, "native", "magisk", "magiskpolicy", cwd=args.output, env=env)
     destination = args.artifacts.resolve() / args.abi / "bin"
     destination.mkdir(parents=True, exist_ok=True)
-    for name in ("ksud", "magiskpolicy"):
+    for name in ("egyskd", "magiskpolicy"):
         shutil.copy2(args.output / "native/out" / args.abi / name, destination / name)
     flags = (args.output / "native/out/generated/flags.h").read_text()
     version = re.search(r'^#define MAGISK_VERSION\s+"([^"]+)"$', flags, re.MULTILINE)

@@ -986,7 +986,7 @@ int ksu_update_policydb_len(struct policydb *db)
 
 int ksu_get_sepolicy(void __user *arg)
 {
-    struct esu_get_sepolicy_cmd cmd;
+    struct egysk_get_sepolicy_cmd cmd;
     struct selinux_policy *pol;
     void *data = NULL;
     size_t capacity, length = 0;
@@ -996,7 +996,7 @@ int ksu_get_sepolicy(void __user *arg)
     if (copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     query = !cmd.ptr && !cmd.len;
-    if (!query && (!cmd.ptr || !cmd.len || cmd.len > ESU_POLICY_MAX_SIZE ||
+    if (!query && (!cmd.ptr || !cmd.len || cmd.len > EGYSK_POLICY_MAX_SIZE ||
                    cmd.ptr != (unsigned long)cmd.ptr))
         return -EINVAL;
     if (!query && !access_ok(u64_to_user_ptr(cmd.ptr), (size_t)cmd.len))
@@ -1012,7 +1012,7 @@ int ksu_get_sepolicy(void __user *arg)
     ret = policy_capacity(&pol->policydb, &capacity);
     if (ret)
         goto out_unlock;
-    if (!capacity || capacity > ESU_POLICY_MAX_SIZE) {
+    if (!capacity || capacity > EGYSK_POLICY_MAX_SIZE) {
         ret = -E2BIG;
         goto out_unlock;
     }

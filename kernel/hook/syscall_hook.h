@@ -25,6 +25,6 @@ void ksu_syscall_hook_exit(void);
 void ksu_arch_syscall_hook_exit(void);
 void ksu_syscall_hook_pin(void);
 bool ksu_syscall_hooks_published(void);
-bool esu_hooks_ready(void);
+bool egysk_hooks_ready(void);
 
 #endif

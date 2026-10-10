@@ -17,7 +17,7 @@ struct ksu_ioctl_cmd_map {
     ksu_perm_check_t perm_check; // Permission check function
 };
 
-// Install the distinct kernelsu-esp control fd to the current process.
+// Install the distinct Egysk control fd to the current process.
 int ksu_install_fd(void);
 
 int ksu_supercalls_init(void);

@@ -1,4 +1,4 @@
-name: Build standalone host ksud
+name: Build standalone host egysk-build-cpio
 on:
   workflow_call:
 
@@ -16,11 +16,11 @@ jobs:
       - name: Test host workspace
         run: cargo test --locked --workspace
       - name: Build archive CLI
-        run: cargo build --locked --release --package esp-tools
+        run: cargo build --locked --release --package egysk-tools
       - name: Exercise CLI
-        run: target/release/ksud --help
+        run: target/release/egysk-build-cpio --help
       - uses: actions/upload-artifact@v7
         with:
-          name: ksud-host-x86_64-linux
-          path: target/release/ksud
+          name: egysk-build-cpio-host-x86_64-linux
+          path: target/release/egysk-build-cpio
           if-no-files-found: error

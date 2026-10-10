@@ -1,4 +1,4 @@
-name: Build Magisk-derived ESP userspace
+name: Build Magisk-derived Egysk userspace
 on:
   workflow_call:
     inputs:
@@ -30,6 +30,6 @@ jobs:
         run: python3 scripts/magisk.py materialize --check
       - uses: actions/upload-artifact@v7
         with:
-          name: kernelsu-esp-native-${{ inputs.abi }}
+          name: egysk-native-${{ inputs.abi }}
           path: out/native/${{ inputs.abi }}/bin/
           if-no-files-found: error

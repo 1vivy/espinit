@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-KernelSU ESP is a privileged early-boot userspace and kernel-helper cutover, not
+Egysk is a privileged early-boot userspace and kernel-helper cutover, not
 a boot-qualified release merely because its source builds. Enforcing Android
 boot, HAL-domain EFI I/O and credential-consumer gates require separate evidence.
 Report the exact product commit, Magisk pin/patchset, kernel KMI and configuration.

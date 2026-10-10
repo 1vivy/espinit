@@ -1,18 +1,18 @@
-#ifndef __ESP_UAPI_SUPERCALL_H
-#define __ESP_UAPI_SUPERCALL_H
+#ifndef __EGYSK_UAPI_SUPERCALL_H
+#define __EGYSK_UAPI_SUPERCALL_H
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-static const __u32 ESU_UAPI_VERSION = 4;
+static const __u32 EGYSK_UAPI_VERSION = 4;
 /* reboot(magic1, magic2, 0, &fd) installs an owned anonymous control FD. */
-static const __u32 ESU_INSTALL_MAGIC1 = 0x45535049; /* ESPI */
-static const __u32 ESU_INSTALL_MAGIC2 = 0x4e495446; /* NITF */
-#define ESU_CONTROL_NAME "[kernelsu-esp]"
-static const __u32 ESU_GET_INFO_FLAG_LKM = (1U << 0);
-static const __u32 ESU_STATE_READY = (1U << 0);
+static const __u32 EGYSK_INSTALL_MAGIC1 = 0x45535049; /* ESPI */
+static const __u32 EGYSK_INSTALL_MAGIC2 = 0x4e495446; /* NITF */
+#define EGYSK_CONTROL_NAME "[egysk]"
+static const __u32 EGYSK_GET_INFO_FLAG_LKM = (1U << 0);
+static const __u32 EGYSK_STATE_READY = (1U << 0);
 
-struct esu_get_info_cmd {
+struct egysk_get_info_cmd {
     __u32 version;
     __u32 flags;
     __u32 uapi_version;
@@ -24,7 +24,7 @@ struct esu_get_info_cmd {
  * EALREADY on a second supply, EBUSY if init consumed before supply.
  * norc suppresses delivery without changing the one-supply contract.
  */
-struct esu_module_rc_cmd {
+struct egysk_module_rc_cmd {
     __aligned_u64 ptr;
     __u32 len; /* 0..65536 */
     __u32 reserved;
@@ -35,7 +35,7 @@ struct ksu_set_sepolicy_cmd {
     __aligned_u64 data;
 };
 
-#define ESU_POLICY_MAX_SIZE (64U * 1024U * 1024U)
+#define EGYSK_POLICY_MAX_SIZE (64U * 1024U * 1024U)
 /* Root-only coherent live snapshot, never the original boot policy.
  * ptr=0,len=0 queries a bounded allocation capacity (not a snapshot).
  * Otherwise ptr must be nonzero and len is the buffer capacity, <= MAX_SIZE.
@@ -43,7 +43,7 @@ struct ksu_set_sepolicy_cmd {
  * query and export can return ENOSPC; callers must fail rather than retry.
  * Serialization preserves live Android netlink configuration.
  */
-struct esu_get_sepolicy_cmd {
+struct egysk_get_sepolicy_cmd {
     __aligned_u64 ptr;
     __u64 len;
 };
@@ -64,9 +64,9 @@ struct ksu_sepolicy_cmd_hdr {
  */
 
 /* All commands are root-only. Type E is distinct from KernelSU's type K. */
-static const __u32 ESU_IOCTL_GET_INFO = _IOR('E', 2, struct esu_get_info_cmd);
-static const __u32 ESU_IOCTL_SET_MODULE_RC = _IOW('E', 21, struct esu_module_rc_cmd);
-static const __u32 ESU_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'E', 4, 0);
-static const __u32 ESU_IOCTL_GET_SEPOLICY = _IOWR('E', 22, struct esu_get_sepolicy_cmd);
+static const __u32 EGYSK_IOCTL_GET_INFO = _IOR('E', 2, struct egysk_get_info_cmd);
+static const __u32 EGYSK_IOCTL_SET_MODULE_RC = _IOW('E', 21, struct egysk_module_rc_cmd);
+static const __u32 EGYSK_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'E', 4, 0);
+static const __u32 EGYSK_IOCTL_GET_SEPOLICY = _IOWR('E', 22, struct egysk_get_sepolicy_cmd);
 
 #endif

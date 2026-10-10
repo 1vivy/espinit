@@ -5,7 +5,7 @@
 
 #ifdef pr_fmt
 #undef pr_fmt
-#define pr_fmt(fmt) "esu: " fmt
+#define pr_fmt(fmt) "egysk: " fmt
 #endif
 
 #endif

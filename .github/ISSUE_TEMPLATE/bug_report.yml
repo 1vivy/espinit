@@ -1,5 +1,5 @@
 name: Bug report
-description: Create a report to help us improve esu
+description: Create a report to help us improve Egysk
 labels: [Bug]
 
 body:
@@ -57,7 +57,7 @@ body:
         value: |
           - Device:
           - OS Version:
-          - esu Version:
+          - Egysk Version:
           - Kernel Version:
     validations:
         required: true

@@ -14,7 +14,7 @@
 /* Hardened x86 kernels bypass sys_call_table. Keep the existing optional
  * indirect-dispatch adaptation, independently of the removed ni dispatcher.
  */
-#ifdef CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
+#ifdef CONFIG_EGYSK_X86_PATCH_SYSCALL_DISPATCHER
 static void *syscall_patch_addr;
 static char syscall_patch_original[14];
 static char syscall_patch_installed[14];
@@ -83,7 +83,7 @@ int __init __nocfi ksu_syscall_hook_init(void)
     pr_info("sys_call_table=0x%lx\n", (unsigned long)ksu_syscall_table);
     if (!ksu_syscall_table)
         return -ENOENT;
-#ifdef CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
+#ifdef CONFIG_EGYSK_X86_PATCH_SYSCALL_DISPATCHER
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
     syscall_enter_from_user_mode_fn = (void *)find_kernel_symbol_exact("syscall_enter_from_user_mode");
     syscall_exit_to_user_mode_fn = (void *)find_kernel_symbol_exact("syscall_exit_to_user_mode");
@@ -100,7 +100,7 @@ int __init __nocfi ksu_syscall_hook_init(void)
 
 void ksu_arch_syscall_hook_exit(void)
 {
-#ifdef CONFIG_KERNELESP_X86_PATCH_SYSCALL_DISPATCHER
+#ifdef CONFIG_EGYSK_X86_PATCH_SYSCALL_DISPATCHER
     int ret;
 
     if (!syscall_patch_addr)

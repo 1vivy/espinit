@@ -2,15 +2,15 @@
 #include <linux/jump_label.h>
 #include <linux/sched.h>
 #include <linux/objtool.h>
-#include "runtime/esud.h"
+#include "runtime/init_integration.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 
-DEFINE_STATIC_KEY_TRUE(esud_execve_key);
+DEFINE_STATIC_KEY_TRUE(egysk_init_execve_key);
 
-void ksu_stop_esud_execve_hook(void)
+void egysk_stop_init_execve_hook(void)
 {
-    static_branch_disable(&esud_execve_key);
+    static_branch_disable(&egysk_init_execve_key);
 }
 
 static long __nocfi ksu_hook_execve_common(syscall_fn_t original, const struct pt_regs *regs, bool execveat)
@@ -18,11 +18,11 @@ static long __nocfi ksu_hook_execve_common(syscall_fn_t original, const struct p
     /* Only PID 1's policy-ready second-stage exec is observed. Never mutate
      * the syscall arguments, path or caller credentials; call the saved owner.
      */
-    if (current->pid == 1 && static_branch_unlikely(&esud_execve_key)) {
+    if (current->pid == 1 && static_branch_unlikely(&egysk_init_execve_key)) {
         if (execveat)
-            ksu_execveat_hook_esud(regs);
+            egysk_init_execveat_hook(regs);
         else
-            ksu_execve_hook_esud(regs);
+            egysk_init_execve_hook(regs);
     }
     return original(regs);
 }

@@ -24,22 +24,22 @@ struct ksu_install_fd_tw {
     int __user *outp;
 };
 
-static int anon_esu_release(struct inode *inode, struct file *filp)
+static int anon_egysk_release(struct inode *inode, struct file *filp)
 {
-    pr_info("esu fd released\n");
+    pr_info("egysk fd released\n");
     return 0;
 }
 
-static long anon_esu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+static long anon_egysk_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
     return ksu_supercall_handle_ioctl(filp, cmd, (void __user *)arg);
 }
 
-static const struct file_operations anon_esu_fops = {
+static const struct file_operations anon_egysk_fops = {
     .owner = THIS_MODULE,
-    .unlocked_ioctl = anon_esu_ioctl,
-    .compat_ioctl = anon_esu_ioctl,
-    .release = anon_esu_release,
+    .unlocked_ioctl = anon_egysk_ioctl,
+    .compat_ioctl = anon_egysk_ioctl,
+    .release = anon_egysk_release,
 };
 
 int ksu_install_fd(void)
@@ -49,19 +49,19 @@ int ksu_install_fd(void)
 
     fd = get_unused_fd_flags(O_CLOEXEC);
     if (fd < 0) {
-        pr_err("esu_install_fd: failed to get unused fd\n");
+        pr_err("egysk_install_fd: failed to get unused fd\n");
         return fd;
     }
 
-    filp = anon_inode_getfile(ESU_CONTROL_NAME, &anon_esu_fops, NULL, O_RDWR);
+    filp = anon_inode_getfile(EGYSK_CONTROL_NAME, &anon_egysk_fops, NULL, O_RDWR);
     if (IS_ERR(filp)) {
-        pr_err("esu_install_fd: failed to create anon inode file\n");
+        pr_err("egysk_install_fd: failed to create anon inode file\n");
         put_unused_fd(fd);
         return PTR_ERR(filp);
     }
 
     fd_install(fd, filp);
-    pr_info("esu fd installed: %d for pid %d\n", fd, current->pid);
+    pr_info("egysk fd installed: %d for pid %d\n", fd, current->pid);
     return fd;
 }
 
@@ -70,9 +70,9 @@ static void ksu_install_fd_tw_func(struct callback_head *cb)
     struct ksu_install_fd_tw *tw = container_of(cb, struct ksu_install_fd_tw, cb);
     int fd = ksu_install_fd();
 
-    pr_info("[%d] install esu fd: %d\n", current->pid, fd);
+    pr_info("[%d] install egysk fd: %d\n", current->pid, fd);
     if (copy_to_user(tw->outp, &fd, sizeof(fd))) {
-        pr_err("install esu fd reply err\n");
+        pr_err("install egysk fd reply err\n");
         ksu_close_fd(fd);
     }
 
@@ -85,7 +85,7 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
     int magic1 = (int)PT_REGS_SYSCALL_PARM1(real_regs);
     int magic2 = (int)PT_REGS_PARM2(real_regs);
 
-    if (magic1 == ESU_INSTALL_MAGIC1 && magic2 == ESU_INSTALL_MAGIC2 &&
+    if (magic1 == EGYSK_INSTALL_MAGIC1 && magic2 == EGYSK_INSTALL_MAGIC2 &&
         uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
         struct ksu_install_fd_tw *tw;
         unsigned long arg4 = (unsigned long)PT_REGS_SYSCALL_PARM4(real_regs);

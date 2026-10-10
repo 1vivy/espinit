@@ -28,8 +28,6 @@ jobs:
       - run: rustup update stable
       
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: userspace/esud
 
       - uses: nttld/setup-ndk@v1
         id: setup-ndk

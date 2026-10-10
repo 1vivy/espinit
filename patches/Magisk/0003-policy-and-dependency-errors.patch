@@ -1,0 +1,698 @@
+diff --git a/native/src/Cargo.lock b/native/src/Cargo.lock
+--- a/native/src/Cargo.lock
++++ b/native/src/Cargo.lock
+@@ -7,6 +7,12 @@
+ version = "1.0.14"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
++
++[[package]]
++name = "anyhow"
++version = "1.0.104"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+ 
+ [[package]]
+ name = "autocfg"
+@@ -146,9 +152,9 @@
+ 
+ [[package]]
+ name = "cc"
+-version = "1.4.7"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "54413ede23c2daf518f35156dfde027feb2374004d63bd497f983c8db9c0e313"
++version = "1.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
+ dependencies = [
+  "find-msvc-tools",
+  "shlex",
+@@ -291,9 +297,9 @@
+ 
+ [[package]]
+ name = "ctutils"
+-version = "0.4.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
++version = "0.4.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+ dependencies = [
+  "cmov",
+  "subtle",
+@@ -449,10 +455,23 @@
+ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+ 
+ [[package]]
++name = "egysk-runtime"
++version = "0.1.0"
++dependencies = [
++ "anyhow",
++ "libc",
++ "log",
++ "serde",
++ "serde_json",
++ "sha2",
++ "toml",
++]
++
++[[package]]
+ name = "fdt"
+-version = "0.2.0-alpha2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c8ccfb5c9d9425b2191070f0435636f4a9cdfedd107e33b15f861622b222726a"
++version = "0.2.0-alpha3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "addf728870aa3321a3a3a5d564ddf72b8ebb4dfbfd608a1befd43e8710b2a2b5"
+ 
+ [[package]]
+ name = "ff"
+@@ -472,9 +491,9 @@
+ 
+ [[package]]
+ name = "find-msvc-tools"
+-version = "0.1.13"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
++version = "0.1.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+ 
+ [[package]]
+ name = "flagset"
+@@ -557,6 +576,12 @@
+ ]
+ 
+ [[package]]
++name = "itoa"
++version = "1.0.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
++
++[[package]]
+ name = "konst"
+ version = "0.2.20"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -579,9 +604,9 @@
+ 
+ [[package]]
+ name = "libc"
+-version = "0.2.189"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
++version = "0.2.190"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+ 
+ [[package]]
+ name = "log"
+@@ -624,6 +649,7 @@
+  "bytemuck",
+  "cxx",
+  "cxx-gen",
++ "egysk-runtime",
+  "nix",
+  "num-derive",
+  "num-traits",
+@@ -803,9 +829,9 @@
+ 
+ [[package]]
+ name = "pkcs1"
+-version = "0.8.0-rc.4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
++version = "0.8.0-rc.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f485dbafe293ea6ccaa7d82bc591651a796eb8a9aec3df040b057b706073dbc3"
+ dependencies = [
+  "der",
+  "spki",
+@@ -854,7 +880,7 @@
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
+ dependencies = [
+- "toml_edit",
++ "toml_edit 0.25.17+spec-1.1.0",
+ ]
+ 
+ [[package]]
+@@ -907,9 +933,9 @@
+ 
+ [[package]]
+ name = "rsa"
+-version = "0.10.0-rc.18"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "30b2aa4ba0d89f73d1e332df05be0eeab8840351c36ca5654341dfdb57bb3caf"
++version = "0.10.0-rc.19"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "33405e321e16ef941ca66e254f6904c3aafd3c7ff001fb88bf11c73eb75c2b85"
+ dependencies = [
+  "const-oid",
+  "crypto-bigint",
+@@ -975,6 +1001,28 @@
+ ]
+ 
+ [[package]]
++name = "serde_json"
++version = "1.0.151"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
++dependencies = [
++ "itoa",
++ "memchr",
++ "serde",
++ "serde_core",
++ "zmij",
++]
++
++[[package]]
++name = "serde_spanned"
++version = "0.6.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
++dependencies = [
++ "serde",
++]
++
++[[package]]
+ name = "serdect"
+ version = "0.4.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1030,9 +1078,9 @@
+ 
+ [[package]]
+ name = "spki"
+-version = "0.8.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
++version = "0.8.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
+ dependencies = [
+  "base64ct",
+  "der",
+@@ -1083,18 +1131,18 @@
+ 
+ [[package]]
+ name = "thiserror"
+-version = "2.0.20"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
++version = "2.0.21"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+ dependencies = [
+  "thiserror-impl",
+ ]
+ 
+ [[package]]
+ name = "thiserror-impl"
+-version = "2.0.20"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
++version = "2.0.21"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -1123,34 +1171,75 @@
+ ]
+ 
+ [[package]]
++name = "toml"
++version = "0.8.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
++dependencies = [
++ "serde",
++ "serde_spanned",
++ "toml_datetime 0.6.11",
++ "toml_edit 0.22.27",
++]
++
++[[package]]
+ name = "toml_datetime"
+-version = "1.1.1+spec-1.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
++version = "0.6.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
++dependencies = [
++ "serde",
++]
++
++[[package]]
++name = "toml_datetime"
++version = "1.1.2+spec-1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
+ dependencies = [
+  "serde_core",
+ ]
+ 
+ [[package]]
+ name = "toml_edit"
+-version = "0.25.15+spec-1.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
++version = "0.22.27"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+ dependencies = [
+  "indexmap",
+- "toml_datetime",
++ "serde",
++ "serde_spanned",
++ "toml_datetime 0.6.11",
++ "toml_write",
++ "winnow 0.7.15",
++]
++
++[[package]]
++name = "toml_edit"
++version = "0.25.17+spec-1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
++dependencies = [
++ "indexmap",
++ "toml_datetime 1.1.2+spec-1.1.0",
+  "toml_parser",
+- "winnow",
++ "winnow 1.0.4",
+ ]
+ 
+ [[package]]
+ name = "toml_parser"
+-version = "1.1.3+spec-1.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
+-dependencies = [
+- "winnow",
+-]
++version = "1.1.5+spec-1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
++dependencies = [
++ "winnow 1.0.4",
++]
++
++[[package]]
++name = "toml_write"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+ 
+ [[package]]
+ name = "typenum"
+@@ -1198,6 +1287,15 @@
+ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+ dependencies = [
+  "windows-link",
++]
++
++[[package]]
++name = "winnow"
++version = "0.7.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
++dependencies = [
++ "memchr",
+ ]
+ 
+ [[package]]
+@@ -1235,9 +1333,9 @@
+ 
+ [[package]]
+ name = "zeroize"
+-version = "1.9.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
++version = "1.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+ dependencies = [
+  "zeroize_derive",
+ ]
+@@ -1258,3 +1356,9 @@
+ version = "0.6.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
++
++[[package]]
++name = "zmij"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+diff --git a/native/src/core/selinux.rs b/native/src/core/selinux.rs
+--- a/native/src/core/selinux.rs
++++ b/native/src/core/selinux.rs
+@@ -1,97 +1,33 @@
+-use crate::consts::{DATABIN, LOG_PIPE, MAGISK_LOG_CON, MAGISKDB, MODULEROOT, SECURE_DIR};
++use crate::consts::{DATABIN, LOG_PIPE, MAGISK_LOG_CON, MAGISK_FILE_CON};
+ use crate::ffi::get_magisk_tmp;
+ use base::{
+-    Directory, FsPathBuilder, LoggedResult, ResultExt, Utf8CStr, Utf8CStrBuf, WalkResult, cstr,
+-    libc, pre_order_walk,
++    FsPathBuilder, LoggedResult, ResultExt, Utf8CStr, WalkResult, cstr, pre_order_walk,
+ };
+-use nix::fcntl::OFlag;
+-use std::io::Write;
+-
+-const UNLABEL_CON: &Utf8CStr = cstr!("u:object_r:unlabeled:s0");
+-const SYSTEM_CON: &Utf8CStr = cstr!("u:object_r:system_file:s0");
+-const ADB_CON: &Utf8CStr = cstr!("u:object_r:adb_data_file:s0");
+-const ROOT_CON: &Utf8CStr = cstr!("u:object_r:rootfs:s0");
+-
+-fn restore_syscon_from_unlabeled(
+-    path: &mut dyn Utf8CStrBuf,
+-    con: &mut dyn Utf8CStrBuf,
+-) -> LoggedResult<()> {
+-    let dir_path_len = path.len();
+-    if path.get_secontext(con).log().is_ok() && con.as_str() == UNLABEL_CON {
+-        path.set_secontext(SYSTEM_CON)?;
+-    }
+-    let mut dir = Directory::open(path)?;
+-    while let Some(ref e) = dir.read()? {
+-        path.truncate(dir_path_len);
+-        path.append_path(e.name());
+-        if e.is_dir() {
+-            restore_syscon_from_unlabeled(path, con)?;
+-        } else if (e.is_file() || e.is_symlink())
+-            && path.get_secontext(con).log().is_ok()
+-            && con.as_str() == UNLABEL_CON
+-        {
+-            path.set_secontext(SYSTEM_CON)?;
+-        }
+-    }
+-    Ok(())
+-}
+-
+-fn restore_syscon(path: &mut dyn Utf8CStrBuf) -> LoggedResult<()> {
+-    let dir_path_len = path.len();
+-    path.set_secontext(SYSTEM_CON)?;
+-    unsafe { libc::lchown(path.as_ptr(), 0, 0) };
+-    let mut dir = Directory::open(path)?;
+-    while let Some(ref e) = dir.read()? {
+-        path.truncate(dir_path_len);
+-        path.append_path(e.name());
+-        if e.is_dir() {
+-            restore_syscon(path)?;
+-        } else if e.is_file() || e.is_symlink() {
+-            path.set_secontext(SYSTEM_CON)?;
+-            unsafe { libc::lchown(path.as_ptr(), 0, 0) };
+-        }
+-    }
+-    Ok(())
+-}
+ 
+ pub(crate) fn restorecon() {
+-    if let Ok(mut file) = cstr!("/sys/fs/selinux/context")
+-        .open(OFlag::O_WRONLY | OFlag::O_CLOEXEC)
+-        .log()
+-        && file.write_all(ADB_CON.as_bytes_with_nul()).is_ok()
+-    {
+-        cstr!(SECURE_DIR).set_secontext(ADB_CON).log_ok();
+-    }
+-
+-    let mut path = cstr::buf::default();
+-    let mut con = cstr::buf::new::<1024>();
+-    path.push_str(MODULEROOT);
+-    path.set_secontext(SYSTEM_CON).log_ok();
+-    restore_syscon_from_unlabeled(&mut path, &mut con).log_ok();
+-
+-    path.clear();
+-    path.push_str(DATABIN);
+-    restore_syscon(&mut path).log_ok();
+-    unsafe { libc::chmod(cstr!(MAGISKDB).as_ptr(), 0o000) };
++    // Effective exports and backing labels belong to egysk-runtime, never a bulk
++    // relabel over shared Android metadata or an active module lower.
++    restore_tmpcon().log_ok();
+ }
+ 
+ pub(crate) fn restore_tmpcon() -> LoggedResult<()> {
+     let tmp = get_magisk_tmp();
+-    if tmp == "/sbin" {
+-        tmp.set_secontext(ROOT_CON)?;
+-    } else {
+-        unsafe { libc::chmod(tmp.as_ptr(), 0o711) };
++    tmp.set_secontext(cstr!(MAGISK_FILE_CON))?;
++    cstr!("/dev/egysk/.egysk").set_secontext(cstr!(MAGISK_FILE_CON))?;
++    for root in [DATABIN, "/dev/egysk/.egysk/device"] {
++        let path = base::Utf8CString::from(root);
++        path.set_secontext(cstr!(MAGISK_FILE_CON))?;
++        pre_order_walk(&path, |_, path| {
++            let context = if path == "/dev/egysk/.egysk/device/log" {
++                cstr!(MAGISK_LOG_CON)
++            } else {
++                cstr!(MAGISK_FILE_CON)
++            };
++            path.set_secontext(context)?;
++            Ok(WalkResult::Continue)
++        })?;
+     }
+-
+-    pre_order_walk(tmp, |e, path| {
+-        if !e.is_symlink() {
+-            path.set_secontext(SYSTEM_CON).log_ok();
+-        }
+-        Ok(WalkResult::Skip)
+-    })?;
+-
+-    let mut path = cstr::buf::default();
+-    path.append_path(tmp).append_path(LOG_PIPE);
++    let path = cstr::buf::default().join_path(tmp).join_path(LOG_PIPE);
+     path.set_secontext(cstr!(MAGISK_LOG_CON))?;
+ 
+     Ok(())
+diff --git a/native/src/sepolicy/policydb.cpp b/native/src/sepolicy/policydb.cpp
+--- a/native/src/sepolicy/policydb.cpp
++++ b/native/src/sepolicy/policydb.cpp
+@@ -104,6 +104,9 @@
+     policy_file_t pf;
+     policy_file_init(&pf);
+     auto fp = xopen_file(file.data(), "re");
++    if (!fp) {
++        return {};
++    }
+     pf.fp = fp.get();
+     pf.type = PF_USE_STDIO;
+ 
+@@ -259,9 +262,9 @@
+     if (struct stat st{}; xfstat(fd, &st) == 0 && st.st_size > 0) {
+         ftruncate(fd, 0);
+     }
+-    xwrite(fd, buf, len);
++    const ssize_t written = xwrite(fd, buf, len);
+ 
+     close(fd);
+     free(buf);
+-    return true;
+-}
++    return written >= 0 && static_cast<size_t>(written) == len;
++}
+diff --git a/native/src/sepolicy/rules.rs b/native/src/sepolicy/rules.rs
+--- a/native/src/sepolicy/rules.rs
++++ b/native/src/sepolicy/rules.rs
+@@ -1,17 +1,10 @@
+ use crate::SePolicy;
+ use crate::consts::{SEPOL_FILE_TYPE, SEPOL_LOG_TYPE, SEPOL_PROC_DOMAIN};
+-use crate::ffi::Xperm;
+ use base::{LogLevel, set_log_level_state};
+ 
+ macro_rules! rules {
+     (@args all) => {
+         vec![]
+-    };
+-    (@args xall) => {
+-        vec![Xperm { low: 0x0000, high: 0xFFFF, reset: false }]
+-    };
+-    (@args svcmgr) => {
+-        vec!["servicemanager", "vndservicemanager", "hwservicemanager"]
+     };
+     (@args [proc]) => {
+         vec![SEPOL_PROC_DOMAIN]
+@@ -53,90 +46,101 @@
+         set_log_level_state(LogLevel::Warn, false);
+         rules! {
+             use self;
+-            // Prevent anything to change sepolicy except ourselves
+-            deny(all, ["kernel"], ["security"], ["load_policy"]);
++            // Product declarations and operation-scoped permissions. Preserve
++            // foreign loaders/rules: no global deny and no permissive domain.
+             type_(proc, ["domain"]);
+-            typeattribute([proc], ["mlstrustedsubject", "netdomain", "appdomain"]);
+             type_(file, ["file_type"]);
+-            typeattribute([file], ["mlstrustedobject"]);
+             type_(log, ["file_type"]);
+-            typeattribute([log], ["mlstrustedobject"]);
+-
+-            // Create unconstrained file type
+-            allow(["domain"], [file],
+-                ["file", "dir", "fifo_file", "chr_file", "lnk_file", "sock_file"], all);
+-
+-            // Only allow zygote to open log pipe
+-            allow(["zygote"], [log], ["fifo_file"], ["open", "read"]);
+-            // Allow all processes to output logs
+-            allow(["domain"], [log], ["fifo_file"], ["write"]);
+-
+-            // Make our root domain unconstrained
+-            allow([proc], [
+-                "fs_type", "dev_type", "file_type", "domain",
+-                "service_manager_type", "hwservice_manager_type", "vndservice_manager_type",
+-                "port_type", "node_type", "property_type"
+-            ], all, all);
+-
+-            // Just in case, make the domain permissive
+-            permissive([proc]);
+-
+-            // Allow us to do any ioctl
+-            allowxperm([proc], ["fs_type", "dev_type", "file_type", "domain"],
+-                ["blk_file", "fifo_file", "chr_file"], xall);
+-            allowxperm([proc], [proc], ["tcp_socket", "udp_socket", "rawip_socket"], xall);
+-
+-            // Let binder work with our processes
+-            allow(svcmgr, [proc], ["dir"], ["search"]);
+-            allow(svcmgr, [proc], ["file"], ["open", "read", "map"]);
+-            allow(svcmgr, [proc], ["process"], ["getattr"]);
+-            allow(["domain"], [proc], ["binder"], ["call", "transfer"]);
+-
+-            // Other common IPC
+-            allow(["domain"], [proc], ["process"], ["sigchld"]);
+-            allow(["domain"], [proc], ["fd"], ["use"]);
+-            allow(["domain"], [proc], ["fifo_file"], ["write", "read", "open", "getattr"]);
+-
+-            // Allow these processes to access MagiskSU and output logs
+-            allow(["zygote", "shell", "platform_app",
+-                "system_app", "priv_app", "untrusted_app", "untrusted_app_all"],
+-                [proc], ["unix_stream_socket"], ["connectto", "getopt"]);
+-
+-            // Let selected domains access tmpfs files
+-            // For tmpfs overlay on 2SI, Zygisk on lower Android versions and AVD scripts
+-            allow(["init", "zygote", "shell"], ["tmpfs"], ["file"], all);
+-
+-            // Allow magiskinit daemon to log to kmsg
+-            allow(["kernel"], ["rootfs", "tmpfs"], ["chr_file"], ["write"]);
+-
+-            // Allow magiskinit daemon to handle mock selinuxfs
+-            allow(["kernel"], ["tmpfs"], ["fifo_file"], ["open", "read", "write"]);
+-
+-            // For relabelling files
+-            allow(["rootfs"], ["labeledfs", "tmpfs"], ["filesystem"], ["associate"]);
+-            allow([file], ["pipefs", "devpts"], ["filesystem"], ["associate"]);
+-            allow(["kernel"], all, ["file"], ["relabelto"]);
+-            allow(["kernel"], ["tmpfs"], ["file"], ["relabelfrom"]);
+-
+-            // Let init transit to SEPOL_PROC_DOMAIN
+-            allow(["kernel"], ["kernel"], ["process"], ["setcurrent"]);
+-            allow(["kernel"], [proc], ["process"], ["dyntransition"]);
+-
+-            // Let init run stuffs
+-            allow(["init"], [proc], ["process"], all);
+-
+-            // Zygisk rules
+-            allow(["zygote"], ["zygote"], ["process"], ["execmem"]);
+-            allow(["domain"], [proc], ["memfd_file"], ["getattr", "read", "write", "map", "execute"]);
+-            allow(["zygote"], ["fs_type"], ["filesystem"], ["unmount"]);
+-            allow(["system_server"], ["system_server"], ["process"], ["execmem"]);
+-
+-            // Shut llkd up
+-            dontaudit(["llkd"], [proc], ["process"], ["ptrace"]);
+-
+-            // Keep /data/adb/* context
+-            deny(["init"], ["adb_data_file"], ["dir"], ["search"]);
+-            deny(["vendor_init"], ["adb_data_file"], ["dir"], ["search"]);
++            allow([SEPOL_FILE_TYPE, SEPOL_LOG_TYPE], ["tmpfs", "labeledfs"], ["filesystem"], ["associate"]);
++            // RC services execute from the nosuid product tmpfs and inherit
++            // init's signal/rlimit state, without granting init worker access.
++            allow(["init"], ["init"], ["process"], ["setcurrent"]);
++            allow(["init"], [proc], ["process"], ["transition", "dyntransition", "sigchld", "getattr", "noatsecure", "rlimitinh", "siginh"]);
++            allow(["init"], [proc], ["process2"], ["nosuid_transition"]);
++            allow(["init"], [file], ["dir"], ["search", "open", "read", "getattr", "write", "add_name", "create", "setattr"]);
++            allow(["init"], [file], ["file"], ["open", "read", "execute", "execute_no_trans", "entrypoint", "map", "getattr", "relabelto"]);
++            // Relabel persisted whiteouts without exposing device I/O.
++            allow(["init"], [file], ["chr_file"], ["getattr", "relabelfrom", "relabelto"]);
++            allow(["init"], [proc], ["unix_stream_socket"], ["connectto"]);
++            allow(["init"], [file], ["sock_file"], ["open", "read", "write", "getattr"]);
++            allow([proc], ["init"], ["fd"], ["use"]);
++            allow([proc], ["init"], ["process"], ["sigchld"]);
++            allow([proc], [proc], ["process"], ["fork", "sigchld", "signal", "sigkill", "getattr", "setcurrent", "dyntransition", "getsched", "setpgid"]);
++            // /proc/self/{mountinfo,exe,fd,attr/current} carries the process SID.
++            allow([proc], [proc], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], [proc], ["file"], ["open", "read", "write", "getattr"]);
++            allow([proc], [proc], ["lnk_file"], ["read", "getattr"]);
++            allow([proc], [proc], ["capability"], ["chown", "dac_override", "dac_read_search", "fowner", "fsetid", "setuid", "setgid", "sys_admin", "sys_chroot", "sys_nice", "mknod", "kill"]);
++            allow([proc], [proc], ["unix_stream_socket"], ["create", "bind", "listen", "accept", "connect", "connectto", "read", "write", "getattr", "setopt", "getopt", "shutdown"]);
++            allow([proc], [proc], ["unix_dgram_socket"], ["create", "connect", "read", "write", "getattr", "setopt", "getopt"]);
++            allow([proc], [proc], ["fd"], ["use"]);
++            allow([proc], [proc], ["fifo_file"], ["create", "open", "read", "write", "getattr", "setattr"]);
++            allow([proc], [file], ["dir"], ["create", "open", "read", "write", "search", "add_name", "remove_name", "getattr", "setattr", "rmdir", "rename", "reparent", "mounton", "relabelto", "relabelfrom"]);
++            allow([proc], [file], ["file"], ["create", "open", "read", "write", "append", "map", "execute", "execute_no_trans", "entrypoint", "getattr", "setattr", "unlink", "rename", "link", "ioctl", "lock", "relabelto", "relabelfrom"]);
++            allow([proc], [file], ["fifo_file"], ["create", "open", "read", "write", "getattr", "setattr", "relabelto", "relabelfrom"]);
++            allow([proc], [file], ["lnk_file"], ["create", "read", "getattr", "setattr", "unlink", "rename", "relabelto", "relabelfrom"]);
++            allow([proc], [file], ["sock_file"], ["create", "open", "read", "write", "getattr", "setattr", "unlink", "relabelto", "relabelfrom"]);
++            // OverlayFS creates, links and removes 0:0 character-device whiteouts.
++            allow([proc], [file], ["chr_file"], ["create", "getattr", "setattr", "unlink", "rename", "link", "relabelfrom", "relabelto"]);
++            allow([proc], [log], ["fifo_file"], ["create", "open", "read", "write", "getattr", "setattr", "unlink", "relabelto", "relabelfrom"]);
++            // Projection must read target attributes and bind module exports at
++            // their original Android contexts, without making those domains egysk.
++            allow([proc], ["file_type"], ["dir"], ["open", "read", "search", "getattr", "mounton"]);
++            allow([proc], ["file_type"], ["file"], ["open", "read", "getattr", "map", "mounton", "relabelto", "relabelfrom"]);
++            // Copy-up and worker entries carry their Android export labels.
++            // Mirrored placeholders are opened read-only; mkdir/clone_attr and
++            // symlink creation must work with arbitrary Android export labels
++            // (CF17: aconfig, perfetto, seccomp and cacerts), not just system_file.
++            // Do not generalize file writes or execution to file_type.
++            allow([proc], ["file_type"], ["dir"], ["create", "write", "add_name", "setattr", "relabelto", "relabelfrom"]);
++            allow([proc], ["file_type"], ["file"], ["create", "setattr"]);
++            allow([proc], ["file_type"], ["lnk_file"], ["create", "setattr"]);
++            allow([proc], ["system_file", "vendor_file"], ["dir"], ["create", "write", "add_name", "remove_name", "setattr", "rmdir", "rename", "relabelto", "relabelfrom"]);
++            allow([proc], ["system_file", "vendor_file"], ["file"], ["create", "write", "append", "setattr", "unlink", "rename", "link", "execute", "execute_no_trans"]);
++            allow([proc], ["system_file", "vendor_file"], ["lnk_file"], ["create", "setattr", "unlink", "rename"]);
++            allow([proc], ["file_type"], ["lnk_file"], ["read", "getattr", "relabelto", "relabelfrom"]);
++            allow([proc], ["system_file", "vendor_file", "shell_exec", "toolbox_exec"], ["file"], ["execute", "execute_no_trans"]);
++            allow([proc], ["tmpfs"], ["dir"], ["create", "open", "read", "write", "search", "getattr", "setattr", "add_name", "remove_name", "mounton", "relabelto", "relabelfrom"]);
++            allow([proc], ["tmpfs"], ["file"], ["create", "open", "read", "write", "getattr", "setattr", "mounton", "relabelto", "relabelfrom"]);
++            allow([proc], ["tmpfs"], ["lnk_file"], ["create", "read", "getattr", "setattr", "relabelto", "relabelfrom"]);
++            allow([proc], ["fs_type"], ["filesystem"], ["mount", "remount", "unmount", "getattr"]);
++            allow([proc], ["rootfs", "tmpfs"], ["filesystem"], ["associate"]);
++            // context=egysk_file labels the efivarfs superblock and its inodes.
++            allow([proc], ["sysfs"], ["dir"], ["mounton"]);
++            allow([proc], ["unlabeled", SEPOL_FILE_TYPE], ["filesystem"], ["relabelfrom"]);
++            allow([proc], [file], ["filesystem"], ["mount", "unmount", "getattr", "relabelto"]);
++            allow([file], [file], ["filesystem"], ["associate"]);
++            allow([proc], ["proc"], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], ["proc"], ["file"], ["open", "read", "getattr"]);
++            // Native detaches from the blocking init client's cgroup before exit.
++            allow([proc], ["cgroup", "cgroup_v2"], ["dir"], ["search", "getattr"]);
++            allow([proc], ["cgroup", "cgroup_v2"], ["file"], ["open", "write", "append", "getattr"]);
++            // Raw ESP content is read before projection/relabeling. No FAT writes.
++            allow([proc], ["vfat"], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], ["vfat"], ["file"], ["open", "read", "getattr"]);
++            // Selected metadata starts unlabeled; create and relabel its
++            // password_slots directory, without allowing unlabeled file writes.
++            allow([proc], ["unlabeled"], ["dir"], ["search", "getattr", "write", "add_name", "create", "setattr", "relabelfrom"]);
++            // Storage discovery reads block topology/dev numbers and /proc/misc.
++            allow([proc], ["sysfs_block", "sysfs_dm", "sysfs_loop", "sysfs_devices_block", "sysfs_zram"], ["dir"], ["search", "open", "read", "getattr"]);
++            allow([proc], ["sysfs_block", "sysfs_dm", "sysfs_loop", "sysfs_devices_block", "sysfs_zram", "sysfs_zram_uevent", "proc_misc", "proc_filesystems"], ["file"], ["open", "read", "getattr"]);
++            allow([proc], ["null_device", "zero_device"], ["chr_file"], ["open", "read", "write", "getattr", "ioctl"]);
++            allow([proc], ["kmsg_device"], ["chr_file"], ["open", "write"]);
++            allow([proc], ["selinuxfs"], ["file"], ["open", "read", "write", "getattr"]);
++            allow([proc], ["kernel"], ["security"], ["load_policy", "read_policy", "compute_av", "check_context"]);
++            allow([proc], ["property_socket"], ["sock_file"], ["write"]);
++            allow([proc], ["init"], ["unix_stream_socket"], ["connectto"]);
++            // Runtime-owned RC gates are egysk.module.*.ready / egysk.stage.*.
++            allow([proc], ["default_prop"], ["property_service"], ["set"]);
++            // Blocking stage dispatch starts/stops only admitted egysk-* services;
++            // property-triggered RC actions alone can trail Android consumers.
++            allow([proc], ["ctl_start_prop", "ctl_stop_prop"], ["property_service"], ["set"]);
++            // resetprop is the staged direct-property tool used by platform modules.
++            allow([proc], ["property_type"], ["file"], ["open", "read", "write", "map", "getattr"]);
++            // resetprop updates the shared serial area as well as property values.
++            allow([proc], ["properties_serial"], ["file"], ["open", "read", "write", "map", "getattr"]);
++            allow([proc], ["logd"], ["unix_dgram_socket"], ["sendto"]);
++            allow([proc], ["logdw_socket"], ["sock_file"], ["write"]);
+         }
+ 
+         #[cfg(any())]

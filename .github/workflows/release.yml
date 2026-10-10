@@ -23,7 +23,7 @@ jobs:
           set -euo pipefail
           mkdir release
           count=0
-          for artifact in kernelsu-esp-native-* kernelsu-esp-rdinit-* ksud-host-*; do
+          for artifact in egysk-native-* egysk-rdinit-* egysk-build-cpio-*; do
             test -d "$artifact"
             tar -C "$artifact" -czf "release/$artifact.tar.gz" .
             count=$((count + 1))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a static rdinit and admitted helper into an exact KMI/architecture set."""
+"""Build a static loader and admitted helper into an exact KMI/architecture set."""
 from __future__ import annotations
 
 import argparse
@@ -64,20 +64,20 @@ def build(args: argparse.Namespace) -> Path:
     env["CARGO_TARGET_DIR"] = str(target)
     subprocess.run([
         "cargo", "build", "--locked", "--manifest-path", str(ROOT / "Cargo.toml"),
-        "--release", "--package", "esuinit", "--target", triple, "--jobs", str(args.jobs),
+        "--release", "--package", "egyskinit", "--target", triple, "--jobs", str(args.jobs),
     ], env=env, check=True, cwd=ROOT)
     subprocess.run([
         "python3", str(ROOT / "scripts/kmi_modules.py"), "build", "--module-dir", str(ROOT / "kernel"),
-        "--module", "kernelsu-esp", "--branch", branch, "--generation", str(args.generation),
+        "--module", "egysk", "--branch", branch, "--generation", str(args.generation),
         "--arch", args.arch, "--kmi-src", str(args.kmi_src.resolve(strict=True)),
         "--kmi-out", str(args.kmi_out.resolve(strict=True)), "--jobs", str(args.jobs),
     ], check=True, cwd=ROOT)
     inputs = {
-        "ksuinit": target / triple / "release/esuinit",
-        "kernelsu-esp.ko": ROOT / "kernel/kernelsu-esp.ko",
-        "kernelsu-esp.ko.compat.json": ROOT / "kernel/kernelsu-esp.ko.compat.json",
+        "egyskinit": target / triple / "release/egyskinit",
+        "egysk.ko": ROOT / "kernel/egysk.ko",
+        "egysk.ko.compat.json": ROOT / "kernel/egysk.ko.compat.json",
     }
-    entry = Elf(inputs["ksuinit"])
+    entry = Elf(inputs["egyskinit"])
     require(entry.kind in (2, 3) and entry.machine == elf_machine, "rdinit: wrong executable architecture")
     address, offset = struct.unpack_from("<QQ", entry.data, 24)
     size, count = struct.unpack_from("<HH", entry.data, 54)
@@ -86,10 +86,10 @@ def build(args: argparse.Namespace) -> Path:
     require(all(segment[0] != 3 for segment in segments), "rdinit: interpreter is forbidden")
     require(any(segment[0] == 1 and segment[1] & 1 and segment[3] <= address < segment[3] + segment[6]
                 for segment in segments), "rdinit: entry is not executable")
-    receipt = json.loads(inputs["kernelsu-esp.ko.compat.json"].read_text())
+    receipt = json.loads(inputs["egysk.ko.compat.json"].read_text())
     if receipt["kmi"] != {"branch": branch, "generation": args.generation}:
         raise ValueError("helper gate returned a different KMI")
-    if receipt["module_sha256"] != digest(inputs["kernelsu-esp.ko"]):
+    if receipt["module_sha256"] != digest(inputs["egysk.ko"]):
         raise ValueError("helper changed after admission")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".core-artifacts-", dir=destination.parent) as temporary:
@@ -97,7 +97,7 @@ def build(args: argparse.Namespace) -> Path:
         staged.mkdir()
         for name, source in inputs.items():
             shutil.copyfile(source, staged / name)
-            (staged / name).chmod(0o755 if name == "ksuinit" else 0o644)
+            (staged / name).chmod(0o755 if name == "egyskinit" else 0o644)
             if digest(staged / name) != digest(source):
                 raise ValueError(f"artifact changed while publishing: {source}")
             with (staged / name).open("rb") as copied:

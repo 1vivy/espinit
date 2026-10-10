@@ -111,16 +111,16 @@ jobs:
           # for x86_64.
           unset CROSS_COMPILE
           export PATH="$LLVM_BIN:$PATH"
-          python3 scripts/kmi_modules.py build --module-dir kernel --module kernelsu-esp \
+          python3 scripts/kmi_modules.py build --module-dir kernel --module egysk \
             --branch "$BRANCH" --generation "$GENERATION" --arch "$KMI_ARCH" \
             --kmi-src "$KMI_SRC" --kmi-out "$KMI_OUT"
           output="release/$BRANCH-$GENERATION/$KMI_ARCH"
           mkdir -p "$output"
-          install -m644 kernel/kernelsu-esp.ko kernel/kernelsu-esp.ko.compat.json "$output/"
-          python3 scripts/kmi_modules.py verify --module "$output/kernelsu-esp.ko" \
+          install -m644 kernel/egysk.ko kernel/egysk.ko.compat.json "$output/"
+          python3 scripts/kmi_modules.py verify --module "$output/egysk.ko" \
             --branch "$BRANCH" --generation "$GENERATION" --arch "$KMI_ARCH" --kmi-out "$KMI_OUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: kernelsu-esp-ddk-${{ inputs.branch }}-${{ inputs.generation }}-${{ matrix.arch }}
+          name: egysk-ddk-${{ inputs.branch }}-${{ inputs.generation }}-${{ matrix.arch }}
           path: release/
           if-no-files-found: error

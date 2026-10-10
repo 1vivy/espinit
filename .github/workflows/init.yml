@@ -1,4 +1,4 @@
-name: Build static ESP rdinit
+name: Build static Egysk loader
 on:
   workflow_call:
 
@@ -34,11 +34,11 @@ jobs:
           BUILTINS="$($CLANG_PATH --print-resource-dir)/lib/linux/libclang_rt.builtins-${{ matrix.arch }}-android.a"
           test -f "$BUILTINS"
           export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wno-unused-command-line-argument -C link-arg=$BUILTINS"
-          cargo build --locked --package esuinit --target '${{ matrix.target }}' --release
+          cargo build --locked --package egyskinit --target '${{ matrix.target }}' --release
           mkdir -p 'out/rdinit/${{ matrix.arch }}'
-          cp 'target/${{ matrix.target }}/release/esuinit' 'out/rdinit/${{ matrix.arch }}/ksuinit'
+          cp 'target/${{ matrix.target }}/release/egyskinit' 'out/rdinit/${{ matrix.arch }}/egyskinit'
       - uses: actions/upload-artifact@v7
         with:
-          name: kernelsu-esp-rdinit-${{ matrix.arch }}
-          path: out/rdinit/${{ matrix.arch }}/ksuinit
+          name: egysk-rdinit-${{ matrix.arch }}
+          path: out/rdinit/${{ matrix.arch }}/egyskinit
           if-no-files-found: error

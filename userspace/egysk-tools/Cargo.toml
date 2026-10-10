@@ -1,0 +1,23 @@
+[package]
+name = "egysk-tools"
+version = "0.1.0"
+edition.workspace = true
+license = "GPL-3.0-only"
+description = "Standalone Egysk archive builder"
+
+[[bin]]
+name = "egysk-build-cpio"
+path = "src/main.rs"
+
+[dependencies]
+android-bootimg = { git = "https://github.com/5ec1cff/android_bootimg", rev = "150425b027c76ea104c82e408571651f2181b2c2" }
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+egysk-runtime = { path = "../egysk-runtime" }
+goblin = "0.10"
+libc.workspace = true
+lz4 = "1.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"

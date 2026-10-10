@@ -18,7 +18,7 @@ permissions:
   contents: read
 jobs:
   artifacts:
-    runs-on: [self-hosted, linux, x64, kernelsu-esp-kmi]
+    runs-on: [self-hosted, linux, x64, egysk-kmi]
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +83,6 @@ jobs:
             --ndk "$NDK" --output "$RELEASE_DIR"
       - uses: actions/upload-artifact@v7
         with:
-          name: kernelsu-esp-kmi-${{ matrix.branch }}-${{ matrix.arch }}
+          name: egysk-kmi-${{ matrix.branch }}-${{ matrix.arch }}
           path: ${{ env.RELEASE_DIR }}/
           if-no-files-found: error

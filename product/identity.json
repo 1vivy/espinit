@@ -1,0 +1,13 @@
+{
+  "APP_PACKAGE_NAME": "org.egysk.no_manager",
+  "LOGFILE": "/dev/egysk/store/egysk.log",
+  "SECURE_DIR": "/dev/egysk/store",
+  "MODULEROOT": "/dev/egysk/modules",
+  "DATABIN": "/dev/egysk/bin",
+  "MAGISKDB": "/dev/egysk/store/state.db",
+  "INTERNAL_DIR": ".egysk",
+  "SEPOL_PROC_DOMAIN": "egysk",
+  "SEPOL_FILE_TYPE": "egysk_file",
+  "SEPOL_LOG_TYPE": "egysk_log_file",
+  "EGYSK_PRODUCT": true
+}

@@ -40,7 +40,7 @@ static void reset_avc_cache()
 }
 
 /* Only the declarations and init handoff needed before bootstrap policy.
- * Never make esp permissive or grant wildcard access to other domains.
+ * Never make egysk permissive or grant wildcard access to other domains.
  */
 int apply_kernelsu_rules(void)
 {
@@ -64,10 +64,10 @@ int apply_kernelsu_rules(void)
         !ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject") ||
         !ksu_type(db, KERNEL_SU_FILE, "file_type") ||
         !ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject") ||
-        !ksu_type(db, "esp_log_file", "file_type") ||
+        !ksu_type(db, "egysk_log_file", "file_type") ||
         !ksu_allow(db, "init", "device", "dir", "relabelfrom") ||
         !ksu_allow(db, KERNEL_SU_FILE, "tmpfs", "filesystem", "associate") ||
-        !ksu_allow(db, "esp_log_file", "tmpfs", "filesystem", "associate") ||
+        !ksu_allow(db, "egysk_log_file", "tmpfs", "filesystem", "associate") ||
         !ksu_allow(db, "init", "kernel", "security", "load_policy") ||
         !ksu_allow(db, "init", "toolbox_exec", "file", "execute_no_trans") ||
         !ksu_allow(db, "init", "block_device", "blk_file", "create") ||
@@ -104,7 +104,7 @@ int apply_kernelsu_rules(void)
         !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "relabelto") ||
         !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "relabelfrom") ||
         !ksu_allow(db, "init", KERNEL_SU_FILE, "lnk_file", "unlink") ||
-        !ksu_allow(db, "init", "esp_log_file", "file", "relabelto") ||
+        !ksu_allow(db, "init", "egysk_log_file", "file", "relabelto") ||
         !ksu_allow(db, "init", KERNEL_SU_DOMAIN, "process", "transition") ||
         !ksu_allow(db, KERNEL_SU_DOMAIN, "init", "fd", "use") ||
         !ksu_allow(db, KERNEL_SU_DOMAIN, "init", "process", "sigchld") ||
@@ -136,7 +136,7 @@ int apply_kernelsu_rules(void)
 out_unlock:
     mutex_unlock(&selinux_state.policy_mutex);
     if (ret)
-        pr_err("kernelsu-esp base policy failed: %d\n", ret);
+        pr_err("egysk base policy failed: %d\n", ret);
     return ret;
 }
 

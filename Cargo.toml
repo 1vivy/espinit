@@ -1,13 +1,13 @@
 [workspace]
 members = [
-    "userspace/esp-tools",
-    "userspace/esp-runtime",
-    "userspace/esuinit",
+    "userspace/egysk-tools",
+    "userspace/egysk-runtime",
+    "userspace/egyskinit",
 ]
 default-members = [
-    "userspace/esp-tools",
-    "userspace/esp-runtime",
-    "userspace/esuinit",
+    "userspace/egysk-tools",
+    "userspace/egysk-runtime",
+    "userspace/egyskinit",
 ]
 resolver = "3"
 exclude = ["out", "vendor"]
