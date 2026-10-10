@@ -231,8 +231,10 @@ provisioning commands; it is not another product-root migration engine.
 - Runtime preparation disables vold's global metadata-key deletion and binds
   the shared slot map before vold. The pinned Gatekeeper patch removes global
   cold-boot `deleteAllUsers`, retaining per-user cleanup. Early preparation
-  verifies the projected daemon's protocol and publishes its read-only namespace
-  handoff; post-fs-data rechecks these before Gatekeeper's late-start service.
+  publishes the read-only namespace handoff. Post-fs-data rechecks shared state
+  and executes the projected `/system/bin/gatekeeperd` protocol query in Android's
+  system linker namespace before Gatekeeper's late-start service. Unprojected
+  `/dev` paths do not provide that dependency closure.
   A `.coldboot` marker alone is not sufficient proof.
 - Independent thin retains the owned `dm-thin-pool` / `dm_thin_pool` fork,
   target versions and suspend/resume/gate behavior. One pinned `lvm2` recipe owns
