@@ -19,7 +19,6 @@ static long __nocfi direct_execveat(const struct pt_regs *regs)
     return ksu_hook_execveat(READ_ONCE(original_execveat), regs);
 }
 
-
 int __init ksu_syscall_hook_manager_init(void)
 {
     int ret;

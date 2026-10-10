@@ -5,7 +5,6 @@
 #include <linux/types.h>
 #include <linux/compiler_types.h>
 
-
 int egysk_init_integration_init(void);
 void egysk_init_integration_exit();
 /* Admit one immutable, at-most-64KiB prefix for PID1's first init.rc stream.

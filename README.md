@@ -39,10 +39,13 @@ were recovered from main revisions `e985dfac4fea73751f5ef3865cdcc4122c8a4eb3`
 (`retired/kernelsu-esp-modules`) and `75af27f5b2d79c2f11721069f8d1f739c4ac9f36`
 (`retired/kernelsu-esp-lkms`). Upstream KernelSU history, licenses and the pinned
 Magisk submodule are preserved. Hosted names/privacy and the local move are
-verified. Both private histories and the public core/gobbl integration commits
+verified. Both private split histories and the core/gobbl integration commits
 have been pushed with owner authorization, including their existing ancestry.
 Fresh mirrors of all four published main branches matched local commits,
 reachable object sets and complete trees; restored object integrity checks passed.
+Gobbl remains private. The owner selected local dependency builds instead of
+cross-repository CI credentials; the modules hosted Rust lane cannot fetch that
+private dependency with its repository-local token.
 
 ## Boot and storage contract
 
@@ -401,6 +404,8 @@ cargo fmt --all
 cargo test --workspace --locked --offline
 python3 -m unittest scripts.test_kmi_modules
 ```
+
+The kernel formatting gate uses clang-format 18.1.8, pinned in CI.
 
 Exercise produced archives and real module operations, not just schemas or
 compiler exits. The generation-6 x86_64 row is admitted against the supplied CF

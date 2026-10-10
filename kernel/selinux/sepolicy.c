@@ -957,8 +957,7 @@ static int serialize_policy(struct policydb *db, void **buffer, size_t *length)
         }
         config_ptr = (__le32 *)((char *)data + config_offset);
         config = le32_to_cpu(*config_ptr);
-        config &= ~(POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE |
-                    POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH);
+        config &= ~(POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE | POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH);
         if (db->android_netlink_route)
             config |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
         if (db->android_netlink_getneigh)
@@ -996,15 +995,13 @@ int ksu_get_sepolicy(void __user *arg)
     if (copy_from_user(&cmd, arg, sizeof(cmd)))
         return -EFAULT;
     query = !cmd.ptr && !cmd.len;
-    if (!query && (!cmd.ptr || !cmd.len || cmd.len > EGYSK_POLICY_MAX_SIZE ||
-                   cmd.ptr != (unsigned long)cmd.ptr))
+    if (!query && (!cmd.ptr || !cmd.len || cmd.len > EGYSK_POLICY_MAX_SIZE || cmd.ptr != (unsigned long)cmd.ptr))
         return -EINVAL;
     if (!query && !access_ok(u64_to_user_ptr(cmd.ptr), (size_t)cmd.len))
         return -EFAULT;
 
     mutex_lock(&selinux_state.policy_mutex);
-    pol = rcu_dereference_protected(selinux_state.policy,
-                                   lockdep_is_held(&selinux_state.policy_mutex));
+    pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
     if (!pol) {
         ret = -EAGAIN;
         goto out_unlock;

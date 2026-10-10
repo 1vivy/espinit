@@ -59,7 +59,6 @@ __attribute__((naked)) int __init egysk_init_early(void)
 #define NEED_OWN_STACKPROTECTOR 0
 #endif
 
-
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
@@ -101,12 +100,10 @@ int __init egysk_init(void)
     pr_alert("*************************************************************");
 #endif
 
-
     ksu_init_symbol_resolver();
     /* Supporting state must survive a failed installation if any callback
      * has been exposed to another owner's saved-original chain.
      */
-
 
     ret = ksu_supercalls_init();
     if (ret)
@@ -158,7 +155,6 @@ void __exit egysk_exit(void)
 
     // Wait for any in-flight RCU readers
     synchronize_rcu();
-
 }
 
 #if NEED_OWN_STACKPROTECTOR

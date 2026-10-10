@@ -72,6 +72,5 @@ void __init ksu_supercall_dump_commands(void)
     unsigned int i;
 
     for (i = 0; i < ARRAY_SIZE(ksu_ioctl_handlers); i++)
-        pr_info("egysk %-18s = 0x%08x\n", ksu_ioctl_handlers[i].name,
-                ksu_ioctl_handlers[i].cmd);
+        pr_info("egysk %-18s = 0x%08x\n", ksu_ioctl_handlers[i].name, ksu_ioctl_handlers[i].cmd);
 }

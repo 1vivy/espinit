@@ -60,7 +60,6 @@ static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
     return native;
 }
 
-
 static bool check_argv(struct user_arg_ptr argv, int index, const char *expected, char *buf, size_t buf_len)
 {
     const char __user *p;
@@ -82,7 +81,6 @@ fail:
 
 void egysk_observe_second_stage(const char *path, struct user_arg_ptr *argv)
 {
-
     // https://cs.android.com/android/platform/superproject/+/android-16.0.0_r2:system/core/init/main.cpp;l=77
     if (current->pid == 1 && !strcmp(path, "/system/bin/init") && argv) {
         char buf[16];
@@ -91,7 +89,6 @@ void egysk_observe_second_stage(const char *path, struct user_arg_ptr *argv)
             egysk_stop_init_execve_hook();
         }
     }
-
 }
 
 #endif
@@ -204,8 +201,7 @@ static ssize_t read_iter_proxy(struct kiocb *iocb, struct iov_iter *to)
         return 0;
     mutex_lock(&module_rc_lock);
     if (module_rc_pos < module_rc_len) {
-        copied = copy_to_iter(module_rc_buf + module_rc_pos,
-                              module_rc_len - module_rc_pos, to);
+        copied = copy_to_iter(module_rc_buf + module_rc_pos, module_rc_len - module_rc_pos, to);
         module_rc_pos += copied;
         mutex_unlock(&module_rc_lock);
         return copied ? (ssize_t)copied : -EFAULT;
@@ -309,7 +305,6 @@ static int ksu_handle_sys_read(unsigned int fd)
     fput(file);
     return ret;
 }
-
 
 static void egysk_init_execve_hook_common(const char __user *filename_user, const char __user *const __user *argv_user)
 {

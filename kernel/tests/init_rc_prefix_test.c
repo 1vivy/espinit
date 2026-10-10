@@ -21,14 +21,35 @@
 #define DEFINE_MUTEX(name) int name
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define kvfree free
-static void mutex_lock(int *lock) { assert(!*lock); *lock = 1; }
-static void mutex_unlock(int *lock) { assert(*lock); *lock = 0; }
-struct inode { int unused; };
+static void mutex_lock(int *lock)
+{
+    assert(!*lock);
+    *lock = 1;
+}
+static void mutex_unlock(int *lock)
+{
+    assert(*lock);
+    *lock = 0;
+}
+struct inode {
+    int unused;
+};
 struct file;
-struct file_operations { int (*release)(struct inode *, struct file *); };
-struct file { const struct file_operations *f_op; };
-struct kiocb { struct file *ki_filp; loff_t ki_pos; };
-struct iov_iter { char *base[2]; size_t len[2]; size_t index, offset; };
+struct file_operations {
+    int (*release)(struct inode *, struct file *);
+};
+struct file {
+    const struct file_operations *f_op;
+};
+struct kiocb {
+    struct file *ki_filp;
+    loff_t ki_pos;
+};
+struct iov_iter {
+    char *base[2];
+    size_t len[2];
+    size_t index, offset;
+};
 static size_t copy_budget = (size_t)-1;
 static size_t copy_to_user(char *to, const char *from, size_t count)
 {
@@ -50,7 +71,8 @@ static size_t copy_to_iter(const char *from, size_t count, struct iov_iter *to)
     while (to->index < 2 && done < count && copy_budget) {
         size_t n = min(count - done, to->len[to->index] - to->offset);
         n = min(n, copy_budget);
-        if (n) memcpy(to->base[to->index] + to->offset, from + done, n);
+        if (n)
+            memcpy(to->base[to->index] + to->offset, from + done, n);
         to->offset += n;
         done += n;
         copy_budget -= n;
@@ -72,7 +94,8 @@ static ssize_t backing_read(struct file *file, char *buf, size_t count, loff_t *
     size_t n;
     (void)file;
     backing_calls++;
-    if (backing_error) return backing_error;
+    if (backing_error)
+        return backing_error;
     n = min(count, sizeof(stock) - 1 - (size_t)*pos);
     memcpy(buf, stock + *pos, n);
     *pos += n;
@@ -82,9 +105,9 @@ static ssize_t backing_iter(struct kiocb *iocb, struct iov_iter *to)
 {
     size_t n;
     backing_calls++;
-    if (backing_error) return backing_error;
-    n = copy_to_iter(stock + iocb->ki_pos,
-                     sizeof(stock) - 1 - (size_t)iocb->ki_pos, to);
+    if (backing_error)
+        return backing_error;
+    n = copy_to_iter(stock + iocb->ki_pos, sizeof(stock) - 1 - (size_t)iocb->ki_pos, to);
     iocb->ki_pos += n;
     return n;
 }
@@ -116,10 +139,10 @@ int main(void)
     struct file file = { .f_op = &fops_proxy };
     struct kiocb iocb = { .ki_filp = &file };
     loff_t pos = 0;
-    char out[128] = {0};
+    char out[128] = { 0 };
     size_t total = 0, i;
     ssize_t n;
-    struct iov_iter to = { .base = {out, out + 2}, .len = {2, 7} };
+    struct iov_iter to = { .base = { out, out + 2 }, .len = { 2, 7 } };
     orig_fops = &original;
 
     setup(7);
@@ -132,7 +155,8 @@ int main(void)
     assert(read_proxy(&file, out, 7, &pos) == 3);
     assert(module_rc_pos == 3 && !pos && !backing_calls);
     copy_budget = (size_t)-1;
-    while ((n = read_proxy(&file, out + total, 2, &pos)) > 0) total += n;
+    while ((n = read_proxy(&file, out + total, 2, &pos)) > 0)
+        total += n;
     assert(n == 0 && total == 4 + sizeof(stock) - 1);
     assert(!memcmp(out, "PPPP", 4));
     assert(!memcmp(out + 4, stock, sizeof(stock) - 1));
@@ -145,7 +169,8 @@ int main(void)
     setup(7);
     to.len[0] = to.len[1] = 0;
     assert(read_iter_proxy(&iocb, &to) == 0 && !module_rc_pos);
-    to.len[0] = 2; to.len[1] = 7;
+    to.len[0] = 2;
+    to.len[1] = 7;
     copy_budget = 0;
     assert(read_iter_proxy(&iocb, &to) == -EFAULT && !module_rc_pos);
     copy_budget = 3;
@@ -158,15 +183,13 @@ int main(void)
     assert(!memcmp(out, "PPPPPPP", 7) && !memcmp(out + 7, stock, 2));
     total = 9;
     while (iocb.ki_pos < (loff_t)(sizeof(stock) - 1)) {
-        struct iov_iter rest = {
-            .base = {out + total, out + total + 1}, .len = {1, 2}
-        };
+        struct iov_iter rest = { .base = { out + total, out + total + 1 }, .len = { 1, 2 } };
         n = read_iter_proxy(&iocb, &rest);
         assert(n > 0);
         total += n;
     }
     {
-        struct iov_iter eof = { .base = {out + total, NULL}, .len = {1, 0} };
+        struct iov_iter eof = { .base = { out + total, NULL }, .len = { 1, 0 } };
         assert(read_iter_proxy(&iocb, &eof) == 0);
         backing_error = -EIO;
         assert(read_iter_proxy(&iocb, &eof) == -EIO);

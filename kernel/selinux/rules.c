@@ -15,7 +15,6 @@
 #include "linux/lsm_audit.h" // IWYU pragma: keep
 #include "xfrm.h"
 
-
 #define ALL NULL
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
@@ -60,25 +59,18 @@ int apply_kernelsu_rules(void)
         goto out_unlock;
     }
     db = &pol->policydb;
-    if (!ksu_type(db, KERNEL_SU_DOMAIN, "domain") ||
-        !ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject") ||
-        !ksu_type(db, KERNEL_SU_FILE, "file_type") ||
-        !ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject") ||
-        !ksu_type(db, "egysk_log_file", "file_type") ||
-        !ksu_allow(db, "init", "device", "dir", "relabelfrom") ||
+    if (!ksu_type(db, KERNEL_SU_DOMAIN, "domain") || !ksu_typeattribute(db, KERNEL_SU_DOMAIN, "mlstrustedsubject") ||
+        !ksu_type(db, KERNEL_SU_FILE, "file_type") || !ksu_typeattribute(db, KERNEL_SU_FILE, "mlstrustedobject") ||
+        !ksu_type(db, "egysk_log_file", "file_type") || !ksu_allow(db, "init", "device", "dir", "relabelfrom") ||
         !ksu_allow(db, KERNEL_SU_FILE, "tmpfs", "filesystem", "associate") ||
         !ksu_allow(db, "egysk_log_file", "tmpfs", "filesystem", "associate") ||
         !ksu_allow(db, "init", "kernel", "security", "load_policy") ||
         !ksu_allow(db, "init", "toolbox_exec", "file", "execute_no_trans") ||
         !ksu_allow(db, "init", "block_device", "blk_file", "create") ||
-        !ksu_allow(db, "init", "vfat", "dir", "getattr") ||
-        !ksu_allow(db, "init", "vfat", "dir", "open") ||
-        !ksu_allow(db, "init", "vfat", "dir", "read") ||
-        !ksu_allow(db, "init", "vfat", "dir", "search") ||
-        !ksu_allow(db, "init", "vfat", "file", "getattr") ||
-        !ksu_allow(db, "init", "vfat", "file", "open") ||
-        !ksu_allow(db, "init", "vfat", "file", "read") ||
-        !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "relabelto") ||
+        !ksu_allow(db, "init", "vfat", "dir", "getattr") || !ksu_allow(db, "init", "vfat", "dir", "open") ||
+        !ksu_allow(db, "init", "vfat", "dir", "read") || !ksu_allow(db, "init", "vfat", "dir", "search") ||
+        !ksu_allow(db, "init", "vfat", "file", "getattr") || !ksu_allow(db, "init", "vfat", "file", "open") ||
+        !ksu_allow(db, "init", "vfat", "file", "read") || !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "relabelto") ||
         !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "relabelfrom") ||
         !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "execute_no_trans") ||
         !ksu_allow(db, "init", KERNEL_SU_FILE, "file", "create") ||

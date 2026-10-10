@@ -78,7 +78,6 @@ Elf64_Shdr *find_symtab(ElfFile *elf)
     return NULL;
 }
 
-
 Elf64_Sym *find_symbol(ElfFile *elf, const char *name, Elf64_Shdr *symtab, char *strtab)
 {
     Elf64_Sym *syms = (Elf64_Sym *)((char *)elf->data + symtab->sh_offset);
@@ -130,7 +129,6 @@ int main(int argc, char *argv[])
         close_elf(&vmlinux);
         return 1;
     }
-
 
     char *ko_strtab = (char *)ko_elf.data + ko_elf.shdr[ko_symtab->sh_link].sh_offset;
     char *vmlinux_strtab = (char *)vmlinux.data + vmlinux.shdr[vmlinux_symtab->sh_link].sh_offset;

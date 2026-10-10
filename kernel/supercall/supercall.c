@@ -85,8 +85,7 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
     int magic1 = (int)PT_REGS_SYSCALL_PARM1(real_regs);
     int magic2 = (int)PT_REGS_PARM2(real_regs);
 
-    if (magic1 == EGYSK_INSTALL_MAGIC1 && magic2 == EGYSK_INSTALL_MAGIC2 &&
-        uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
+    if (magic1 == EGYSK_INSTALL_MAGIC1 && magic2 == EGYSK_INSTALL_MAGIC2 && uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
         struct ksu_install_fd_tw *tw;
         unsigned long arg4 = (unsigned long)PT_REGS_SYSCALL_PARM4(real_regs);
 
